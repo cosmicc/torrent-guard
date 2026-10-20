@@ -2,108 +2,126 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**Version 0.1**. A lightweight Python (standard-library only) and Docker Compose service that detects suspicious movie/TV torrents downloaded by Sonarr or Radarr via qBittorrent.
+**v0.2** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
 
-It examines **torrent file metadata** rather than executing any file. A suspicious release can be stopped, blocklisted in the relevant Arr app, removed from qBittorrent **with all qBittorrent-tracked downloaded data**, and retried by Sonarr/Radarr according to those apps' settings.
+Torrent Guard is a background service that examines new and completed movie/TV torrents and cleans up imported releases. It uses **qBittorrent's Web API** and **Sonarr/Radarr's v3 APIs**; no qBittorrent “Run external program on torrent completion” hook is required.
 
-## Detection and cleanup
+## What it does
 
-- Poll qBittorrent every 5 seconds by default, waiting until magnet metadata is available.
-- Inspect every filename in the torrent for `.exe`, `.scr`, `.msi`, `.bat`, `.cmd`, `.ps1`, `.vbs`, `.js`, `.lnk`, `.jar`, and other risky extensions. Case-insensitive; a valid `.mkv` alongside an `.exe` is **still rejected**.
-- Optionally reject torrents with **no recognized video file** (enabled by default). This deliberately rejects archives that have not yet been unpacked. Disable with `REJECT_NO_VIDEO=false` if you deliberately download RAR-based releases.
-- Only consider torrents assigned to the exact qBittorrent categories specified for Sonarr/Radarr, and only inspect newly added torrents by default (24h). Do not use these categories for manual/non-media torrents.
-- In active mode: **stop torrent → find matching Arr queue item → blocklist without letting Arr delete the client entry → call qBittorrent `/api/v2/torrents/delete` with `deleteFiles=true` → verify torrent disappears**. State is journaled in SQLite and survives restarts.
-- In dry-run mode (the default), log the detection and take **no destructive action**.
+1. **On metadata arrival:** Inspect every selected file in fresh torrents. Reject dangerous extensions (`.exe`, `.scr`, `.bat`, `.ps1`, `.js`, `.lnk`, etc.), even when another file looks like a video; reject releases that lack a video file (configurable). A rejected torrent is stopped, its release is blocklisted using the matching Arr queue item, then qBittorrent is instructed to **delete the torrent and all qBittorrent-tracked payloads** with `deleteFiles=true`.
+2. **When complete:** Reinspect eligible movie/TV torrents **regardless of their initial age**. Validate downloaded videos using `ffprobe` against the actual media files via a read-only Docker bind mount. Invalid videos are handled as bad releases (stop, blocklist, remove and delete torrent data). Valid releases are left alone until Arr confirms import.
+3. **After successful Arr import + 10 minutes:** Require a matching Sonarr/Radarr `downloadFolderImported` history event for the **same infohash**, dated after this torrent was added and at least 10 minutes ago. For multi-video downloads, require a matching import record for every selected video file. Then instruct qBittorrent to delete the torrent and its tracked downloaded files (but **never** blocklist a successful release).
+4. **Audit every decision:** Timestamped accepted/rejected/cleanup messages, warnings and errors go to both Docker logs and `/state/torrent-guard.log` with rotation. A SQLite journal survives restarts and retries unfinished deletes.
 
-**Deletion scope:** The `deleteFiles=true` flag is the qBittorrent-supported mechanism to delete the torrent **and its associated tracked download files**. Torrent Guard does not need filesystem access. qBittorrent controls exactly which files it removes; orphaned/untracked files and files copied/imported elsewhere cannot be guaranteed to be deleted. The guard verifies that the torrent is gone, not that every pathname has vanished from disk. If the Arr queue entry is missing, the guard stops and retains the torrent, avoiding untracked/unblocklisted deletion.
+Torrent eligibility is based on your configured qBittorrent **categories** and/or optional tags such as `movies` and `tv`. The category and tag must not disagree on whether Sonarr or Radarr owns the torrent. Other torrents are skipped. No Docker socket access and no writable media mounts are required.
 
-## Docker Compose (media-manager server)
-
-Requirements: Docker Engine + Compose plugin, qBittorrent WebUI/API, Sonarr and/or Radarr, and host-published ports reachable from the guard container. **No download directory or Docker socket mounts.**
+## Install on the media-manager Docker host
 
 ```bash
+# Create or use the project directory
 git clone https://github.com/cosmicc/torrent-guard.git
 cd torrent-guard
 cp .env.example .env
 chmod 600 .env
 nano .env
-# Edit qBittorrent URL/login; Arr URLs/keys and exact download categories.
+```
+
+Set the qBittorrent host/credentials and each *Arr API URL/key/category. Common Docker host-published port values are 8080, 8989 and 7878. `host.docker.internal` is mapped by Compose to the Linux Docker host gateway. If services only have private Docker ports, instead join the guard container to their external Docker network and use service names.
+
+**Important: set the download path mapping accurately.** Example:
+
+| Path setting | Value | Meaning |
+|---|---|---|
+| `DOWNLOADS_HOST_PATH` | `/srv/media/downloads` | Actual host directory storing qBittorrent downloads; mounted into Guard read-only |
+| `QBIT_DOWNLOAD_ROOT` | `/downloads` | The **same** root as seen **inside qBittorrent** (or on host if not containerized) |
+| `GUARD_DOWNLOAD_ROOT` | `/downloads` | Path **inside Torrent Guard**, provided by the Compose mount |
+
+If qBittorrent sees `/data/torrents` while the host sees `/srv/media/downloads`, use `QBIT_DOWNLOAD_ROOT=/data/torrents` and `DOWNLOADS_HOST_PATH=/srv/media/downloads`. The file paths are mapped relatively; e.g. qBittorrent save path `/data/torrents/movies` with file `Film.mkv` maps to Guard `/downloads/movies/Film.mkv`. The container runs as UID/GID 65534; this user must be able to traverse directories and **read** the video files. **No write permission** is necessary.
+
+By default Compose **requires** `DOWNLOADS_HOST_PATH`: if omitted, it refuses deployment rather than running incomplete verification. Read-only bind mounting the location does not grant Torrent Guard the ability to delete local media; deletion is carried out by the qBittorrent API.
+
+Start in report-only mode:
+
+```bash
 docker compose up -d --build
 docker compose logs -f torrent-guard
 ```
 
-The bundled Compose file uses `host.docker.internal:host-gateway` to connect from a Linux container to **host-published** ports on the same Docker server. If the apps only expose container-private ports, join a shared external Docker network and use their DNS names instead. There are no inbound listening ports for Torrent Guard.
+In dry-run mode (`DRY_RUN=true`) no torrent is stopped, blocklisted or deleted. Review the `ACCEPT metadata`, `ACCEPT completed`, `REJECT candidate`, `DRY RUN`, `DEFER validation`, `WAIT import` (DEBUG) and ERROR messages. Verify the actual media paths are readable and that Arr import-history matches work.
 
-Keep `DRY_RUN=true` until you've reviewed detection logs. To enable deletion, edit `.env` to `DRY_RUN=false`, then:
+When ready to allow cleanup, change `.env` to `DRY_RUN=false` and recreate:
 
 ```bash
 docker compose up -d --force-recreate
 docker compose logs -f torrent-guard
 ```
 
-Stop/update:
+View persistent logs:
 
 ```bash
-docker compose down              # retains the named SQLite state volume
+docker compose exec torrent-guard tail -n 100 /state/torrent-guard.log
+```
+
+### Upgrade from v0.1
+
+```bash
+cd torrent-guard
 git pull --ff-only
+# Compare .env.example to your existing .env; DO NOT overwrite real credentials.
+# Add DOWNLOADS_HOST_PATH, QBIT_DOWNLOAD_ROOT and new options before restarting.
 docker compose up -d --build
 ```
 
-**Do not run `docker compose down -v`** unless you intentionally want to erase the pending-cleanup journal. The volume is writable by the unprivileged container user and is the only persisted data.
+The existing `torrent-guard-state` volume is compatible; the SQLite journal is migrated in place. Do **not** run `docker compose down -v` or erase `/state`: it contains the retry journal and audit log.
 
 ## Configuration
 
-| Variable | Purpose | Default |
+| Variable | Default | Meaning |
 |---|---|---|
-| `QBIT_URL`, `QBIT_USERNAME`, `QBIT_PASSWORD` | qBittorrent HTTP API URL and credentials | required |
-| `SONARR_URL`, `SONARR_API_KEY`, `SONARR_CATEGORY` | Sonarr URL/key and **exact** qBittorrent category | group optional |
-| `RADARR_URL`, `RADARR_API_KEY`, `RADARR_CATEGORY` | Radarr URL/key and **exact** qBittorrent category | group optional |
-| `DRY_RUN` | Report-only if true; active deletion if false | `true` |
-| `POLL_SECONDS` | Check interval (min 2) | `5` |
-| `MAX_AGE_HOURS` | Only **newly inspect** torrents no older than this (pending cleanup continues regardless) | `24` |
-| `REJECT_NO_VIDEO` | Reject metadata listing no video file | `true` |
-| `STATE_DB` | SQLite journal path | `/state/torrent-guard.sqlite3` |
-| `LOG_LEVEL` | `INFO`, `DEBUG`, etc. | `INFO` |
+| `QBIT_URL`, `QBIT_USERNAME`, `QBIT_PASSWORD` | required | qBittorrent WebUI API endpoint and login |
+| `SONARR_URL`, `SONARR_API_KEY`, `SONARR_CATEGORY` | optional group | Sonarr connection and exact qBittorrent category |
+| `RADARR_URL`, `RADARR_API_KEY`, `RADARR_CATEGORY` | optional group | Radarr connection and exact qBittorrent category |
+| `SONARR_TAG`, `RADARR_TAG` | `tv`, `movies` in template | Optional matching qBittorrent tag, independently of category |
+| `DOWNLOADS_HOST_PATH` | **must set** | Host directory mounted at `/downloads:ro` in Compose |
+| `QBIT_DOWNLOAD_ROOT` | `/downloads` | Equivalent download root inside qBittorrent; change when qBittorrent uses another container path |
+| `GUARD_DOWNLOAD_ROOT` | `/downloads` | Corresponding path inside Guard; normally unchanged |
+| `VERIFY_VIDEO_CONTENT` | `true` | Use ffprobe on **all selected** video files when a torrent completes |
+| `FFPROBE_TIMEOUT_SECONDS` | `30` | Timeout for each ffprobe invocation |
+| `COMPLETED_SETTLE_SECONDS` | `60` | Allow completed files to settle before checking video streams |
+| `DRY_RUN` | `true` | Log what would be done, without changing any torrents |
+| `POLL_SECONDS` | `5` | qBittorrent scan interval (min 2 s) |
+| `MAX_AGE_HOURS` | `24` | New torrent early filename inspection age (completed downloads are always eligible) |
+| `REJECT_NO_VIDEO` | `true` | Reject a selected file list without recognized video extensions |
+| `IMPORT_GRACE_MINUTES` | `10` | Minimum age **of confirmed Arr import**, never just torrent completion; minimum allowed 10 |
+| `IMPORT_CHECK_SECONDS` | `60` | Arr history poll interval while completed valid downloads are present |
+| `HISTORY_LOOKBACK_DAYS` | `30` | Arr history lookup horizon. Older downloads are retained for review |
+| `STATE_DB` | `/state/torrent-guard.sqlite3` | Restart-safe pending deletions |
+| `LOG_FILE` | `/state/torrent-guard.log` | Timestamped rotating persistent log (empty disables file logging) |
+| `LOG_MAX_BYTES` | `10485760` | File rotation size (10 MiB) |
+| `LOG_BACKUP_COUNT` | `5` | Number of retained rotated files |
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
-If you use only one Arr app, remove **all three** variables for the unused app. You must have at least one configured app and distinct categories.
+Use exactly one category per Arr app; tags are optional and must not conflict. To use only one Arr app, remove all of the other app's variables, including its tag.
 
-Recognized video extensions: `.mkv`, `.mp4`, `.avi`, `.m4v`, `.mov`, `.wmv`, `.webm`, `.mpg`, `.mpeg`, `.ts`, `.m2ts`, `.vob`, `.divx`, `.flv`.
+## Important safety behavior
 
-## Safety and limitations
+- **Failed downloads:** Arr queue matching is required to blocklist a bad release. If Arr cannot find that queue item or is offline, the torrent stays stopped/pending and **is not deleted** until the blocklist path succeeds. A warning is logged. When the queue entry was already removed and returns HTTP 404 after a known match, cleanup proceeds but logs a warning to verify Arr's blocklist.
+- **Successfully imported downloads:** Only matching Arr **history** authorizes cleanup. A finished torrent alone, disappearance from Arr's queue, a newly added torrent carrying an old reused hash, or a partial Sonarr season-pack import does **not** authorize deletion. The import event must be at least 10 minutes old.
+- **Deletion:** qBittorrent receives the explicit `deleteFiles=true` parameter. It should remove the torrent and its tracked download data, including partial files. Guard verifies **torrent entry disappearance**, not each file's absence on disk. Untracked/orphaned files may require manual cleanup. Files already imported to library paths are not targeted, including hardlinked library copies (which retain their content when the download link is removed).
+- **Media validity:** `ffprobe` checks for readable video stream metadata; it does **not** decode or checksum every frame, certify all audio/subtitle tracks, or guarantee that a file is malware-free. Failure to access a mounted media file **defers** processing rather than falsely classifying the download as malware. A readable but unexpected media codec may still be rejected if ffprobe cannot identify it.
+- **Seeding:** Deleting imported torrents after 10 minutes can interrupt seeding or violate tracker requirements. This is the behavior requested; consider increasing the grace period or maintaining seeding separately for private trackers.
+- **Arr history:** On API outages, missing download IDs, mismatched source paths, too-old history, or ambiguous multi-video matches, the program preserves the torrent. It cannot guarantee that *Arr always associates every imported episode with its torrent hash. Check DEBUG logs if valid releases do not clean up.
+- **Pending state:** A past v0.1 pending rejection will still be retried after upgrade. Start in dry-run mode only if you want to suspend further pending cleanup while validating settings.
 
-- Extension matching is not actual content validation, antivirus, or an executable sandbox. A malicious file renamed `.mkv` or hidden in `.zip` may escape detection.
-- This is **polling**, not a pre-download block. qBittorrent may transfer data before metadata is inspected; this cannot guarantee zero downloaded bytes.
-- Video-free archives, bundled helper scripts, and legitimate executables will be rejected by design. The guard is for movie/TV categories only.
-- Arr **blocklisting and search again is dependent on Arr tracking/failed-download settings**. A replacement is not guaranteed.
-- In case of an Arr outage, unmatched queue entry, permission error, or ambiguous state, pending state remains for retry/manual intervention; review `docker compose logs`.
-- To prevent secrets leaking to GitHub, `.env`, secrets, state databases, and logs are ignored by `.gitignore` and `.dockerignore`. **Never commit production secrets**.
-- Keep the API ports private to trusted networks; enable TLS if access crosses untrusted links.
-
-## Tests
+## Tests / maintenance
 
 ```bash
 python3 -m unittest discover -s tests -v
 python3 -m py_compile guard.py
-# Optionally validate Compose on a Docker host after creating .env:
+# If Docker is available and .env has correct paths:
 docker compose config
 ```
 
-The tests mock both API clients; they do **not** validate compatibility with every qBittorrent/Sonarr/Radarr version or confirm actual filesystem deletion. Start in dry-run mode first.
+The tests use mocked qBittorrent/Arr HTTP clients and ffprobe; they don't prove live API compatibility, media mount correctness or physical deletion on your server. Test dry-run first.
 
-## Files
-
-```text
-.
-├── .dockerignore
-├── .env.example
-├── .gitignore
-├── .github/workflows/release.yml
-├── .github/workflows/test.yml
-├── Dockerfile
-├── compose.yaml
-├── guard.py
-├── README.md
-├── RELEASE_NOTES.md
-├── VERSION
-└── tests/test_guard.py
-```
+Project files: `guard.py`, `Dockerfile`, `compose.yaml`, `.env.example`, `README.md`, `RELEASE_NOTES.md`, `VERSION`, `.gitignore`, `.dockerignore`, `tests/`, `.github/workflows/`.

@@ -107,7 +107,7 @@ class PollTests(unittest.TestCase):
         self.assertEqual(order, ["stop", "blocklist", "stop", "delete"])
         self.arr.blocklist_and_remove.assert_called_once_with(42)
         self.qb.delete_with_data.assert_called_once_with("abcdef")
-        self.assertEqual(self.guard.store.entries()[0][-1], "verify")
+        self.assertEqual(self.guard.store.entries()[0][-2], "verify")
         self.qb.torrents.return_value = []
         self.guard.poll(now=self.now + 5)
         self.assertEqual(self.guard.store.entries(), [])
@@ -127,7 +127,7 @@ class PollTests(unittest.TestCase):
         self.guard.poll(now=self.now)
         self.qb.stop.assert_called_once_with("abcdef")
         self.qb.delete_with_data.assert_not_called()
-        self.assertEqual(self.guard.store.entries()[0][-1], "match")
+        self.assertEqual(self.guard.store.entries()[0][-2], "match")
         self.arr.queue_by_hash.return_value = {"abcdef": 42}
         self.guard.poll(now=self.now + 5)
         self.qb.delete_with_data.assert_called_once_with("abcdef")
@@ -137,13 +137,13 @@ class PollTests(unittest.TestCase):
         self.guard.poll(now=self.now)
         self.arr.blocklist_and_remove.assert_not_called()
         self.qb.delete_with_data.assert_not_called()
-        self.assertEqual(self.guard.store.entries()[0][-1], "match")
+        self.assertEqual(self.guard.store.entries()[0][-2], "match")
 
     def test_blocklist_error_means_no_delete(self):
         self.arr.blocklist_and_remove.side_effect = ApiError("unavailable", 500)
         self.guard.poll(now=self.now)
         self.qb.delete_with_data.assert_not_called()
-        self.assertEqual(self.guard.store.entries()[0][-1], "arr")
+        self.assertEqual(self.guard.store.entries()[0][-2], "arr")
         self.arr.blocklist_and_remove.side_effect = None
         self.guard.poll(now=self.now + 5)
         self.qb.delete_with_data.assert_called_once()
@@ -151,16 +151,16 @@ class PollTests(unittest.TestCase):
     def test_delete_error_retries(self):
         self.qb.delete_with_data.side_effect = [ApiError("unavailable", 500), None]
         self.guard.poll(now=self.now)
-        self.assertEqual(self.guard.store.entries()[0][-1], "delete")
+        self.assertEqual(self.guard.store.entries()[0][-2], "delete")
         self.guard.poll(now=self.now + 5)
         self.assertEqual(self.qb.delete_with_data.call_count, 2)
-        self.assertEqual(self.guard.store.entries()[0][-1], "verify")
+        self.assertEqual(self.guard.store.entries()[0][-2], "verify")
 
     def test_verify_retries_if_still_present(self):
         self.guard.poll(now=self.now)
         self.guard.poll(now=self.now + 5)
         self.assertEqual(self.qb.delete_with_data.call_count, 2)
-        self.assertEqual(self.guard.store.entries()[0][-1], "verify")
+        self.assertEqual(self.guard.store.entries()[0][-2], "verify")
 
     def test_category_change_stops_cleanup(self):
         self.guard.poll(now=self.now)
@@ -168,7 +168,7 @@ class PollTests(unittest.TestCase):
         self.qb.torrents.return_value = [{**self.torrent, "category": "manual"}]
         self.guard.poll(now=self.now + 5)
         self.qb.delete_with_data.assert_not_called()
-        self.assertEqual(self.guard.store.entries()[0][-1], "verify")
+        self.assertEqual(self.guard.store.entries()[0][-2], "verify")
 
     def test_unscoped_and_old_skipped(self):
         self.qb.torrents.return_value = [
@@ -192,7 +192,7 @@ class PollTests(unittest.TestCase):
             arr.queue_by_hash.return_value = {}
             g1 = Guard(cfg, self.qb, {"RADARR": arr})
             g1.poll(now=self.now)
-            self.assertEqual(g1.store.entries()[0][-1], "match")
+            self.assertEqual(g1.store.entries()[0][-2], "match")
             g1.store.db.close()
             arr.queue_by_hash.return_value = {"abcdef": 42}
             g2 = Guard(cfg, self.qb, {"RADARR": arr})

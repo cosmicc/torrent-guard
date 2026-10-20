@@ -3,17 +3,21 @@ services:
   torrent-guard:
     build:
       context: .
-    image: torrent-guard:0.1
+    image: torrent-guard:0.2
     container_name: torrent-guard
     restart: unless-stopped
     init: true
     env_file:
       - .env
-    # Reach the host-published ports of qBittorrent/Sonarr/Radarr on Linux.
+    # Access host-published qBittorrent/Sonarr/Radarr API ports on Linux.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
+      # Persistent SQLite cleanup journal and rotating application logs.
       - torrent-guard-state:/state
+      # Read-only, for ffprobe video verification. No deletion via this mount.
+      # Must correspond to the path qBittorrent uses for its download root.
+      - ${DOWNLOADS_HOST_PATH:?Set DOWNLOADS_HOST_PATH in .env to qBittorrent download directory}:/downloads:ro
     read_only: true
     cap_drop:
       - ALL
@@ -21,8 +25,8 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=8m
-    pids_limit: 32
-    mem_limit: 128m
-    # No inbound ports, Docker socket, or media filesystem access are needed.
+    pids_limit: 48
+    mem_limit: 256m
+    # No inbound listening ports, Docker socket or write access to downloads.
 volumes:
   torrent-guard-state:
