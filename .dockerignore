@@ -1,0 +1,15 @@
+.git/
+.github/
+.env
+.env.*
+!.env.example
+README.md
+tests/
+state/
+*.sqlite3*
+*.log
+__pycache__/
+*.py[cod]
+.venv/
+*.zip
+*.tar.gz

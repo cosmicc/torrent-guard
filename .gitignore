@@ -1,0 +1,41 @@
+# Local secrets and overrides. Never commit credentials.
+.env
+.env.*
+!.env.example
+*.secret
+*.secrets
+secrets/
+
+# Runtime state: may contain private torrent names and info hashes.
+state/
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.log
+logs/
+*.pid
+
+# Python/test artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# IDE/OS/other local files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~

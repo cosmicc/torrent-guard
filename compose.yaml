@@ -1,0 +1,28 @@
+name: torrent-guard
+services:
+  torrent-guard:
+    build:
+      context: .
+    image: torrent-guard:0.1
+    container_name: torrent-guard
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    # Reach the host-published ports of qBittorrent/Sonarr/Radarr on Linux.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - torrent-guard-state:/state
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=8m
+    pids_limit: 32
+    mem_limit: 128m
+    # No inbound ports, Docker socket, or media filesystem access are needed.
+volumes:
+  torrent-guard-state:

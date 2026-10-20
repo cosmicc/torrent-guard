@@ -1,0 +1,33 @@
+name: Publish release
+on:
+  push:
+    branches: [main]
+    paths: [VERSION]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify tests
+        run: python -m unittest discover -s tests -v
+      - name: Create versioned GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          version="$(tr -d '[:space:]' < VERSION)"
+          case "$version" in
+            *[!0-9.]*|'' ) echo 'VERSION must be numeric dotted version' >&2; exit 1;;
+          esac
+          tag="v${version}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; not modifying it."
+          else
+            gh release create "$tag" --target "$GITHUB_SHA" --title "Torrent Guard $tag" --notes-file RELEASE_NOTES.md
+          fi
