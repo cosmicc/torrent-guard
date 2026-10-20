@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v0.2** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
+**v0.3** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
 
 Torrent Guard is a background service that examines new and completed movie/TV torrents and cleans up imported releases. It uses **qBittorrent's Web API** and **Sonarr/Radarr's v3 APIs**; no qBittorrent “Run external program on torrent completion” hook is required.
 
@@ -12,6 +12,24 @@ Torrent Guard is a background service that examines new and completed movie/TV t
 2. **When complete:** Reinspect eligible movie/TV torrents **regardless of their initial age**. Validate downloaded videos using `ffprobe` against the actual media files via a read-only Docker bind mount. Invalid videos are handled as bad releases (stop, blocklist, remove and delete torrent data). Valid releases are left alone until Arr confirms import.
 3. **After successful Arr import + 10 minutes:** Require a matching Sonarr/Radarr `downloadFolderImported` history event for the **same infohash**, dated after this torrent was added and at least 10 minutes ago. For multi-video downloads, require a matching import record for every selected video file. Then instruct qBittorrent to delete the torrent and its tracked downloaded files (but **never** blocklist a successful release).
 4. **Audit every decision:** Timestamped accepted/rejected/cleanup messages, warnings and errors go to both Docker logs and `/state/torrent-guard.log` with rotation. A SQLite journal survives restarts and retries unfinished deletes.
+
+## Incomplete and completed directories (v0.3)
+
+**Leave qBittorrent's “Append .!qB extension to incomplete files” ON.** qBittorrent normally returns *original torrent filenames* from `/api/v2/torrents/files` even while the physical payload is called `Movie.mkv.!qB`. Guard also handles a filename that happens to include that suffix: `Movie.mkv.!qB` is recognized as video, `Fake.exe.!qB` is recognized as a risky executable. These **early** checks need metadata only, not file access.
+
+Your configured qBittorrent directory layout is:
+
+```text
+/downloads/
+├── incomplete/     # downloading files, often with .!qB suffix
+└── complete/       # final renamed files after qBittorrent finishes moving
+```
+
+Guard waits for **both** qBittorrent completion and the final file under `QBIT_COMPLETE_DIR`. It does not inspect media contents in `incomplete/`, does not interpret a transiently missing file as a bad torrent, and does not run ffprobe on `.!qB` data. A reported `content_path` still inside `incomplete/` triggers a **deferred validation**. `download_path` may retain the configured incomplete path after completion and is therefore not used as a completion signal. A missing or unreadable completed file is deferred and retried, never automatically blocklisted based on the missing path alone.
+
+`QBIT_COMPLETE_DIR` and `QBIT_INCOMPLETE_DIR` are **qBittorrent container paths**; `DOWNLOADS_HOST_PATH` is the **host** parent path and **must mount both** locations into Guard as `/downloads:ro`. If qBittorrent uses category subfolders, final `save_path` must still fall under `/downloads/complete`.
+
+No external run-on-completion script or qBittorrent setting change is required.
 
 Torrent eligibility is based on your configured qBittorrent **categories** and/or optional tags such as `movies` and `tv`. The category and tag must not disagree on whether Sonarr or Radarr owns the torrent. Other torrents are skipped. No Docker socket access and no writable media mounts are required.
 
@@ -36,7 +54,7 @@ Set the qBittorrent host/credentials and each *Arr API URL/key/category. Common 
 | `QBIT_DOWNLOAD_ROOT` | `/downloads` | The **same** root as seen **inside qBittorrent** (or on host if not containerized) |
 | `GUARD_DOWNLOAD_ROOT` | `/downloads` | Path **inside Torrent Guard**, provided by the Compose mount |
 
-If qBittorrent sees `/data/torrents` while the host sees `/srv/media/downloads`, use `QBIT_DOWNLOAD_ROOT=/data/torrents` and `DOWNLOADS_HOST_PATH=/srv/media/downloads`. The file paths are mapped relatively; e.g. qBittorrent save path `/data/torrents/movies` with file `Film.mkv` maps to Guard `/downloads/movies/Film.mkv`. The container runs as UID/GID 65534; this user must be able to traverse directories and **read** the video files. **No write permission** is necessary.
+If qBittorrent sees `/data/torrents` while the host sees `/srv/media/downloads`, use `QBIT_DOWNLOAD_ROOT=/data/torrents` and `DOWNLOADS_HOST_PATH=/srv/media/downloads`. The file paths are mapped relatively; e.g. qBittorrent save path `/data/torrents/complete/movies` with file `Film.mkv` maps to Guard `/downloads/complete/movies/Film.mkv`. Set `QBIT_COMPLETE_DIR=/data/torrents/complete` and `QBIT_INCOMPLETE_DIR=/data/torrents/incomplete` when the qBittorrent root differs. The container runs as UID/GID 65534; this user must be able to traverse directories and **read** the video files. **No write permission** is necessary.
 
 By default Compose **requires** `DOWNLOADS_HOST_PATH`: if omitted, it refuses deployment rather than running incomplete verification. Read-only bind mounting the location does not grant Torrent Guard the ability to delete local media; deletion is carried out by the qBittorrent API.
 
@@ -62,13 +80,14 @@ View persistent logs:
 docker compose exec torrent-guard tail -n 100 /state/torrent-guard.log
 ```
 
-### Upgrade from v0.1
+### Upgrade to v0.3 from v0.1 / v0.2
 
 ```bash
 cd torrent-guard
 git pull --ff-only
 # Compare .env.example to your existing .env; DO NOT overwrite real credentials.
-# Add DOWNLOADS_HOST_PATH, QBIT_DOWNLOAD_ROOT and new options before restarting.
+# Add DOWNLOADS_HOST_PATH, QBIT_DOWNLOAD_ROOT, QBIT_COMPLETE_DIR,
+# and QBIT_INCOMPLETE_DIR before restarting. Keep DRY_RUN=true while verifying.
 docker compose up -d --build
 ```
 
@@ -85,6 +104,8 @@ The existing `torrent-guard-state` volume is compatible; the SQLite journal is m
 | `DOWNLOADS_HOST_PATH` | **must set** | Host directory mounted at `/downloads:ro` in Compose |
 | `QBIT_DOWNLOAD_ROOT` | `/downloads` | Equivalent download root inside qBittorrent; change when qBittorrent uses another container path |
 | `GUARD_DOWNLOAD_ROOT` | `/downloads` | Corresponding path inside Guard; normally unchanged |
+| `QBIT_COMPLETE_DIR` | `/downloads/complete` | Final qBittorrent save directory; validation requires complete files here |
+| `QBIT_INCOMPLETE_DIR` | `/downloads/incomplete` | Temporary qBittorrent directory, never scanned with ffprobe |
 | `VERIFY_VIDEO_CONTENT` | `true` | Use ffprobe on **all selected** video files when a torrent completes |
 | `FFPROBE_TIMEOUT_SECONDS` | `30` | Timeout for each ffprobe invocation |
 | `COMPLETED_SETTLE_SECONDS` | `60` | Allow completed files to settle before checking video streams |

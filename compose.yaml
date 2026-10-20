@@ -3,7 +3,7 @@ services:
   torrent-guard:
     build:
       context: .
-    image: torrent-guard:0.2
+    image: torrent-guard:0.3
     container_name: torrent-guard
     restart: unless-stopped
     init: true
@@ -16,7 +16,8 @@ services:
       # Persistent SQLite cleanup journal and rotating application logs.
       - torrent-guard-state:/state
       # Read-only, for ffprobe video verification. No deletion via this mount.
-      # Must correspond to the path qBittorrent uses for its download root.
+      # Mount PARENT containing both complete/ and incomplete/.
+      # Never bind only complete/: file paths are relative to QBIT_DOWNLOAD_ROOT.
       - ${DOWNLOADS_HOST_PATH:?Set DOWNLOADS_HOST_PATH in .env to qBittorrent download directory}:/downloads:ro
     read_only: true
     cap_drop:

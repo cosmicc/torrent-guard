@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 
 LOG = logging.getLogger("torrent-guard")
-VERSION = "0.2"
+VERSION = "0.3"
 DEFAULT_VIDEO = frozenset({".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".webm", ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".divx", ".flv"})
 DEFAULT_RISKY = frozenset({".exe", ".scr", ".com", ".bat", ".cmd", ".msi", ".msp", ".msix", ".ps1", ".psm1", ".vbs", ".vbe", ".vb", ".js", ".jse", ".wsf", ".wsh", ".hta", ".lnk", ".pif", ".cpl", ".jar", ".apk", ".appx", ".reg", ".scf", ".sh", ".py"})
 
@@ -79,6 +79,8 @@ class Config:
     verify_video_content: bool = True
     qbit_download_root: str = "/downloads"
     guard_download_root: str = "/downloads"
+    qbit_complete_dir: str = ""  # blank only for legacy/test configurations
+    qbit_incomplete_dir: str = ""  # API may show a temporary content_path here
     import_grace_minutes: int = 10
     import_check_seconds: int = 60
     history_lookback_days: int = 30
@@ -115,8 +117,18 @@ class Config:
             raise ValueError("Invalid time settings: poll>=2, age>0, grace>=10m, check>=10s, lookback>=1d, settle>=0, timeout>=1s")
         qroot = os.getenv("QBIT_DOWNLOAD_ROOT", "/downloads").rstrip("/")
         groot = os.getenv("GUARD_DOWNLOAD_ROOT", "/downloads").rstrip("/")
-        if not qroot.startswith("/") or not groot.startswith("/") or qroot == "" or groot == "":
-            raise ValueError("QBIT_DOWNLOAD_ROOT and GUARD_DOWNLOAD_ROOT must be absolute directories")
+        if not qroot.startswith("/") or not groot.startswith("/") or qroot == "" or groot == "" or ".." in PurePosixPath(qroot).parts or ".." in PurePosixPath(groot).parts:
+            raise ValueError("QBIT_DOWNLOAD_ROOT and GUARD_DOWNLOAD_ROOT must be absolute directories without '..'")
+        def location(name: str, default: str) -> str:
+            value = os.getenv(name, default).strip().rstrip("/")
+            path = PurePosixPath(value)
+            if not value or not path.is_absolute() or not path.is_relative_to(PurePosixPath(qroot)) or ".." in path.parts or value == qroot:
+                raise ValueError(f"{name} must be a subdirectory of QBIT_DOWNLOAD_ROOT: {qroot}")
+            return str(path)
+        complete_dir = location("QBIT_COMPLETE_DIR", qroot + "/complete")
+        incomplete_dir = location("QBIT_INCOMPLETE_DIR", qroot + "/incomplete")
+        if PurePosixPath(complete_dir).is_relative_to(PurePosixPath(incomplete_dir)) or PurePosixPath(incomplete_dir).is_relative_to(PurePosixPath(complete_dir)):
+            raise ValueError("QBIT_COMPLETE_DIR and QBIT_INCOMPLETE_DIR must not overlap")
         return cls(
             qbit_url=api_url(required("QBIT_URL"), "QBIT_URL"),
             qbit_username=required("QBIT_USERNAME"), qbit_password=required("QBIT_PASSWORD"),
@@ -126,6 +138,7 @@ class Config:
             state_db=os.getenv("STATE_DB", "/state/torrent-guard.sqlite3"),
             verify_video_content=boolean("VERIFY_VIDEO_CONTENT", True),
             qbit_download_root=qroot, guard_download_root=groot,
+            qbit_complete_dir=complete_dir, qbit_incomplete_dir=incomplete_dir,
             import_grace_minutes=grace, import_check_seconds=check,
             history_lookback_days=history, completed_settle_seconds=settle,
             ffprobe_timeout_seconds=timeout,
@@ -144,7 +157,7 @@ class Http:
 
     def request(self, method: str, url: str, *, fields=None, headers=None):
         data = urllib.parse.urlencode(fields).encode("utf-8") if fields is not None else None
-        req = urllib.request.Request(url, method=method, data=data, headers={"User-Agent": "TorrentGuard/0.2", **(headers or {})})
+        req = urllib.request.Request(url, method=method, data=data, headers={"User-Agent": "TorrentGuard/0.3", **(headers or {})})
         try:
             with self.opener.open(req, timeout=12) as response:
                 payload = response.read()
@@ -273,8 +286,23 @@ def selected_files(files: list[dict]) -> list[dict]:
     return [f for f in files if int(f.get("priority", 1)) != 0]
 
 
+def normalized_name(name: str) -> str:
+    """Account for qBittorrent's optional .!qB *on-disk* incomplete suffix.
+
+    The Web API normally returns the original torrent filename without .!qB,
+    but stripping the suffix defensively also handles API/adapter variations.
+    This is for metadata decisions only; do not treat incomplete disk data as media.
+    """
+    clean = name.replace("\\", "/")
+    return clean[:-4] if clean.casefold().endswith(".!qb") else clean
+
+
+def effective_extension(name: str) -> str:
+    return PurePosixPath(normalized_name(name)).suffix.casefold()
+
+
 def video_files(files: list[dict]) -> list[dict]:
-    return [f for f in selected_files(files) if PurePosixPath(str(f.get("name", "")).replace("\\", "/")).suffix.casefold() in DEFAULT_VIDEO]
+    return [f for f in selected_files(files) if effective_extension(str(f.get("name", ""))) in DEFAULT_VIDEO]
 
 
 def classify(files: list[dict], *, reject_no_video: bool = True) -> str | None:
@@ -284,7 +312,7 @@ def classify(files: list[dict], *, reject_no_video: bool = True) -> str | None:
     active = selected_files(files)
     if not active:
         return "no selected files for download"
-    risky = [str(f.get("name", "")) for f in active if PurePosixPath(str(f.get("name", "")).replace("\\", "/")).suffix.casefold() in DEFAULT_RISKY]
+    risky = [str(f.get("name", "")) for f in active if effective_extension(str(f.get("name", ""))) in DEFAULT_RISKY]
     if risky:
         return "risky executable/script/shortcut: " + ", ".join(risky[:4])
     if reject_no_video and not video_files(files):
@@ -315,8 +343,10 @@ class MediaValidator:
         root = Path(self.config.qbit_download_root)
         save = Path(str(torrent.get("save_path") or ""))
         relative = PurePosixPath(str(file.get("name") or "").replace("\\", "/"))
-        if not save.is_absolute() or not relative.parts or relative.is_absolute() or ".." in relative.parts:
+        if not save.is_absolute() or not relative.parts or relative.is_absolute() or ".." in relative.parts or ".." in PurePosixPath(str(save)).parts:
             raise ValueError("unsafe or missing download path")
+        if self.config.qbit_complete_dir and not PurePosixPath(str(save)).is_relative_to(PurePosixPath(self.config.qbit_complete_dir)):
+            raise ValueError(f"completed save_path {save} is not under configured final directory {self.config.qbit_complete_dir}; waiting for move")
         try:
             save_rel = save.relative_to(root)
         except ValueError as exc:
@@ -328,13 +358,20 @@ class MediaValidator:
         return candidate
 
     def inspect(self, torrent: dict, files: list[dict]) -> tuple[str, str]:
+        # qBittorrent's download_path is normally *configured* as the temporary
+        # location even after completion, so only check the actual content_path.
+        content_path = str(torrent.get("content_path") or "")
+        if self.config.qbit_incomplete_dir and content_path and PurePosixPath(content_path).is_relative_to(PurePosixPath(self.config.qbit_incomplete_dir)):
+            return "defer", f"qBittorrent content_path still under incomplete directory: {content_path}; waiting for final move"
+        if self.config.qbit_complete_dir and content_path and PurePosixPath(content_path).is_absolute() and not PurePosixPath(content_path).is_relative_to(PurePosixPath(self.config.qbit_complete_dir)):
+            return "defer", f"qBittorrent content_path is outside final directory: {content_path}; waiting for final move"
         videos = video_files(files)
         if not videos:
             return "reject", "completed torrent has no selected video files"
-        if not self.config.verify_video_content:
-            return "accept", f"extension/metadata-only check: {len(videos)} video filename(s) (ffprobe DISABLED)"
         for video in videos:
             name = str(video.get("name"))
+            if name.casefold().endswith(".!qb"):
+                return "defer", f"incomplete .!qB suffix still reported for {name}; waiting for rename/move"
             if int(video.get("size") or 0) <= 0 or float(video.get("progress", 0)) < 0.999999:
                 return "reject", f"video has zero size or is not fully downloaded: {name}"
             try:
@@ -343,6 +380,8 @@ class MediaValidator:
                 return "defer", f"media path mapping needs attention for {name}: {exc}"
             if not path.is_file() or not os.access(path, os.R_OK):
                 return "defer", f"video not readable at {path}; verify read-only bind mount, permissions, and qBittorrent root mapping"
+            if not self.config.verify_video_content:
+                continue  # still require final, existing, readable video files
             try:
                 p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_type,codec_name,width,height", "-of", "json", str(path)], capture_output=True, text=True, timeout=self.config.ffprobe_timeout_seconds, check=False)
             except (FileNotFoundError, PermissionError, subprocess.TimeoutExpired, OSError) as exc:
@@ -353,6 +392,8 @@ class MediaValidator:
                 streams = []
             if p.returncode != 0 or not any(s.get("codec_type") == "video" and int(s.get("width") or 0) > 0 and int(s.get("height") or 0) > 0 for s in streams):
                 return "reject", f"ffprobe found no readable video stream: {name} ({p.stderr.strip()[:180]})"
+        if not self.config.verify_video_content:
+            return "accept", f"metadata-only: {len(videos)} final video file(s) present/readable (ffprobe DISABLED)"
         return "accept", f"ffprobe verified {len(videos)} complete video file(s)"
 
 
@@ -611,7 +652,7 @@ def setup_logging():
 def main():
     setup_logging()
     config = Config.from_env()
-    LOG.info("Starting v%s categories=%r tags=%r poll=%ds dry_run=%s verify_media=%s import_grace=%dm state=%s", VERSION, config.categories, config.tags, config.poll_seconds, config.dry_run, config.verify_video_content, config.import_grace_minutes, config.state_db)
+    LOG.info("Starting v%s categories=%r tags=%r poll=%ds dry_run=%s verify_media=%s import_grace=%dm complete_dir=%s incomplete_dir=%s incomplete_suffix=.!qB state=%s", VERSION, config.categories, config.tags, config.poll_seconds, config.dry_run, config.verify_video_content, config.import_grace_minutes, config.qbit_complete_dir, config.qbit_incomplete_dir, config.state_db)
     guard = None
     while True:
         try:
