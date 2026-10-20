@@ -13,8 +13,9 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      # Persistent SQLite cleanup journal and rotating application logs.
-      - torrent-guard-state:/state
+      # Persistent SQLite cleanup journal and rotating logs on the Docker host.
+      # Before first startup: sudo install -d -o 65534 -g 65534 -m 750 /config/torrent-guard
+      - /config/torrent-guard:/state
       # Read-only, for ffprobe video verification. No deletion via this mount.
       # Mount PARENT containing both complete/ and incomplete/.
       # Never bind only complete/: file paths are relative to QBIT_DOWNLOAD_ROOT.
@@ -29,5 +30,3 @@ services:
     pids_limit: 48
     mem_limit: 256m
     # No inbound listening ports, Docker socket or write access to downloads.
-volumes:
-  torrent-guard-state:
