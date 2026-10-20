@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v0.3** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
+**v0.3.1** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
 
 Torrent Guard is a background service that examines new and completed movie/TV torrents and cleans up imported releases. It uses **qBittorrent's Web API** and **Sonarr/Radarr's v3 APIs**; no qBittorrent “Run external program on torrent completion” hook is required.
 
@@ -146,3 +146,7 @@ docker compose config
 The tests use mocked qBittorrent/Arr HTTP clients and ffprobe; they don't prove live API compatibility, media mount correctness or physical deletion on your server. Test dry-run first.
 
 Project files: `guard.py`, `Dockerfile`, `compose.yaml`, `.env.example`, `README.md`, `RELEASE_NOTES.md`, `VERSION`, `.gitignore`, `.dockerignore`, `tests/`, `.github/workflows/`.
+
+## Login compatibility (v0.3.1)
+
+qBittorrent 5.2+ returns HTTP `204 No Content` after a successful login instead of the legacy `200 Ok.` response. Torrent Guard accepts either success form **only after** checking `/api/v2/app/version` with the authenticated session. This fixes the repeating `qBittorrent refused login: ''` error on qBittorrent 5.2+ while still rejecting failed credentials and malformed responses. The built-in cookie jar accepts the new `QBT_SID_<port>` cookie name automatically. No password or qBittorrent settings changes are necessary.

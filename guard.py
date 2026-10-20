@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 
 LOG = logging.getLogger("torrent-guard")
-VERSION = "0.3"
+VERSION = "0.3.1"
 DEFAULT_VIDEO = frozenset({".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".webm", ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".divx", ".flv"})
 DEFAULT_RISKY = frozenset({".exe", ".scr", ".com", ".bat", ".cmd", ".msi", ".msp", ".msix", ".ps1", ".psm1", ".vbs", ".vbe", ".vb", ".js", ".jse", ".wsf", ".wsh", ".hta", ".lnk", ".pif", ".cpl", ".jar", ".apk", ".appx", ".reg", ".scf", ".sh", ".py"})
 
@@ -155,19 +155,22 @@ class Http:
     def __init__(self):
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
-    def request(self, method: str, url: str, *, fields=None, headers=None):
+    def request(self, method: str, url: str, *, fields=None, headers=None, include_status=False):
         data = urllib.parse.urlencode(fields).encode("utf-8") if fields is not None else None
-        req = urllib.request.Request(url, method=method, data=data, headers={"User-Agent": "TorrentGuard/0.3", **(headers or {})})
+        req = urllib.request.Request(url, method=method, data=data, headers={"User-Agent": "TorrentGuard/0.3.1", **(headers or {})})
         try:
             with self.opener.open(req, timeout=12) as response:
+                status = response.status
                 payload = response.read()
         except urllib.error.HTTPError as exc:
             snippet = exc.read(250).decode("utf-8", "replace")
             raise ApiError(f"HTTP {exc.code} calling {method} {url}: {snippet}", exc.code) from exc
         stripped = payload.strip()
         if stripped.startswith((b"{", b"[")):
-            return json.loads(payload)
-        return payload.decode("utf-8", "replace")
+            result = json.loads(payload)
+        else:
+            result = payload.decode("utf-8", "replace")
+        return (status, result) if include_status else result
 
 
 class Qbit:
@@ -177,10 +180,27 @@ class Qbit:
         self.login()
 
     def login(self):
-        result = self.http.request("POST", self.config.qbit_url + "/api/v2/auth/login", fields={"username": self.config.qbit_username, "password": self.config.qbit_password}, headers={"Referer": self.config.qbit_url + "/"})
-        if result.strip() != "Ok.":
-            raise ApiError(f"qBittorrent refused login: {result!r}")
-        LOG.info("Authenticated to qBittorrent")
+        """Support qBittorrent <=5.1 (200/Ok.) and >=5.2 (204/empty).
+
+        Never treat an arbitrary empty HTTP 200 response as success, and verify
+        the session against a protected endpoint before proceeding.
+        """
+        referer = {"Referer": self.config.qbit_url + "/"}
+        status, result = self.http.request(
+            "POST", self.config.qbit_url + "/api/v2/auth/login",
+            fields={"username": self.config.qbit_username, "password": self.config.qbit_password},
+            headers=referer, include_status=True,
+        )
+        valid = (status == 200 and result == "Ok.") or (status == 204 and result == "")
+        if not valid:
+            raise ApiError(f"qBittorrent refused login: HTTP {status}, response {result!r}", status)
+        try:
+            version = self.http.request("GET", self.config.qbit_url + "/api/v2/app/version", headers=referer)
+        except ApiError as exc:
+            raise ApiError(f"qBittorrent login response was accepted, but session verification failed: {exc}", exc.status) from exc
+        if not isinstance(version, str) or not version.strip() or not version.lstrip().startswith("v"):
+            raise ApiError(f"qBittorrent login response was accepted, but version verification returned {version!r}")
+        LOG.info("Authenticated to qBittorrent (%s; login HTTP %s)", version.strip(), status)
 
     def request(self, method: str, path: str, *, fields=None, query=None):
         url = self.config.qbit_url + path
