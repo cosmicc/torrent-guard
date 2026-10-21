@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v0.4** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v0.5** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -50,6 +50,10 @@ Live logs use green for success, blue for activity, yellow for waiting/warnings,
 red for errors/rejections, and purple for dry runs. A `HEARTBEAT` line appears
 once a minute while polls finish. The rotating audit file stays plain text.
 Set `LOG_COLOR=never` to disable colors.
+
+Arr import checks run immediately after video validation, then every 60 seconds
+by default. `CHECK import` shows active checks; `WAIT import` explains missing
+evidence or a confirmed import still within its cleanup grace period.
 
 The Docker healthcheck reports unhealthy when no poll has finished for 300
 seconds, with startup grace and retries. Increase `HEALTHCHECK_MAX_AGE_SECONDS`

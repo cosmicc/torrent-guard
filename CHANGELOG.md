@@ -3,6 +3,32 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. All versions below were prepared on 10.20.2026.
 
+## 0.5 - 10.20.2026
+
+### Added
+
+- INFO-level import-wait reasons that distinguish missing import evidence,
+  filename mismatches, partial imports, history lookback, and confirmed imports
+  still within the cleanup grace period. Log reasons when they change.
+- Recurring `CHECK import` summaries show completed candidates and matching
+  history hashes, retaining the default 60-second check interval.
+
+### Changed
+
+- Recognize successful import evidence immediately, while retaining the
+  configured post-import grace period before deleting tracked downloads.
+- Completed-video acceptance now says history is being checked rather than
+  suggesting import is missing before the history check runs.
+- Upgrade: preserve `.env` and `/state`, rebuild and recreate the container,
+  and review `CHECK import`/`WAIT import` in dry-run mode before enabling deletion.
+  No new settings or database migration are required.
+
+### Fixed
+
+- Recognize numeric `downloadFolderImported` history event `3` from Radarr and
+  Sonarr. Numeric `5` is no longer accepted as import evidence; it represents
+  episode deletion in Sonarr.
+
 ## 0.4 - 10.20.2026
 
 ### Added

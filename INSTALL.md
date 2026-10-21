@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v0.4** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
+**v0.5** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
 
 Torrent Guard is a background service that examines new and completed movie/TV torrents and cleans up imported releases. It uses **qBittorrent's Web API** and **Sonarr/Radarr's v3 APIs**; no qBittorrent “Run external program on torrent completion” hook is required.
 
@@ -73,7 +73,7 @@ docker compose up -d --build
 docker compose logs -f torrent-guard
 ```
 
-In dry-run mode (`DRY_RUN=true`) no torrent is stopped, blocklisted or deleted. Review the `ACCEPT metadata`, `ACCEPT completed`, `REJECT candidate`, `DRY RUN`, `DEFER validation`, `WAIT import` (DEBUG) and ERROR messages. Verify the actual media paths are readable and that Arr import-history matches work.
+In dry-run mode (`DRY_RUN=true`) no torrent is stopped, blocklisted or deleted. Review the `ACCEPT metadata`, `ACCEPT completed`, `REJECT candidate`, `DRY RUN`, `DEFER validation`, `WAIT import` (INFO when the reason changes) and ERROR messages. Verify the actual media paths are readable and that Arr import-history matches work.
 
 When ready to allow cleanup, change `.env` to `DRY_RUN=false` and recreate:
 
@@ -88,7 +88,7 @@ View persistent logs:
 docker compose exec torrent-guard tail -n 100 /state/torrent-guard.log
 ```
 
-### Upgrade to v0.4
+### Upgrade to v0.5
 
 ```bash
 cd torrent-guard
@@ -99,7 +99,9 @@ git pull --ff-only
 docker compose up -d --build --force-recreate
 ```
 
-No new required environment settings or database schema changes are needed for v0.4.
+No new required environment settings or database schema changes are needed for v0.5.
+Import checks remain at 60 seconds by default. This version corrects numeric
+import-event matching and reports each scheduled check and specific wait reasons.
 Optional `LOG_COLOR=always` enables the classic console palette by default;
 `HEALTHCHECK_MAX_AGE_SECONDS=300` sets the completed-poll freshness limit.
 Existing journal records are retained. Imported cleanup now rechecks current
@@ -148,6 +150,17 @@ the mount does **not** copy existing data automatically. Do **not** run
 | `HEALTHCHECK_MAX_AGE_SECONDS` | `300` | Positive finite seconds since the last completed poll; allow for the longest full media-validation batch and `POLL_SECONDS` |
 
 Use exactly one category per Arr app; tags are optional and must not conflict. To use only one Arr app, remove all of the other app's variables, including its tag.
+
+Import checks start immediately after completed-video validation, then repeat
+every `IMPORT_CHECK_SECONDS` while eligible downloads remain. This interval is
+separate from `IMPORT_GRACE_MINUTES`, which delays deletion after the actual
+import time. `WAIT import` reports whether import evidence is missing or partial,
+filenames do not match, or import is confirmed but cleanup grace is still running.
+The grace message gives the earliest cleanup time in UTC. `CHECK import` reports
+the number of completed candidates and hashes with import history on each
+successful scheduled history check. Matching history still needs filename,
+timestamp, and grace validation before cleanup. `ACCEPT completed` only reports
+video validation; it does not mean import is still pending.
 
 ## Live monitoring and Docker health
 

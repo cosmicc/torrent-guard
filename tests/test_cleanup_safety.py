@@ -170,6 +170,16 @@ class CleanupSafetyTests(unittest.TestCase):
 class HistoryPaginationTests(unittest.TestCase):
     """Never accept a prematurely truncated Arr history response."""
 
+    def test_only_actual_import_events_are_accepted(self):
+        for event_type in (3, "3", "downloadFolderImported", 5, "5", 6, "episodeFileDeleted"):
+            with self.subTest(event_type=event_type):
+                http = Mock()
+                http.request.return_value = {"records": [{"date": "2026-10-19T12:00:00Z",
+                    "eventType": event_type, "downloadId": "ABC"}], "totalRecords": 1}
+                arr = ArrApi(ArrInstance("http://arr:7878", "test-key", "radarr"), http)
+                imports = arr.imported_history(0)
+                self.assertEqual("abc" in imports, event_type in (3, "3", "downloadFolderImported"))
+
     def test_truncated_history_is_rejected(self):
         http = Mock()
         http.request.return_value = {"records": [], "totalRecords": 1}

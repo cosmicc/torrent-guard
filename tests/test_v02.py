@@ -66,6 +66,52 @@ class CompletionTests(unittest.TestCase):
         self.qbit.delete_with_data.assert_not_called()
         self.assertEqual(self.guard.store.entries(), [])
 
+    def test_recent_import_is_reported_as_confirmed_during_grace(self):
+        self.event["date"] = when(NOW - 100)
+        with self.assertLogs("torrent-guard", level="INFO") as logs:
+            self.guard.poll(now=NOW)
+        self.assertTrue(any("import confirmed" in line and "cleanup grace until" in line for line in logs.output))
+        self.qbit.delete_with_data.assert_not_called()
+        self.guard.poll(now=NOW + 500)
+        self.qbit.delete_with_data.assert_called_once_with("abcde1")
+
+    def test_numeric_import_history_authorizes_cleanup_end_to_end(self):
+        http = Mock()
+        event = {**self.event, "eventType": 3}
+        http.request.return_value = {"records": [event], "totalRecords": 1}
+        arr = ArrApi(self.cfg.instances["RADARR"], http)
+        self.guard.arr_clients["RADARR"] = arr
+        with self.assertLogs("torrent-guard", level="INFO") as logs:
+            self.guard.poll(now=NOW)
+        self.qbit.delete_with_data.assert_called_once_with("abcde1")
+        self.assertTrue(any("matching_history=1" in line for line in logs.output))
+        self.assertTrue(all(call.args[0] == "GET" for call in http.request.call_args_list))
+
+    def test_import_checks_repeat_every_sixty_seconds_without_waiting_for_grace(self):
+        self.arr.imported_history.return_value = {}
+        self.guard.poll(now=NOW)
+        self.arr.imported_history.assert_called_once()
+        self.guard.poll(now=NOW + 5)
+        self.arr.imported_history.assert_called_once()
+        self.arr.imported_history.return_value = {"abcde1": [self.event]}
+        self.guard.poll(now=NOW + 60)
+        self.qbit.delete_with_data.assert_called_once_with("abcde1")
+        self.arr.blocklist_and_remove.assert_not_called()
+
+    def test_wait_reason_logs_once_until_import_status_changes(self):
+        self.arr.imported_history.return_value = {}
+        with self.assertLogs("torrent-guard", level="INFO") as logs:
+            self.guard.poll(now=NOW)
+            self.guard.poll(now=NOW + 60)
+        waits = [line for line in logs.output if "WAIT import" in line]
+        self.assertEqual(len(waits), 1)
+        self.assertIn("no matching import event", waits[0])
+
+    def test_future_import_event_never_authorizes_cleanup(self):
+        self.event["date"] = when(NOW + 100)
+        self.guard.poll(now=NOW)
+        self.qbit.delete_with_data.assert_not_called()
+
     def test_old_import_before_new_grab_not_accepted(self):
         self.event["date"] = when(NOW-4000)
         self.guard.poll(now=NOW)

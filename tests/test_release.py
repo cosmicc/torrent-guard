@@ -32,7 +32,9 @@ class ReleaseTests(unittest.TestCase):
                 release_notes(root)
 
     def test_repository_release_metadata_is_consistent(self):
-        self.assertIn("## 0.4 -", release_notes(Path(__file__).resolve().parents[1]))
+        root = Path(__file__).resolve().parents[1]
+        version = (root / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertTrue(release_notes(root).startswith(f"## {version} -"))
 
     def test_new_three_part_versions_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

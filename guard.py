@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 
 LOG = logging.getLogger("torrent-guard")
-VERSION = "0.4"
+VERSION = "0.5"
 HEARTBEAT_FILE = Path("/tmp/torrent-guard-heartbeat")
 DEFAULT_VIDEO = frozenset({".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".webm", ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".divx", ".flv"})
 DEFAULT_RISKY = frozenset({".exe", ".scr", ".com", ".bat", ".cmd", ".msi", ".msp", ".msix", ".ps1", ".psm1", ".vbs", ".vbe", ".vb", ".js", ".jse", ".wsf", ".wsh", ".hta", ".lnk", ".pif", ".cpl", ".jar", ".apk", ".appx", ".reg", ".scf", ".sh", ".py"})
@@ -287,7 +287,9 @@ class ArrApi:
                 if date < cutoff:
                     continue
                 event = str(row.get("eventType", "")).casefold()
-                if event not in ("downloadfolderimported", "5"):
+                # Both Arr enums use 3 for DownloadFolderImported. Sonarr's 5
+                # means EpisodeFileDeleted and must never authorize cleanup.
+                if event not in ("downloadfolderimported", "3"):
                     continue
                 download_id = str(row.get("downloadId") or "").lower()
                 if download_id:
@@ -450,26 +452,32 @@ def import_confirmed(torrent: dict, files: list[dict], events: list[dict], now: 
     matchable = []
     for e in events:
         stamp = parse_date(e.get("date"))
-        if stamp is None or stamp < added or now - stamp < grace_minutes * 60:
+        if stamp is None or stamp < added or stamp > now:
             continue
         data = e.get("data") or {}
         source = str(data.get("droppedPath") or data.get("sourcePath") or "").replace("\\", "/").casefold()
         matchable.append((source, stamp))
     if not matchable:
-        return False, "no matching import event older than grace period since torrent was added"
-    # Single-video releases can use a history event without a source path.
-    if len(videos) == 1:
-        filename = PurePosixPath(str(videos[0].get("name")).replace("\\", "/")).name.casefold()
-        if any(not src or PurePosixPath(src).name == filename for src, _ in matchable):
-            return True, "verified single-video Arr import"
-        return False, "import history points to a different video filename"
-    imported_files = {PurePosixPath(src).name for src, _ in matchable if src}
+        return False, "no matching import event since torrent was added"
     wanted = [PurePosixPath(str(f.get("name")).replace("\\", "/")).name.casefold() for f in videos]
     if len(set(wanted)) != len(wanted):
         return False, "duplicate video basenames; cannot safely match all imports"
-    if all(name in imported_files for name in wanted):
-        return True, f"verified import history for all {len(wanted)} video files"
-    return False, f"only {len(imported_files.intersection(wanted))}/{len(wanted)} video files confirmed imported"
+    imported_at = []
+    for filename in wanted:
+        # Single-video releases can use a same-hash import without a source path.
+        stamps = [stamp for src, stamp in matchable
+                  if (not src and len(videos) == 1) or PurePosixPath(src).name == filename]
+        if stamps:
+            imported_at.append(min(stamps))
+    if len(imported_at) != len(wanted):
+        if len(videos) == 1:
+            return False, "import history points to a different video filename"
+        return False, f"only {len(imported_at)}/{len(wanted)} video files confirmed imported"
+    cleanup_after = max(imported_at) + grace_minutes * 60
+    if now < cleanup_after:
+        eligible = datetime.fromtimestamp(cleanup_after, timezone.utc).isoformat()
+        return False, f"import confirmed for all {len(wanted)} video file(s); cleanup grace until {eligible}"
+    return True, f"verified import history for all {len(wanted)} video files"
 
 
 class PendingStore:
@@ -522,6 +530,7 @@ class Guard:
         self.logged_import_dry: set[str] = set()
         self.warned_missing: set[str] = set()
         self.warned_defer: dict[str, str] = {}
+        self.import_wait_reasons: dict[str, str] = {}
         self.last_import_check: float = 0.0
 
     def poll(self, now: float | None = None):
@@ -536,6 +545,7 @@ class Guard:
         self.logged_dry.intersection_update(by_hash)
         self.logged_import_dry.intersection_update(by_hash)
         self.warned_defer = {h: msg for h, msg in self.warned_defer.items() if h in by_hash}
+        self.import_wait_reasons = {h: msg for h, msg in self.import_wait_reasons.items() if h in by_hash}
         candidates: dict[str, tuple[str, str, dict, list[dict]]] = {}
         for h, torrent in by_hash.items():
             app = torrent_app(torrent, self.config)
@@ -577,7 +587,7 @@ class Guard:
                             self.warned_defer[h] = detail
                         continue
                     self.completed_passed.add(h)
-                    LOG.info("ACCEPT completed [%s] name=%r hash=%s: %s; waiting for confirmed Arr import", app, name, h, detail)
+                    LOG.info("ACCEPT completed [%s] name=%r hash=%s: %s; checking Arr import history", app, name, h, detail)
                 if complete and h in self.completed_passed:
                     candidates[h] = (app, name, torrent, files)
             except (ApiError, urllib.error.URLError, ValueError, OSError, sqlite3.Error) as exc:
@@ -592,16 +602,26 @@ class Guard:
                 except (ApiError, ValueError, OSError, urllib.error.URLError) as exc:
                     LOG.error("Import history failed [%s]; preserving downloads: %s", app, exc)
                     continue
+                matching = [h for h, candidate in candidates.items() if candidate[0] == app]
+                LOG.info("CHECK import [%s] completed_downloads=%d matching_history=%d interval=%ds",
+                         app, len(matching), sum(bool(imports.get(h)) for h in matching),
+                         self.config.import_check_seconds)
                 for h, (own_app, name, torrent, files) in candidates.items():
                     if own_app != app or h in pending:
                         continue
                     if int(torrent.get("added_on") or 0) < since:
-                        LOG.debug("Skipping import cleanup beyond history lookback: %s", name)
+                        reason = "torrent predates configured history lookback; manual review required"
+                        if self.import_wait_reasons.get(h) != reason:
+                            LOG.info("WAIT import [%s] name=%r hash=%s: %s", app, name, h, reason)
+                            self.import_wait_reasons[h] = reason
                         continue
                     yes, reason = import_confirmed(torrent, files, imports.get(h, []), now, self.config.import_grace_minutes)
                     if not yes:
-                        LOG.debug("WAIT import [%s] name=%r hash=%s: %s", app, name, h, reason)
+                        if self.import_wait_reasons.get(h) != reason:
+                            LOG.info("WAIT import [%s] name=%r hash=%s: %s", app, name, h, reason)
+                            self.import_wait_reasons[h] = reason
                         continue
+                    self.import_wait_reasons.pop(h, None)
                     if self.config.dry_run:
                         if h not in self.logged_import_dry:
                             LOG.info("DRY RUN: ACCEPT imported [%s] name=%r hash=%s: %s; would delete torrent + qBit data", app, name, h, reason)
