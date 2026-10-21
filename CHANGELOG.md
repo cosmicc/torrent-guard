@@ -3,6 +3,29 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 0.9 - 10.21.2026
+
+### Added
+
+- Persistent automatic cleanup retries at 60, 120, 240, 480, then 900 seconds,
+  with the next retry time and attempt count in diagnostics.
+
+### Changed
+
+- Download logs use names and recorded paths instead of infohash identifiers,
+  including after restart or removal from qBittorrent.
+- Share failed ownership checks within a poll to avoid repeatedly querying the
+  same missing metadata for every leftover. Successful checks remain fresh.
+
+### Fixed
+
+- Identify the specific live torrent blocking leftover cleanup when its file
+  metadata is unavailable, alongside the affected leftover's saved paths.
+- Prevent cleanup API and safety-check failures from retrying every poll;
+  restart preserves deadlines and successful verification clears retry state.
+- Omit query strings from HTTP error endpoints and include the exact target
+  path when a local removal fails.
+
 ## 0.8 - 10.21.2026
 
 ### Added

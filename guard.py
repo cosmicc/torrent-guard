@@ -29,7 +29,7 @@ import urllib.request
 from deletion import FileVerifier
 
 LOG = logging.getLogger("torrent-guard")
-VERSION = "0.8"
+VERSION = "0.9"
 HEARTBEAT_FILE = Path("/tmp/torrent-guard-heartbeat")
 DEFAULT_VIDEO = frozenset({".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".webm", ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".divx", ".flv"})
 DEFAULT_RISKY = frozenset({".exe", ".scr", ".com", ".bat", ".cmd", ".msi", ".msp", ".msix", ".ps1", ".psm1", ".vbs", ".vbe", ".vb", ".js", ".jse", ".wsf", ".wsh", ".hta", ".lnk", ".pif", ".cpl", ".jar", ".apk", ".appx", ".reg", ".scf", ".sh", ".py"})
@@ -180,7 +180,8 @@ class Http:
                 payload = response.read()
         except urllib.error.HTTPError as exc:
             snippet = exc.read(250).decode("utf-8", "replace")
-            raise ApiError(f"HTTP {exc.code} calling {method} {url}: {snippet}", exc.code) from exc
+            endpoint = urllib.parse.urlsplit(url)._replace(query="", fragment="").geturl()
+            raise ApiError(f"HTTP {exc.code} calling {method} {endpoint}: {snippet}", exc.code) from None
         stripped = payload.strip()
         if stripped.startswith((b"{", b"[")):
             result = json.loads(payload)
@@ -370,7 +371,7 @@ def torrent_app(torrent: dict, config: Config) -> str | None:
     cat = config.categories.get(torrent.get("category"))
     tagged = {config.tags[tag.strip().casefold()] for tag in str(torrent.get("tags") or "").split(",") if tag.strip().casefold() in config.tags}
     if len(tagged) > 1 or (cat and tagged and cat not in tagged):
-        LOG.warning("Skipping conflicting Arr ownership hash=%s category=%s tags=%s", torrent.get("hash"), torrent.get("category"), torrent.get("tags"))
+        LOG.warning("Skipping conflicting Arr ownership %s category=%s tags=%s", download_context(torrent), torrent.get("category"), torrent.get("tags"))
         return None
     return cat or (next(iter(tagged)) if tagged else None)
 
@@ -545,6 +546,27 @@ def import_confirmed(torrent: dict, files: list[dict], events: list[dict], now: 
     return True, f"verified import history for all {len(wanted)} video files"
 
 
+def download_context(torrent: dict, files: list[dict] | None = None, manifest: dict | None = None) -> str:
+    """Describe API or saved evidence for operators without exposing infohashes.
+
+    Paths are descriptive only; filesystem authorization never uses this text.
+    Legacy journals may have a title but no recoverable path.
+    """
+    paths = []
+    if manifest:
+        paths = [str(PurePosixPath(item.get("root", "")) / item["path"])
+                 for item in manifest.get("items", []) if item.get("path")]
+    elif files and torrent.get("save_path"):
+        paths = [str(PurePosixPath(str(torrent["save_path"])) / str(file["name"]))
+                 for file in files if file.get("name")]
+    if not paths:
+        paths = [str(torrent[key]) for key in ("content_path", "save_path", "download_path") if torrent.get(key)]
+    paths = list(dict.fromkeys(paths))
+    shown = ", ".join(repr(path) for path in paths[:4]) or "unavailable in saved metadata"
+    extra = f" (+{len(paths) - 4} more recorded paths)" if len(paths) > 4 else ""
+    return f"name={str(torrent.get('name') or '<unnamed torrent>')!r} paths={shown}{extra}"
+
+
 class PendingStore:
     """Durable cleanup journal and audit-independent decision state."""
     def __init__(self, filename: str):
@@ -570,6 +592,10 @@ class PendingStore:
             hash TEXT PRIMARY KEY, attempts INTEGER NOT NULL,
             next_at REAL NOT NULL, reason TEXT NOT NULL
         )""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS cleanup_retry (
+            hash TEXT PRIMARY KEY, attempts INTEGER NOT NULL,
+            next_at REAL NOT NULL, reason TEXT NOT NULL
+        )""")
         self.db.commit()
 
     def add(self, torrent_hash: str, app: str, name: str, reason: str, kind: str = "reject"):
@@ -585,6 +611,7 @@ class PendingStore:
     def remove(self, torrent_hash: str):
         self.db.execute("DELETE FROM pending WHERE hash=?", (torrent_hash,))
         self.db.execute("DELETE FROM deletion_evidence WHERE hash=?", (torrent_hash,))
+        self.db.execute("DELETE FROM cleanup_retry WHERE hash=?", (torrent_hash,))
         self.db.commit()
 
     def evidence(self, torrent_hash: str):
@@ -610,6 +637,7 @@ class PendingStore:
                 SELECT hash,?,manifest FROM deletion_evidence WHERE hash=?""", (now, torrent_hash))
             self.db.execute("DELETE FROM pending WHERE hash=?", (torrent_hash,))
             self.db.execute("DELETE FROM deletion_evidence WHERE hash=?", (torrent_hash,))
+            self.db.execute("DELETE FROM cleanup_retry WHERE hash=?", (torrent_hash,))
 
     def entries(self):
         return self.db.execute("SELECT hash,app,name,reason,queue_id,phase,kind FROM pending ORDER BY rowid").fetchall()
@@ -632,6 +660,16 @@ class PendingStore:
         with self.db:
             self.db.execute("DELETE FROM filesystem_retry WHERE hash=?", (h,))
 
+    def cleanup_retries(self):
+        """Restore cleanup deadlines without changing existing journal evidence."""
+        return {row[0]: (row[1], row[2], row[3]) for row in self.db.execute(
+            "SELECT hash,attempts,next_at,reason FROM cleanup_retry")}
+
+    def set_cleanup_retry(self, h: str, attempt: int, next_at: float, reason: str):
+        """Checkpoint automatic retries so restarts cannot create a busy loop."""
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO cleanup_retry VALUES (?,?,?,?)", (h, attempt, next_at, reason))
+
 
 class Guard:
     def __init__(self, config: Config, qbit=None, arr_clients=None, store=None, validator=None, verifier=None):
@@ -642,6 +680,8 @@ class Guard:
         self.validator = validator if validator is not None else MediaValidator(config)
         self.verifier = verifier if verifier is not None else FileVerifier(config)
         self.cleanup_messages: dict[str, tuple[str, float]] = {}
+        self.log_context: dict[str, str] = {}
+        self.cleanup_retries = self.store.cleanup_retries()
         self.filesystem_retries = self.store.filesystem_retries()
         self.metadata_passed: set[str] = set()
         self.completed_passed: set[str] = set()
@@ -659,6 +699,8 @@ class Guard:
             raise ApiError("Unexpected qBittorrent torrent-list response")
         by_hash = {str(t.get("hash", "")).lower(): t for t in torrents if t.get("hash")}
         pending = self.store.hashes()
+        self.log_context = {h: context for h, context in self.log_context.items() if h in by_hash or h in pending}
+        self.log_context.update({h: download_context(t) for h, t in by_hash.items()})
         self.metadata_passed.intersection_update(by_hash)
         self.completed_passed.intersection_update(by_hash)
         self.logged_dry.intersection_update(by_hash)
@@ -672,7 +714,7 @@ class Guard:
                 continue
             if not self._filesystem_ready(h, torrent, now):
                 continue
-            name = str(torrent.get("name") or h)
+            name = str(torrent.get("name") or "<unnamed torrent>")
             age = now - int(torrent.get("added_on") or 0)
             fresh = 0 <= age <= self.config.max_age_hours * 3600
             complete = is_complete(torrent)
@@ -688,8 +730,9 @@ class Guard:
                 if not isinstance(files, list):
                     raise ApiError("Unexpected qBittorrent file-list response")
                 if not files:
-                    LOG.debug("WAIT metadata [%s] %s hash=%s", app, name, h)
+                    LOG.debug("WAIT metadata [%s] %s", app, self.log_context[h])
                     continue
+                self.log_context[h] = download_context(torrent, files)
                 reason = classify(files, reject_no_video=self.config.reject_no_video)
                 if reason:
                     self.validator.check_filesystem(torrent, files)
@@ -697,7 +740,7 @@ class Guard:
                     continue
                 if h not in self.metadata_passed:
                     self.metadata_passed.add(h)
-                    LOG.info("ACCEPT metadata [%s] name=%r hash=%s category=%r tags=%r selected_video=%d", app, name, h, torrent.get("category"), torrent.get("tags"), len(video_files(files)))
+                    LOG.info("ACCEPT metadata [%s] %s category=%r tags=%r selected_video=%d", app, self.log_context[h], torrent.get("category"), torrent.get("tags"), len(video_files(files)))
                 if need_complete:
                     result, detail = self.validator.inspect(torrent, files)
                     if result == "reject":
@@ -707,13 +750,13 @@ class Guard:
                         self._defer_filesystem(h, detail, now)
                         continue
                     self.completed_passed.add(h)
-                    LOG.info("ACCEPT completed [%s] name=%r hash=%s: %s; checking Arr import history", app, name, h, detail)
+                    LOG.info("ACCEPT completed [%s] %s: %s; checking Arr import history", app, self.log_context[h], detail)
                 if complete and h in self.completed_passed:
                     candidates[h] = (app, name, torrent, files)
             except OSError as exc:
                 self._defer_filesystem(h, str(exc), now)
             except (ApiError, ValueError, sqlite3.Error) as exc:
-                LOG.error("Inspection failed [%s] name=%r hash=%s: %s", app, name, h, exc)
+                LOG.error("Inspection failed [%s] %s: %s", app, self.log_context[h], exc)
 
         if candidates and (not self.last_import_check or now - self.last_import_check >= self.config.import_check_seconds):
             self.last_import_check = now
@@ -734,22 +777,22 @@ class Guard:
                     if int(torrent.get("added_on") or 0) < since:
                         reason = "torrent predates configured history lookback; manual review required"
                         if self.import_wait_reasons.get(h) != reason:
-                            LOG.info("WAIT import [%s] name=%r hash=%s: %s", app, name, h, reason)
+                            LOG.info("WAIT import [%s] %s: %s", app, self.log_context[h], reason)
                             self.import_wait_reasons[h] = reason
                         continue
                     yes, reason = import_confirmed(torrent, files, imports.get(h, []), now, self.config.import_grace_minutes)
                     if not yes:
                         if self.import_wait_reasons.get(h) != reason:
-                            LOG.info("WAIT import [%s] name=%r hash=%s: %s", app, name, h, reason)
+                            LOG.info("WAIT import [%s] %s: %s", app, self.log_context[h], reason)
                             self.import_wait_reasons[h] = reason
                         continue
                     self.import_wait_reasons.pop(h, None)
                     if self.config.dry_run:
                         if h not in self.logged_import_dry:
-                            LOG.info("DRY RUN: ACCEPT imported [%s] name=%r hash=%s: %s; would delete torrent + qBit data", app, name, h, reason)
+                            LOG.info("DRY RUN: ACCEPT imported [%s] %s: %s; would delete torrent + qBit data", app, self.log_context[h], reason)
                             self.logged_import_dry.add(h)
                     else:
-                        LOG.info("CLEANUP scheduled [%s] name=%r hash=%s: imported at least %dm ago; %s", app, name, h, self.config.import_grace_minutes, reason)
+                        LOG.info("CLEANUP scheduled [%s] %s: imported at least %dm ago; %s", app, self.log_context[h], self.config.import_grace_minutes, reason)
                         self.store.add(h, app, name, reason, kind="imported")
                         pending.add(h)
         if not self.config.dry_run:
@@ -759,10 +802,10 @@ class Guard:
         if h in self.filesystem_retries:
             return  # An unresolved access failure overrides filename-based rejection.
         if h not in self.logged_dry:
-            LOG.warning("REJECT candidate [%s] name=%r hash=%s category=%r tags=%r reason=%s", app, name, h, torrent.get("category"), torrent.get("tags"), reason)
+            LOG.warning("REJECT candidate [%s] %s category=%r tags=%r reason=%s", app, self.log_context[h], torrent.get("category"), torrent.get("tags"), reason)
         if self.config.dry_run:
             if h not in self.logged_dry:
-                LOG.warning("DRY RUN: would stop, Arr-blocklist and delete torrent + tracked files: %s", name)
+                LOG.warning("DRY RUN: would stop, Arr-blocklist and delete torrent + tracked files: %s", self.log_context.get(h, download_context(torrent)))
             self.logged_dry.add(h)
         else:
             self.store.add(h, app, name, reason, kind="reject")
@@ -775,7 +818,7 @@ class Guard:
         self.completed_passed.discard(h)
         if not self.config.dry_run:
             self.store.set_filesystem_retry(h, attempt, now + delay, reason)
-        LOG.warning("DEFER validation hash=%s reason=%s; retry_in=%ds attempt=%d", h, reason, delay, attempt)
+        LOG.warning("DEFER validation %s reason=%s; retry_in=%ds attempt=%d", self.log_context.get(h, "download metadata unavailable"), reason, delay, attempt)
 
     def _clear_filesystem(self, h: str):
         """Clear retry state after recovery without changing dry-run journals."""
@@ -801,7 +844,7 @@ class Guard:
                     self._defer_filesystem(h, reason, now)
                     return False
             self._clear_filesystem(h)
-            LOG.info("Filesystem access recovered hash=%s; resuming inspection", h)
+            LOG.info("Filesystem access recovered %s; resuming inspection", self.log_context.get(h, "download metadata unavailable"))
             return True
         except (ApiError, ValueError, OSError) as exc:
             self._defer_filesystem(h, str(exc), now)
@@ -829,7 +872,7 @@ class Guard:
             if result == "defer":
                 self._defer_filesystem(h, detail, now)
             else:
-                LOG.warning("PENDING imported media not ready [%s] hash=%s: %s", app, h, detail)
+                LOG.warning("PENDING imported media not ready [%s] %s: %s", app, self.log_context.get(h), detail)
             return False
         if app not in history_cache:
             history_cache[app] = self.arr_clients[app].imported_history(since)
@@ -870,10 +913,45 @@ class Guard:
         """Repeat unresolved status at most once a minute unless the reason changes."""
         previous, stamp = self.cleanup_messages.get(h, ("", 0.0))
         if previous != message or now - stamp >= 60:
-            LOG.log(level, "PENDING disk verification hash=%s: %s", h, message)
+            LOG.log(level, "PENDING disk verification %s: %s", self.log_context.get(h, "download metadata unavailable"), message)
             self.cleanup_messages[h] = (message, now)
 
-    def _verify_deletion(self, h: str, app: str, kind: str, now: float):
+    def _defer_cleanup(self, h: str, message: str, now: float):
+        """Retry unresolved cleanup automatically at 60/120/240/480/900 seconds."""
+        attempt = self.cleanup_retries.get(h, (0, 0, ""))[0] + 1
+        delay = min(900, 60 * 2 ** min(attempt - 1, 4))
+        self.store.set_cleanup_retry(h, attempt, now + delay, message)
+        self.cleanup_retries[h] = (attempt, now + delay, message)
+        deadline = datetime.fromtimestamp(now + delay, timezone.utc).isoformat()
+        self._cleanup_status(h, f"{message}; retry_in={delay}s attempt={attempt} retry_at={deadline}", now, logging.WARNING)
+
+    def _ownership_paths(self, cache: dict) -> set[tuple[str, str]]:
+        """Share failed ownership checks per poll; refresh before each removal.
+
+        Empty file metadata for any client torrent remains inconclusive. Report
+        that torrent explicitly rather than blaming the leftover's manifest.
+        """
+        if "error" in cache:
+            error_type, message = cache["error"]
+            raise error_type(message)
+        live = self.qbit.torrents()
+        if not isinstance(live, list):
+            raise ApiError("Cannot establish active torrent ownership")
+        paths = set()
+        for torrent in live:
+            try:
+                files = self.qbit.files(str(torrent.get("hash") or ""))
+                paths.update((item["root"], item["path"]) for item in self.verifier.paths(torrent, files))
+            except (ApiError, ValueError, OSError) as exc:
+                # Retain the underlying I/O error type for filesystem holds.
+                message = f"ownership check blocked by {download_context(torrent)}: {exc}"
+                error_type = OSError if isinstance(exc, OSError) else ValueError
+                cache["error"] = (error_type, message)
+                raise error_type(message) from exc
+        cache["hashes"] = {str(t.get("hash", "")).lower() for t in live}
+        return paths
+
+    def _verify_deletion(self, h: str, app: str, kind: str, now: float, ownership_cache: dict | None = None):
         """Confirm disk absence, or remove only authorized unchanged leftovers."""
         evidence = self.store.evidence(h)
         if evidence is None or evidence[1] is None:
@@ -882,10 +960,9 @@ class Guard:
         remaining = self.verifier.remaining(manifest)
         if remaining and now - requested_at >= self.config.delete_settle_seconds and self.config.cleanup_leftovers:
             # Refresh remote state before local cleanup, including unrelated torrents.
-            live = self.qbit.torrents()
-            if not isinstance(live, list):
-                raise ApiError("Cannot establish active torrent ownership")
-            if any(str(t.get("hash", "")).lower() == h for t in live):
+            ownership_cache = {} if ownership_cache is None else ownership_cache
+            owned_paths = self._ownership_paths(ownership_cache)
+            if h in ownership_cache["hashes"]:
                 raise ValueError("torrent reappeared; local removal deferred")
             if kind == "imported":
                 since = now - self.config.history_lookback_days * 86400
@@ -897,17 +974,21 @@ class Guard:
                 if not yes:
                     raise ValueError("local removal lacks current import evidence: " + reason)
             wanted = {(item["root"], item["path"]) for item in manifest["items"]}
-            for torrent in live:
-                files = self.qbit.files(str(torrent.get("hash") or ""))
-                paths = self.verifier.paths(torrent, files)
-                if any((item["root"], item["path"]) in wanted for item in paths):
-                    raise ValueError("another torrent owns a recorded download path")
+            if owned_paths & wanted:
+                overlap = sorted(owned_paths & wanted)
+                raise ValueError(f"another torrent owns recorded download path {str(PurePosixPath(*overlap[0]))!r}")
             for item in remaining:
-                self.verifier.remove(manifest, item, lambda updated: self.store.save_manifest(h, updated))
-                LOG.warning("LEFTOVER cleanup attempted hash=%s download=%r", h, item["path"])
+                target = str(PurePosixPath(item["root"]) / item["path"])
+                try:
+                    self.verifier.remove(manifest, item, lambda updated: self.store.save_manifest(h, updated))
+                except OSError as exc:
+                    raise OSError(exc.errno, str(exc), target) from exc
+                except ValueError as exc:
+                    raise ValueError(f"leftover removal failed download={target!r}: {exc}") from exc
+                LOG.warning("LEFTOVER cleanup attempted %s download=%r", self.log_context.get(h), str(PurePosixPath(item["root"]) / item["path"]))
             remaining = self.verifier.remaining(manifest)
         if remaining:
-            paths = ", ".join(repr(item["path"]) for item in remaining[:4])
+            paths = ", ".join(repr(str(PurePosixPath(item.get("root", "")) / item["path"])) for item in remaining[:4])
             if not self.config.cleanup_leftovers:
                 blocker = "automatic leftover cleanup disabled (CLEANUP_LEFTOVERS=false); enable compose.cleanup.yaml with the completed-directory write bind"
             elif now - requested_at < self.config.delete_settle_seconds:
@@ -920,23 +1001,31 @@ class Guard:
             return False
         self._clear_filesystem(h)
         self.store.finish(h, now)
+        self.cleanup_retries.pop(h, None)
         self.warned_missing.discard(h)
         self.cleanup_messages.pop(h, None)
-        LOG.info("CLEANED [%s] kind=%s hash=%s torrent absent and all %d recorded file paths independently verified absent", app, kind, h, len(manifest["items"]))
+        LOG.info("CLEANED [%s] kind=%s %s torrent absent and all %d recorded file paths independently verified absent", app, kind, self.log_context.get(h), len(manifest["items"]))
         return True
 
     def _process_pending(self, by_hash: dict[str, dict], now: float):
         """Retry journal operations while keeping import and rejection paths separate."""
         queue_cache: dict[str, dict[str, int]] = {}
         history_cache: dict[str, dict] = {}
+        ownership_cache: dict = {}
         for h, app, name, reason, queue_id, phase, kind in self.store.entries():
+            if now < self.cleanup_retries.get(h, (0, 0, ""))[1]:
+                continue
+            self.log_context.setdefault(h, download_context({"name": name}))
             try:
+                evidence = self.store.evidence(h)
+                if evidence:
+                    self.log_context[h] = download_context({**evidence[0].get("torrent", {}), "name": name}, manifest=evidence[0])
                 if kind not in {"reject", "imported"} or phase not in {"match", "arr", "delete", "verify"}:
-                    LOG.error("PENDING invalid journal kind/phase; manual review required hash=%s", h)
+                    LOG.error("PENDING invalid journal kind/phase; manual review required %s", self.log_context[h])
                     continue
                 torrent = by_hash.get(h)
                 if torrent and torrent_app(torrent, self.config) != app:
-                    LOG.error("PENDING ownership changed; manual review required [%s] %s hash=%s", app, name, h)
+                    LOG.error("PENDING ownership changed; manual review required [%s] %s", app, self.log_context[h])
                     continue
                 if not self._filesystem_ready(h, torrent, now):
                     continue
@@ -947,7 +1036,7 @@ class Guard:
                 if kind == "imported":
                     if torrent is not None:
                         if not self._import_cleanup_ready(torrent, h, app, now, history_cache):
-                            LOG.warning("PENDING import evidence incomplete; preserving download [%s] hash=%s", app, h)
+                            LOG.warning("PENDING import evidence incomplete; preserving download [%s] %s", app, self.log_context[h])
                             continue
                     # Repair legacy imported phases without ever calling Arr rejection.
                     if phase in {"match", "arr"}:
@@ -955,7 +1044,7 @@ class Guard:
                         phase = "delete"
                 if phase == "match":
                     if torrent is None:
-                        LOG.error("PENDING disappeared before cleanup; cannot prove files were deleted: %s", name)
+                        LOG.error("PENDING disappeared before cleanup; cannot prove files were deleted: %s", self.log_context[h])
                         continue
                     self.qbit.stop(h)
                     if app not in queue_cache:
@@ -963,7 +1052,7 @@ class Guard:
                     queue_id = queue_cache[app].get(h)
                     if queue_id is None:
                         if h not in self.warned_missing:
-                            LOG.warning("PENDING no %s queue match yet (stopped; will retry): %s", app, name)
+                            LOG.warning("PENDING no %s queue match yet (stopped; will retry): %s", app, self.log_context[h])
                             self.warned_missing.add(h)
                         continue
                     self.store.set_phase(h, "arr", queue_id)
@@ -975,7 +1064,7 @@ class Guard:
                     except ApiError as exc:
                         if exc.status != 404:
                             raise
-                        LOG.warning("PENDING Arr queue ID gone; blocklist unconfirmed, preserving download; manual review required [%s] name=%s", app, name)
+                        LOG.warning("PENDING Arr queue ID gone; blocklist unconfirmed, preserving download; manual review required [%s] %s", app, self.log_context[h])
                         continue
                     self.store.set_phase(h, "delete")
                     phase = "delete"
@@ -984,25 +1073,25 @@ class Guard:
                         evidence = self.store.evidence(h)
                         if evidence is not None and evidence[1] is not None:
                             self.store.set_phase(h, "verify")
-                            self._verify_deletion(h, app, kind, now)
+                            self._verify_deletion(h, app, kind, now, ownership_cache)
                         else:
                             self._cleanup_status(h, "torrent missing before saved delete request; manual review required", now)
                         continue
                     if kind == "reject":
                         self.qbit.stop(h)
                     self._request_deletion(h, torrent, now)
-                    LOG.warning("DELETE requested [%s] kind=%s name=%r hash=%s deleteFiles=true", app, kind, name, h)
+                    LOG.warning("DELETE requested [%s] kind=%s %s deleteFiles=true", app, kind, self.log_context[h])
                     continue
                 if phase == "verify":
                     if torrent is not None:
                         self._request_deletion(h, torrent, now)
-                        LOG.warning("PENDING deletion still visible; retrying [%s] %s hash=%s", app, name, h)
+                        self._defer_cleanup(h, f"qBittorrent entry still visible [{app}]; deleteFiles=true requested again", now)
                         continue
-                    self._verify_deletion(h, app, kind, now)
+                    self._verify_deletion(h, app, kind, now, ownership_cache)
             except OSError as exc:
                 self._defer_filesystem(h, str(exc), now)
             except (ApiError, ValueError, sqlite3.Error) as exc:
-                self._cleanup_status(h, f"cleanup failed [{app}] kind={kind} phase={phase}: {exc}", now, logging.ERROR)
+                self._defer_cleanup(h, f"cleanup failed [{app}] kind={kind} phase={phase}: {exc}", now)
 
 
 class ConsoleFormatter(logging.Formatter):

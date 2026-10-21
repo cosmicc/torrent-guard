@@ -174,6 +174,104 @@ class DeletionTests(unittest.TestCase):
         self.assertTrue(self.path.exists())
         self.assertTrue(self.guard.store.entries())
 
+    def test_missing_ownership_metadata_names_both_downloads_and_backs_off(self):
+        self.request()
+        blocker = {**self.torrent, "hash": "other-secret-hash", "category": "manual",
+                   "name": "Waiting for metadata", "content_path": "/downloads/completed/Waiting"}
+        self.qbit.torrents.return_value = [blocker]
+        self.qbit.files.return_value = []
+        with self.assertLogs("torrent-guard", level="WARNING") as logs:
+            self.guard.poll(now=self.now + 120)
+        output = "\n".join(logs.output)
+        self.assertIn("name='Movie'", output)
+        self.assertIn("/downloads/completed/Movie.mkv", output)
+        self.assertIn("ownership check blocked by name='Waiting for metadata'", output)
+        self.assertIn("/downloads/completed/Waiting", output)
+        self.assertIn("retry_in=60s", output)
+        self.assertNotIn("abc123", output)
+        self.assertNotIn("other-secret-hash", output)
+        count = self.qbit.files.call_count
+        self.guard.poll(now=self.now + 125)
+        self.assertEqual(self.qbit.files.call_count, count)
+        self.assertTrue(self.path.exists())
+        with self.assertLogs("torrent-guard", level="WARNING") as logs:
+            self.guard.poll(now=self.now + 180)
+        self.assertTrue(any("retry_in=120s" in line for line in logs.output))
+        # Removal resumes automatically when ownership can be established.
+        self.qbit.torrents.return_value = []
+        self.guard.poll(now=self.now + 300)
+        self.assertFalse(self.path.exists())
+        self.assertFalse(self.guard.store.cleanup_retries())
+
+    def test_cleanup_backoff_survives_restart_and_caps_at_fifteen_minutes(self):
+        self.request()
+        self.qbit.torrents.return_value = [{**self.torrent, "hash": "other", "category": "manual"}]
+        self.qbit.files.return_value = []
+        self.guard.poll(now=self.now + 120)
+        self.guard.store.db.close()
+        self.guard = Guard(self.cfg, self.qbit, {"RADARR": self.arr})
+        self.qbit.files.reset_mock()
+        self.guard.poll(now=self.now + 125)
+        self.qbit.files.assert_not_called()
+        timestamp = self.now + 180
+        for expected_delay in (120, 240, 480, 900, 900):
+            self.guard.poll(now=timestamp)
+            retry = self.guard.store.cleanup_retries()["abc123"]
+            self.assertEqual(retry[1] - timestamp, expected_delay)
+            timestamp = retry[1]
+        self.assertTrue(self.path.exists())
+
+    def test_shared_failed_ownership_scan_does_not_repeat_for_each_leftover(self):
+        self.request()
+        evidence = self.guard.store.evidence("abc123")[0]
+        self.guard.store.add("second", "RADARR", "Second movie", "test", kind="imported")
+        self.guard.store.save_manifest("second", evidence)
+        self.guard.store.requested("second", self.now)
+        self.guard.store.set_phase("second", "verify")
+        self.qbit.torrents.return_value = [{**self.torrent, "hash": "other", "category": "manual"}]
+        self.qbit.files.return_value = []
+        self.qbit.files.reset_mock()
+        self.guard.poll(now=self.now + 120)
+        self.qbit.files.assert_called_once_with("other")
+        self.assertEqual(len(self.guard.store.cleanup_retries()), 2)
+        self.assertTrue(self.path.exists())
+
+    def test_saved_paths_appear_in_cleaned_log_after_restart_without_hash(self):
+        self.request()
+        self.guard.store.db.close()
+        self.guard = Guard(self.cfg, self.qbit, {"RADARR": self.arr})
+        with self.assertLogs("torrent-guard", level="INFO") as logs:
+            self.guard.poll(now=self.now + 120)
+        output = "\n".join(logs.output)
+        self.assertIn("CLEANED [RADARR]", output)
+        self.assertIn("name='Movie'", output)
+        self.assertIn("/downloads/completed/Movie.mkv", output)
+        self.assertNotIn("abc123", output)
+
+    def test_blocked_leftover_does_not_prevent_another_absence_verification(self):
+        self.request()
+        manifest = self.guard.store.evidence("abc123")[0]
+        for item in manifest["items"]:
+            item["path"] = "already-removed/" + item["path"]
+        self.guard.store.add("gone", "RADARR", "Already removed", "test", kind="imported")
+        self.guard.store.save_manifest("gone", manifest)
+        self.guard.store.requested("gone", self.now)
+        self.guard.store.set_phase("gone", "verify")
+        self.qbit.torrents.return_value = [{**self.torrent, "hash": "other", "category": "manual"}]
+        self.qbit.files.return_value = []
+        self.guard.poll(now=self.now + 120)
+        self.assertEqual(self.guard.store.hashes(), {"abc123"})
+        self.assertTrue(self.path.exists())
+
+    def test_cleanup_retry_does_not_modify_existing_journal_in_dry_run(self):
+        self.request()
+        self.guard._defer_cleanup("abc123", "test failure", self.now)
+        before = self.guard.store.cleanup_retries()
+        self.guard.config = replace(self.cfg, dry_run=True)
+        self.guard.poll(now=self.now + 1000)
+        self.assertEqual(self.guard.store.cleanup_retries(), before)
+        self.assertTrue(self.path.exists())
+
     def test_reused_hash_never_enters_local_cleanup(self):
         self.request()
         self.qbit.torrents.return_value = [{**self.torrent, "added_on": self.now + 10}]

@@ -136,7 +136,7 @@ report CLEANED after all recorded names are independently absent. Missing mounts
 permission errors and legacy missing-torrent records without manifests remain
 pending. Preserve deletion_evidence/deletion_audit tables during upgrades.
 
-Keep .env (qBittorrent password, Arr keys), state DB and logs outside version control. Logs contain torrent titles/infohashes; do not copy API keys into AGENTS, tests or issue templates. Retain restricted container privileges. Do not require Docker socket or root. Do not delete /state, use docker compose down -v, or auto-reinitialize existing journals during upgrades. When migrating a named Docker volume to a bind mount, data is not copied automatically.
+Keep .env (qBittorrent password, Arr keys), state DB and logs outside version control. Logs contain download titles and paths; do not copy API keys into AGENTS, tests or issue templates. Retain restricted container privileges. Do not require Docker socket or root. Do not delete /state, use docker compose down -v, or auto-reinitialize existing journals during upgrades. When migrating a named Docker volume to a bind mount, data is not copied automatically.
 
 ## Configuration and operational controls
 
@@ -153,6 +153,18 @@ Log effective cleanup settings at startup. Pending-file warnings must identify
 whether automatic cleanup is disabled, its settle deadline, or files remain
 after an attempt. Never recommend deleting the journal to retry leftovers;
 recreating with the explicit cleanup override resumes existing evidence.
+
+Cleanup API/safety-check exceptions and repeated visible-client deletion attempts
+use additive `cleanup_retry` state: 60/120/240/480/900-second capped automatic
+backoff, restored after restart and cleared with successful deletion verification.
+Keep filesystem holds independent; neither deadline bypasses the other. Dry-run
+polling must not mutate cleanup retries. Cache failed ownership checks only within
+one poll; refresh successful ownership checks before each cleanup operation.
+Operator logs identify download names and actual API/saved paths, not infohashes.
+Use saved manifests and journal names after the client forgets a torrent; never
+guess deletion targets from titles. When another torrent's metadata blocks
+cleanup, include its name/location as well as the cleanup target. HTTP error
+endpoints omit query strings. See the deletion guide for retry troubleshooting.
 
 `LOG_COLOR=always` is the default for live Docker logs; `auto` requires a TTY
 and `never` disables colors. Keep the persistent audit file plain text, escape

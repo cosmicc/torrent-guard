@@ -264,6 +264,11 @@ See [filesystem recovery](docs/filesystem-retries.md). No new settings are neede
   with a direct/no-proxy request. Keep API keys out of shared logs. History
   failures retain downloads; they must not be bypassed.
 - **Pending cleanup:** inspect journal kind and phase alongside remote API state.
+  Cleanup API/safety failures retry automatically with 60/120/240/480/900-second
+  backoff preserved across restarts. Logs show download names, paths and the next
+  retry time. An ownership-metadata warning also names the blocking live torrent;
+  resolve its missing metadata or client error. See
+  [cleanup retry troubleshooting](docs/deletion-verification.md#cleanup-retries-and-missing-metadata).
   Changed ownership, missing media, incomplete imports, and unconfirmed
   blocklisting require review. Never delete the journal to force retries.
 - **Changed environment:** recreate the container with

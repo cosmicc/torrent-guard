@@ -154,6 +154,8 @@ class PollTests(unittest.TestCase):
         self.assertEqual(self.guard.store.entries()[0][-2], "arr")
         self.arr.blocklist_and_remove.side_effect = None
         self.guard.poll(now=self.now + 5)
+        self.qb.delete_with_data.assert_not_called()
+        self.guard.poll(now=self.now + 60)
         self.qb.delete_with_data.assert_called_once()
 
     def test_delete_error_retries(self):
@@ -161,6 +163,8 @@ class PollTests(unittest.TestCase):
         self.guard.poll(now=self.now)
         self.assertEqual(self.guard.store.entries()[0][-2], "delete")
         self.guard.poll(now=self.now + 5)
+        self.assertEqual(self.qb.delete_with_data.call_count, 1)
+        self.guard.poll(now=self.now + 60)
         self.assertEqual(self.qb.delete_with_data.call_count, 2)
         self.assertEqual(self.guard.store.entries()[0][-2], "verify")
 

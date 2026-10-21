@@ -149,9 +149,40 @@ cannot prove the production server's API behavior, bind mounts, or permissions.
 
 `PENDING disk verification` reports unresolved checks with retained evidence;
 `LEFTOVER cleanup attempted` records local attempts. `CLEANED` requires both
-client absence and independent recorded-file absence. Persistent errors repeat
-at most once a minute unless the reason changes. The ordinary healthcheck still
+client absence and independent recorded-file absence. The ordinary healthcheck still
 measures completed polling, not whether all cleanups succeed.
+
+## Cleanup retries and missing metadata
+
+Cleanup API failures and safety-check exceptions retry after 60, 120, 240, 480,
+then at most 900 seconds. Repeated API deletion requests for a still-visible
+torrent use the same backoff. `retry_in`, `attempt`, and UTC `retry_at` explain
+when the next attempt will run. No sleeping occurs inside the poll loop; other
+downloads continue processing. The additive SQLite `cleanup_retry` table keeps
+deadlines across restarts and is cleared when deletion verification succeeds.
+Existing evidence and audit records are preserved. Dry-run polling does not
+change these retries. Filesystem errors keep their separate 30–300-second holds.
+
+`complete qBittorrent file metadata is unavailable` can describe another live
+torrent encountered while checking ownership, rather than the deleted torrent.
+The diagnostic now names both the cleanup download and the blocking torrent,
+with their paths. Inspect that blocking torrent in qBittorrent for missing magnet
+metadata or a stalled/error state. Allow metadata to finish or resolve its client
+error. Guard automatically resumes at the next retry once ownership can be
+established. Missing metadata remains a reason to preserve files; backoff does
+not bypass shared-file protection or guarantee cleanup while a blocker remains.
+
+Failed ownership scans are shared within a poll so many pending leftovers do not
+each repeat the same remote scan. Successful ownership is checked afresh before
+each cleanup operation. No ownership result survives into another poll.
+
+Download logs use titles and up to four recorded absolute paths instead of
+infohash identifiers, with a count when more paths exist. Removal failures name
+the exact target even when it falls outside that preview. Paths use qBittorrent's
+namespace (for example `/downloads/complete`); filesystem exceptions may also
+show the Guard mount or `/cleanup/completed` write alias. A legacy journal without
+file evidence reports its saved title and unavailable paths. Logs remain private
+operational data. Hashes remain internal API/database keys.
 
 If only plain `docker compose up` was used, automatic leftover removal is
 disabled by default. Enable the override using the commands above; a container
