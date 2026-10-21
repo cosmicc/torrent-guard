@@ -16,11 +16,17 @@ jobs:
           python-version: '3.12'
       - name: Verify tests
         run: python -m unittest discover -s tests -v
+      - name: Validate and extract changelog entry
+        run: python scripts/release_notes.py > "$RUNNER_TEMP/release-notes.md"
       - name: Create versioned GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo 'Releases must run from main' >&2
+            exit 1
+          fi
           version="$(tr -d '[:space:]' < VERSION)"
           case "$version" in
             *[!0-9.]*|'' ) echo 'VERSION must be numeric dotted version' >&2; exit 1;;
@@ -29,5 +35,5 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "Release $tag already exists; not modifying it."
           else
-            gh release create "$tag" --target "$GITHUB_SHA" --title "Torrent Guard $tag" --notes-file RELEASE_NOTES.md
+            gh release create "$tag" --target "$GITHUB_SHA" --title "Torrent Guard $tag" --notes-file "$RUNNER_TEMP/release-notes.md" --latest=true
           fi

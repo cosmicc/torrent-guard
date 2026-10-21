@@ -127,6 +127,23 @@ class PathAndFinalizationTests(unittest.TestCase):
         self.assertEqual(result, "defer")
         self.assertIn("escapes read-only mount", msg)
 
+    def test_symlink_into_incomplete_directory_defers(self):
+        target = self.root / "incomplete" / "Film.mkv"
+        target.write_bytes(b"unfinished video")
+        self.video_path.symlink_to(target)
+        with patch("guard.subprocess.run") as probe:
+            result, msg = self.validator.inspect(self.torrent, [self.file])
+        self.assertEqual(result, "defer")
+        self.assertIn("escapes configured completed directory", msg)
+        probe.assert_not_called()
+
+    def test_unfinished_selected_video_defers_without_blocklisting(self):
+        for changes in ({"progress": 0.5}, {"size": 0}):
+            with self.subTest(changes=changes), patch("guard.subprocess.run") as probe:
+                result, _ = self.validator.inspect(self.torrent, [{**self.file, **changes}])
+                self.assertEqual(result, "defer")
+                probe.assert_not_called()
+
 
 class EnvPathTests(unittest.TestCase):
     def valid_env(self):

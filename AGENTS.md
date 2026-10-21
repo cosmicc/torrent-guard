@@ -24,6 +24,8 @@ There is no web service, exposed port, qBittorrent completion hook, Docker socke
   - PendingStore: persistent SQLite pending operations and phase updates.
   - Guard.poll, Guard._reject, Guard._process_pending: orchestration and retries.
   - setup_logging, main: rotating logs, continuous polling and error recovery.
+  - ConsoleFormatter: safe classic ANSI console palette; plain rotating audit files.
+  - write_heartbeat, healthcheck: atomic completed-poll marker and read-only Docker check.
 - tests/test_guard.py — metadata classification, API, queue, journal and deletion failures.
 - tests/test_v02.py — completed-media validation and import-history cleanup.
 - tests/test_v03.py — incomplete/complete directories, .!qB, path containment and moves.
@@ -32,10 +34,15 @@ There is no web service, exposed port, qBittorrent completion hook, Docker socke
 - compose.yaml — container with read-only root, no Linux capabilities, no new privileges, temporary /tmp, persistent /state and read-only /downloads.
 - .env.example — nonsecret examples; real .env MUST stay untracked.
 - .gitignore and .dockerignore — ignore credentials, DBs, logs, caches and build artifacts.
-- README.md — operator manual and configuration reference.
-- RELEASE_NOTES.md, VERSION — release notes/version; update together for application releases.
+- README.md — concise user-facing overview and getting started.
+- INSTALL.md — detailed setup, configuration, upgrades and troubleshooting.
+- CHANGELOG.md, VERSION — version history/version; update together for application releases. Do not maintain RELEASE_NOTES.md or a separate user changelog.
+- scripts/release_notes.py — validate version consistency and extract the current changelog entry for release automation.
+- tests/test_cleanup_safety.py, tests/test_release.py — cleanup retry authorization and release metadata regression tests.
+- tests/test_monitoring.py — palette isolation, terminal-control escaping and completed-poll health checks.
+- docs/log-palette.svg — approved classic log palette with light/dark reference samples. Green success, blue activity, yellow waiting/warnings, red errors/rejections, purple dry run; exact ANSI shades follow the terminal theme.
 - .github/workflows/test.yml — Python unit tests and syntax checks on push/PR.
-- .github/workflows/release.yml — validates tests and publishes a vVERSION GitHub Release when VERSION changes on main or via dispatch.
+- .github/workflows/release.yml — validates tests and publishes a stable vVERSION GitHub Release explicitly marked Latest when VERSION changes on main or via dispatch.
 - LICENSE — preserve license and honor it for dependencies.
 
 ## Runtime flow
@@ -49,9 +56,19 @@ There is no web service, exposed port, qBittorrent completion hook, Docker socke
 7. Once all import and retention criteria hold, delete the qBittorrent torrent plus its tracked data without blocklisting the successfully imported release. The Arr-managed main movie/TV library must remain intact; imported hardlinked or copied files should not be removed.
 8. Log ACCEPT metadata/completed, REJECT candidate, DEFER validation, WAIT import, DRY RUN, PENDING, CLEANUP, DELETE, CLEANED, warnings and errors. Pending journal phases must be restart-safe and idempotent.
 
-### Critical existing code defect — fix before enabling imported-torrent cleanup
+### Cleanup authorization and retries (v0.4)
 
-At v0.3.1, Guard._process_pending currently sends BOTH journal kinds (reject and imported) through ArrApi.blocklist_and_remove after a queue match. This may blocklist legitimate, already-imported media, contrary to intended behavior, and it may leave imported cleanup stuck if its queue item has already disappeared. Separate rejection and successful-import cleanup paths. Add tests asserting Arr blocklist is NEVER invoked for successfully imported torrents, including an already-missing Arr queue entry, and that safety conditions still retain data when verification is ambiguous. **Do not assume existing unit tests already cover this.** Recommend DRY_RUN=true until this is fixed and validated.
+Imported journal records bypass Arr queue matching and blocklisting in every
+phase, including legacy `match`/`arr` records. Before each deletion attempt,
+including `verify` retries after restart, recheck completion metadata, settle
+delay, current selected files, media readability/validity, history lookback,
+all-video import evidence, and import grace. Missing/ambiguous evidence retains
+the download. A missing torrent clears an imported record only in `verify`,
+after a recorded delete request. Rejection HTTP 404 is not proof of blocklisting;
+retain the download and journal for manual review. Keep tests asserting both
+the order and absence of destructive calls. The previous v0.3.1 warning that
+all imported records went through blocklisting was incorrect: new imported
+records already started at `delete`; v0.4 adds explicit isolation for every phase.
 
 ## Download directories and file-name suffixes
 
@@ -76,7 +93,7 @@ Sonarr/Radarr use X-Api-Key header with /api/v3 paths. History pagination parame
 
 ### Observed issue: HTTP 400 Invalid Hostname from Radarr history
 
-On Oct 21, 2026, the guard logged successful qBittorrent v5.3.0 authentication and successful ffprobe, then an HTTP 400 at a Radarr history request to port 7878 returning an HTML page starting Bad Request - Invalid Hostname. That HTML is characteristic of Windows HTTP.sys or an upstream gateway, not a normal Radarr JSON API response. Verify RADARR_URL points to the right service, IP, port, hostname and HTTP Host binding; look for a reverse proxy, IIS/HTTP.sys, WAF or environment HTTP_PROXY/HTTPS_PROXY settings used by urllib. Run GET /api/v3/system/status from INSIDE the guard container with X-Api-Key, inspect HTTP status/Server/Content-Type, and compare direct/no-proxy versus configured path. If history returns an error, preserve downloads. Do not bypass API errors by assuming an import or deleting anyway.
+An earlier operator report described successful qBittorrent authentication and ffprobe followed by HTTP 400 at a Radarr history request returning an HTML page starting Bad Request - Invalid Hostname. This may indicate Windows HTTP.sys or an upstream gateway rather than Radarr; the source must be verified. Verify RADARR_URL points to the right service, IP, port, hostname and HTTP Host binding; look for a reverse proxy, IIS/HTTP.sys, WAF or environment HTTP_PROXY/HTTPS_PROXY settings used by urllib. Run GET /api/v3/system/status from INSIDE the guard container with X-Api-Key, inspect HTTP status/Server/Content-Type, and compare direct/no-proxy versus configured path. If history returns an error, preserve downloads. Do not bypass API errors by assuming an import or deleting anyway.
 
 ## Security, storage, persistence and permissions
 
@@ -97,7 +114,27 @@ Keep .env (qBittorrent password, Arr keys), state DB and logs outside version co
 
 ## Configuration and operational controls
 
-Key variables: QBIT_URL/USERNAME/PASSWORD, SONARR_URL/API_KEY/CATEGORY/TAG, RADARR_URL/API_KEY/CATEGORY/TAG, DOWNLOADS_HOST_PATH, QBIT_DOWNLOAD_ROOT, GUARD_DOWNLOAD_ROOT, QBIT_COMPLETE_DIR, QBIT_INCOMPLETE_DIR, VERIFY_VIDEO_CONTENT, COMPLETED_SETTLE_SECONDS, FFPROBE_TIMEOUT_SECONDS, POLL_SECONDS, MAX_AGE_HOURS, REJECT_NO_VIDEO, IMPORT_GRACE_MINUTES, IMPORT_CHECK_SECONDS, HISTORY_LOOKBACK_DAYS, DRY_RUN, STATE_DB, LOG_FILE, LOG_LEVEL, LOG_MAX_BYTES and LOG_BACKUP_COUNT.
+Key variables: QBIT_URL/USERNAME/PASSWORD, SONARR_URL/API_KEY/CATEGORY/TAG, RADARR_URL/API_KEY/CATEGORY/TAG, DOWNLOADS_HOST_PATH, QBIT_DOWNLOAD_ROOT, GUARD_DOWNLOAD_ROOT, QBIT_COMPLETE_DIR, QBIT_INCOMPLETE_DIR, VERIFY_VIDEO_CONTENT, COMPLETED_SETTLE_SECONDS, FFPROBE_TIMEOUT_SECONDS, POLL_SECONDS, MAX_AGE_HOURS, REJECT_NO_VIDEO, IMPORT_GRACE_MINUTES, IMPORT_CHECK_SECONDS, HISTORY_LOOKBACK_DAYS, DRY_RUN, STATE_DB, LOG_FILE, LOG_LEVEL, LOG_MAX_BYTES, LOG_BACKUP_COUNT, LOG_COLOR and HEALTHCHECK_MAX_AGE_SECONDS.
+
+### Monitoring contract
+
+`LOG_COLOR=always` is the default for live Docker logs; `auto` requires a TTY
+and `never` disables colors. Keep the persistent audit file plain text, escape
+external terminal control characters in both outputs, and preserve readable
+decision labels without color. Use the approved palette linked above.
+
+The daemon writes `/tmp/torrent-guard-heartbeat` atomically using monotonic time
+only after `Guard.poll()` returns, including idle and dry-run polls. Clear the
+marker at startup. Never refresh it from a background timer or healthcheck:
+that would conceal stalled processing. Log progress at INFO at most once per
+60 seconds after completed polls. The Dockerfile invokes
+`python /app/guard.py --healthcheck` every 30 seconds (5-second timeout,
+60-second startup grace, 3 retries). The CLI must bypass credentials and logging
+initialization and remain read-only. Freshness defaults to 300 seconds via
+`HEALTHCHECK_MAX_AGE_SECONDS`; document tuning for long polls. Handled Arr or
+per-torrent failures may coexist with healthy polling; health is not dependency
+readiness or proof of deletion. Unhealthy status alone does not trigger a Docker
+restart. See INSTALL.md for monitoring commands and operational limits.
 
 DRY_RUN=true means no stop, Arr blocklist, delete or journal mutation; use it during initial validation. Changing environment values requires container recreation, not merely restart:
 
@@ -120,10 +157,11 @@ Treat docker compose config output as possibly containing secrets; sanitize befo
 - Preserve dry-run guarantees, cross-Arr category/tag isolation, defer-vs-reject distinction and explicit deletion with data through the qBittorrent API.
 - Test fail-closed behavior on unreachable Arr APIs, incomplete/late move, malformed paths, unknown file types, repeated HTTP errors, journal restarts, and multi-episode partial imports. Assert the ORDER and ABSENCE of destructive calls as well as expected calls.
 - Run: python3 -m unittest discover -s tests -v
-- Run: python3 -m py_compile guard.py
+- Run: python3 -m py_compile guard.py scripts/release_notes.py
+- Run: python3 scripts/release_notes.py (validates version consistency and changelog structure without publishing).
 - Run: docker compose config using safe dummy .env values when appropriate; NEVER commit secrets.
-- Update README and .env.example if any operator-facing flag or behavior changes. Document state migrations and safety impact.
-- For app releases, update guard.py VERSION, VERSION file, compose.yaml image tag and RELEASE_NOTES.md together. The GitHub release workflow triggers on VERSION changes to main; docs-only commits normally need no version bump.
+- Update README, INSTALL.md and .env.example as appropriate when operator-facing flags or behavior change. Document state migrations and safety impact.
+- For app releases, update guard.py VERSION, VERSION file, compose.yaml image tag and CHANGELOG.md together. New versions use only two parts (`0.4`, `0.5`, etc.). Changelog headings use `## X.Y - MM.DD.YYYY` without brackets and each version has Added, Changed and Fixed sections. Preserve historical version spellings such as `0.3.1`; do not add new third-level versions. The GitHub release workflow extracts only that version's changelog entry and triggers on VERSION changes to main; manual dispatch also requires main. Docs-only commits normally need no version bump.
 - Unit tests use mocks. Never claim they verify live qBittorrent/Radarr/Sonarr behavior or physical data deletion. Recommend a dry run and review on the actual media server after a destructive-flow change.
 
 ## Non-goals and immutable safety rules

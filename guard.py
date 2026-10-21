@@ -6,9 +6,11 @@ only qBittorrent can delete torrent payloads (deleteFiles=true).
 """
 from __future__ import annotations
 
+import argparse
 import http.cookiejar
 import json
 import logging
+import math
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path, PurePosixPath
@@ -22,7 +24,8 @@ import urllib.parse
 import urllib.request
 
 LOG = logging.getLogger("torrent-guard")
-VERSION = "0.3.1"
+VERSION = "0.4"
+HEARTBEAT_FILE = Path("/tmp/torrent-guard-heartbeat")
 DEFAULT_VIDEO = frozenset({".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".webm", ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".divx", ".flv"})
 DEFAULT_RISKY = frozenset({".exe", ".scr", ".com", ".bat", ".cmd", ".msi", ".msp", ".msix", ".ps1", ".psm1", ".vbs", ".vbe", ".vb", ".js", ".jse", ".wsf", ".wsh", ".hta", ".lnk", ".pif", ".cpl", ".jar", ".apk", ".appx", ".reg", ".scf", ".sh", ".py"})
 
@@ -157,7 +160,7 @@ class Http:
 
     def request(self, method: str, url: str, *, fields=None, headers=None, include_status=False):
         data = urllib.parse.urlencode(fields).encode("utf-8") if fields is not None else None
-        req = urllib.request.Request(url, method=method, data=data, headers={"User-Agent": "TorrentGuard/0.3.1", **(headers or {})})
+        req = urllib.request.Request(url, method=method, data=data, headers={"User-Agent": f"TorrentGuard/{VERSION}", **(headers or {})})
         try:
             with self.opener.open(req, timeout=12) as response:
                 status = response.status
@@ -264,12 +267,19 @@ class ArrApi:
     def imported_history(self, cutoff: float) -> dict[str, list[dict]]:
         """Fetch paged history in descending order; never claim import if history is incomplete."""
         imports: dict[str, list[dict]] = {}
+        seen = 0
         for page in range(1, 52):
             query = urllib.parse.urlencode({"page": page, "pageSize": 200, "sortKey": "date", "sortDirection": "descending"})
             data = self.http.request("GET", self.instance.url + "/api/v3/history?" + query, headers=self.headers)
             if not isinstance(data, dict) or not isinstance(data.get("records"), list):
                 raise ApiError("Unexpected Arr history response")
             rows = data["records"]
+            total = data.get("totalRecords")
+            if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+                raise ApiError("Arr history response has invalid totalRecords")
+            seen += len(rows)
+            if seen > total or (seen < total and len(rows) != 200):
+                raise ApiError("Arr history pagination is incomplete or changed; retrying later")
             for row in rows:
                 date = parse_date(row.get("date"))
                 if date is None:
@@ -282,7 +292,7 @@ class ArrApi:
                 download_id = str(row.get("downloadId") or "").lower()
                 if download_id:
                     imports.setdefault(download_id, []).append(row)
-            if not rows or len(rows) < 200 or len(rows) >= int(data.get("totalRecords", page * 200)):
+            if seen == total:
                 return imports
             # API sorted by date; page entirely older than cutoff.
             if parse_date(rows[-1].get("date")) < cutoff:
@@ -351,7 +361,17 @@ def torrent_app(torrent: dict, config: Config) -> str | None:
 
 
 def is_complete(torrent: dict) -> bool:
-    return float(torrent.get("progress") or 0) >= 0.999999 and int(torrent.get("amount_left") or 0) == 0 and int(torrent.get("completion_on") or 0) > 0 and str(torrent.get("state") or "").casefold() not in {"missingfiles", "moving", "checkingdl", "checkingresumedata"}
+    """Require explicit completion metadata and no active move or recheck."""
+    state = str(torrent.get("state") or "").casefold()
+    return (
+        float(torrent.get("progress") or 0) >= 0.999999
+        and torrent.get("amount_left") is not None
+        and int(torrent["amount_left"]) == 0
+        and int(torrent.get("completion_on") or 0) > 0
+        and bool(state)
+        and state not in {"missingfiles", "moving", "error"}
+        and not state.startswith("checking")
+    )
 
 
 class MediaValidator:
@@ -375,6 +395,10 @@ class MediaValidator:
         candidate = (mounted_root / save_rel / str(relative)).resolve()
         if not candidate.is_relative_to(mounted_root):
             raise ValueError("download file path escapes read-only mount")
+        if self.config.qbit_complete_dir:
+            final_relative = Path(self.config.qbit_complete_dir).relative_to(root)
+            if not candidate.is_relative_to(mounted_root / final_relative):
+                raise ValueError("download file path escapes configured completed directory")
         return candidate
 
     def inspect(self, torrent: dict, files: list[dict]) -> tuple[str, str]:
@@ -393,7 +417,7 @@ class MediaValidator:
             if name.casefold().endswith(".!qb"):
                 return "defer", f"incomplete .!qB suffix still reported for {name}; waiting for rename/move"
             if int(video.get("size") or 0) <= 0 or float(video.get("progress", 0)) < 0.999999:
-                return "reject", f"video has zero size or is not fully downloaded: {name}"
+                return "defer", f"video has zero size or is not fully downloaded: {name}"
             try:
                 path = self.resolve(torrent, video)
             except ValueError as exc:
@@ -587,7 +611,7 @@ class Guard:
                         self.store.add(h, app, name, reason, kind="imported")
                         pending.add(h)
         if not self.config.dry_run:
-            self._process_pending(by_hash)
+            self._process_pending(by_hash, now)
 
     def _reject(self, h: str, app: str, name: str, reason: str, torrent: dict):
         if h not in self.logged_dry:
@@ -599,14 +623,57 @@ class Guard:
         else:
             self.store.add(h, app, name, reason, kind="reject")
 
-    def _process_pending(self, by_hash: dict[str, dict]):
+    def _import_cleanup_ready(self, torrent: dict, h: str, app: str, now: float,
+                              history_cache: dict[str, dict]) -> bool:
+        """Revalidate current evidence before every imported deletion attempt.
+
+        A persisted decision is not permission to delete changed or moved data.
+        This path never consults or mutates the Arr queue or blocklist.
+        """
+        since = now - self.config.history_lookback_days * 86400
+        added = int(torrent.get("added_on") or 0)
+        if (not is_complete(torrent) or not 0 < added <= now or added < since
+                or now - int(torrent["completion_on"]) < self.config.completed_settle_seconds):
+            return False
+        files = self.qbit.files(h)
+        if not isinstance(files, list):
+            raise ApiError("Unexpected qBittorrent file-list response")
+        if not files or classify(files, reject_no_video=self.config.reject_no_video):
+            return False
+        result, detail = self.validator.inspect(torrent, files)
+        if result != "accept":
+            LOG.warning("PENDING imported media not ready [%s] hash=%s: %s", app, h, detail)
+            return False
+        if app not in history_cache:
+            history_cache[app] = self.arr_clients[app].imported_history(since)
+        confirmed, _ = import_confirmed(
+            torrent, files, history_cache[app].get(h, []), now,
+            self.config.import_grace_minutes,
+        )
+        return confirmed
+
+    def _process_pending(self, by_hash: dict[str, dict], now: float):
+        """Retry journal operations while keeping import and rejection paths separate."""
         queue_cache: dict[str, dict[str, int]] = {}
+        history_cache: dict[str, dict] = {}
         for h, app, name, reason, queue_id, phase, kind in self.store.entries():
             try:
+                if kind not in {"reject", "imported"} or phase not in {"match", "arr", "delete", "verify"}:
+                    LOG.error("PENDING invalid journal kind/phase; manual review required hash=%s", h)
+                    continue
                 torrent = by_hash.get(h)
                 if torrent and torrent_app(torrent, self.config) != app:
                     LOG.error("PENDING ownership changed; manual review required [%s] %s hash=%s", app, name, h)
                     continue
+                if kind == "imported":
+                    if torrent is not None:
+                        if not self._import_cleanup_ready(torrent, h, app, now, history_cache):
+                            LOG.warning("PENDING import evidence incomplete; preserving download [%s] hash=%s", app, h)
+                            continue
+                    # Repair legacy imported phases without ever calling Arr rejection.
+                    if phase in {"match", "arr"}:
+                        self.store.set_phase(h, "delete")
+                        phase = "delete"
                 if phase == "match":
                     if torrent is None:
                         LOG.error("PENDING disappeared before cleanup; cannot prove files were deleted: %s", name)
@@ -629,7 +696,8 @@ class Guard:
                     except ApiError as exc:
                         if exc.status != 404:
                             raise
-                        LOG.warning("Arr queue ID already gone; confirm blocklist manually [%s] name=%s", app, name)
+                        LOG.warning("PENDING Arr queue ID gone; blocklist unconfirmed, preserving download; manual review required [%s] name=%s", app, name)
+                        continue
                     self.store.set_phase(h, "delete")
                     phase = "delete"
                 if phase == "delete":
@@ -654,12 +722,69 @@ class Guard:
                 LOG.error("Cleanup failed [%s] kind=%s name=%r hash=%s phase=%s (will retry): %s", app, kind, name, h, phase, exc)
 
 
+class ConsoleFormatter(logging.Formatter):
+    """Color decision categories without allowing terminal escapes from API data."""
+
+    def __init__(self, color: bool):
+        super().__init__("%(asctime)s %(levelname)s %(name)s %(message)s")
+        self.color = color
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Keep labels readable without color and sanitize external control codes."""
+        rendered = super().format(record)
+        rendered = "".join(char if char.isprintable() or char in "\n\t"
+                           else ascii(char)[1:-1] for char in rendered)
+        if not self.color:
+            return rendered
+        message = record.getMessage()
+        if record.levelno >= logging.ERROR or message.startswith("REJECT"):
+            code = "31"  # Red: errors and rejected releases.
+        elif message.startswith("DRY RUN"):
+            code = "35"  # Purple: report-only actions.
+        elif record.levelno >= logging.WARNING or message.startswith(("WAIT", "DEFER", "PENDING")):
+            code = "33"  # Yellow: warnings, waiting, and retained downloads.
+        elif message.startswith(("ACCEPT", "CLEANED")):
+            code = "32"  # Green: accepted media and confirmed cleanup.
+        else:
+            code = "34"  # Blue: normal activity and processing heartbeat.
+        return "\n".join(f"\033[{code}m{line}\033[0m" for line in rendered.split("\n"))
+
+
+def write_heartbeat(path: Path = HEARTBEAT_FILE) -> None:
+    """Atomically record a completed poll using monotonic time, including dry runs."""
+    temporary = path.with_suffix(".tmp")
+    # /tmp is container-private; exclusive permissions keep the marker local.
+    with temporary.open("w", encoding="ascii") as marker:
+        os.chmod(temporary, 0o600)
+        marker.write(str(time.monotonic()))
+    temporary.replace(path)
+
+
+def healthcheck(path: Path = HEARTBEAT_FILE) -> int:
+    """Check recent completed polling without credentials, network calls, or mutations."""
+    try:
+        maximum_age = float(os.getenv("HEALTHCHECK_MAX_AGE_SECONDS", "300"))
+        if not math.isfinite(maximum_age) or maximum_age <= 0:
+            raise ValueError("invalid healthcheck age")
+        stamp = float(path.read_text(encoding="ascii"))
+        age = time.monotonic() - stamp
+        if not math.isfinite(age) or not 0 <= age <= maximum_age:
+            raise ValueError("stale heartbeat")
+    except (OSError, ValueError):
+        return 1
+    return 0
+
+
 def setup_logging():
+    """Send optional ANSI colors to the console and plain text to rotating files."""
     level = os.getenv("LOG_LEVEL", "INFO").upper()
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    formatter = ConsoleFormatter(False)
     LOG.setLevel(level)
     console = logging.StreamHandler()
-    console.setFormatter(formatter)
+    color = os.getenv("LOG_COLOR", "always").strip().lower()
+    if color not in {"always", "auto", "never"}:
+        raise ValueError("LOG_COLOR must be always, auto or never")
+    console.setFormatter(ConsoleFormatter(color == "always" or (color == "auto" and console.stream.isatty())))
     LOG.addHandler(console)
     logfile = os.getenv("LOG_FILE", "/state/torrent-guard.log").strip()
     if logfile:
@@ -670,15 +795,28 @@ def setup_logging():
 
 
 def main():
+    """Run polling and advance liveness only when a complete poll returns."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--healthcheck", action="store_true", help="check recent completed polling and exit")
+    arguments = parser.parse_args()
+    if arguments.healthcheck:
+        return healthcheck()
+    # Never let a marker from an earlier process hide failed initialization.
+    HEARTBEAT_FILE.unlink(missing_ok=True)
     setup_logging()
     config = Config.from_env()
     LOG.info("Starting v%s categories=%r tags=%r poll=%ds dry_run=%s verify_media=%s import_grace=%dm complete_dir=%s incomplete_dir=%s incomplete_suffix=.!qB state=%s", VERSION, config.categories, config.tags, config.poll_seconds, config.dry_run, config.verify_video_content, config.import_grace_minutes, config.qbit_complete_dir, config.qbit_incomplete_dir, config.state_db)
     guard = None
+    last_status = None
     while True:
         try:
             if guard is None:
                 guard = Guard(config)
             guard.poll()
+            write_heartbeat()
+            if last_status is None or time.monotonic() - last_status >= 60:
+                LOG.info("HEARTBEAT polling active dry_run=%s pending=%d", config.dry_run, len(guard.store.hashes()))
+                last_status = time.monotonic()
         except (ApiError, urllib.error.URLError, OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
             LOG.exception("Poll failed; will retry: %s", exc)
             guard = None
@@ -686,4 +824,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
