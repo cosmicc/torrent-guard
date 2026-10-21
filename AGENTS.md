@@ -8,11 +8,11 @@ Torrent Guard is a long-running Python 3.12 daemon deployed via Docker Compose o
 
 The highest priority is preventing deletion of useful, unimported media. Missing metadata, API outages, ambiguous ownership, missing/moving files and incomplete import history must not be treated as proof of a bad torrent or a completed import.
 
-There is no web service, exposed port, qBittorrent completion hook, Docker socket access, writable media mount or external database server. The app polls qBittorrent and Arr APIs and records cleanup operations in a local SQLite journal.
+There is no web service, exposed port, qBittorrent completion hook, Docker socket access or external database server. Standard Compose uses a read-only download mount. An explicit cleanup override can additionally mount only the completed-download directory writable. Library mounts must never be writable or targeted. The app polls qBittorrent and Arr APIs and records cleanup operations in a local SQLite journal.
 
 ## Project structure
 
-- guard.py — entire production service:
+- guard.py — API, polling and journal orchestration:
   - Config, ArrInstance, required, boolean, api_url: environment/config parsing and validation.
   - Http: urllib requests, form/JSON handling, cookie jar, HTTP errors.
   - Qbit: login, torrent/file listing, stop/pause and deletion with data.
@@ -30,8 +30,11 @@ There is no web service, exposed port, qBittorrent completion hook, Docker socke
 - tests/test_v02.py — completed-media validation and import-history cleanup.
 - tests/test_v03.py — incomplete/complete directories, .!qB, path containment and moves.
 - tests/test_v031.py — qBittorrent 5.2+ login compatibility.
+- deletion.py — saved file manifests, independent absence checks, and guarded completed-download quarantine/unlink operations.
+- tests/test_deletion.py — actual temporary-file and SQLite tests for verification, leftover removal, library protection and restart/race handling.
 - Dockerfile — Alpine Python 3.12, ffmpeg/ffprobe, non-root UID/GID 65534.
 - compose.yaml — container with read-only root, no Linux capabilities, no new privileges, temporary /tmp, persistent /state and read-only /downloads.
+- compose.cleanup.yaml — explicit opt-in writable completed-download bind; never mount the download parent or library writable.
 - .env.example — nonsecret examples; real .env MUST stay untracked.
 - .gitignore and .dockerignore — ignore credentials, DBs, logs, caches and build artifacts.
 - README.md — concise user-facing overview and getting started.
@@ -41,6 +44,7 @@ There is no web service, exposed port, qBittorrent completion hook, Docker socke
 - tests/test_cleanup_safety.py, tests/test_release.py — cleanup retry authorization and release metadata regression tests.
 - tests/test_monitoring.py — palette isolation, terminal-control escaping and completed-poll health checks.
 - docs/log-palette.svg — approved classic log palette with light/dark reference samples. Green success, blue activity, yellow waiting/warnings, red errors/rejections, purple dry run; exact ANSI shades follow the terminal theme.
+- docs/deletion-verification.md — required reading before modifying file verification, cleanup permissions, journal manifests, quarantine recovery or deletion safety. Contains v0.6 deployment and validation details. Verified leftovers are permanently unlinked; quarantine is only a temporary identity-check step unless safety checks fail.
 - .github/workflows/test.yml — Python unit tests and syntax checks on push/PR.
 - .github/workflows/release.yml — validates tests and publishes a stable vVERSION GitHub Release explicitly marked Latest when VERSION changes on main or via dispatch.
 - LICENSE — preserve license and honor it for dependencies.
@@ -69,7 +73,8 @@ including `verify` retries after restart, recheck completion metadata, settle
 delay, current selected files, media readability/validity, history lookback,
 all-video import evidence, and import grace. Missing/ambiguous evidence retains
 the download. A missing torrent clears an imported record only in `verify`,
-after a recorded delete request. Rejection HTTP 404 is not proof of blocklisting;
+after a recorded delete request and independent absence verification of all saved
+download names on unchanged mapped roots. Rejection HTTP 404 is not proof of blocklisting;
 retain the download and journal for manual review. Keep tests asserting both
 the order and absence of destructive calls. The previous v0.3.1 warning that
 all imported records went through blocklisting was incorrect: new imported
@@ -80,7 +85,12 @@ records already started at `delete`; v0.4 adds explicit isolation for every phas
 User's qBittorrent setup:
 
     /downloads/incomplete/  -- actively downloading files; often *.mkv.!qB
-    /downloads/complete/    -- after completion and final move
+    /downloads/completed/   -- operator's confirmed final location
+
+The host final directory is `/mnt/downloads/completed`; the operator sets
+`QBIT_COMPLETE_DIR=/downloads/completed` in the host `.env`. Repository defaults
+retain `/downloads/complete` for compatibility; never silently rewrite an
+existing installation's environment or infer the final directory from its title.
 
 qBittorrent's Append .!qB extension to incomplete files should remain enabled. The qBittorrent API generally exposes original filenames; normalized_name also strips an optional trailing .!qB for metadata classification. Thus fake.exe.!qB remains detectable as executable. NEVER ffprobe an incomplete .!qB file; wait for qBittorrent to finish, rename and move it.
 
@@ -113,7 +123,16 @@ The host /config/torrent-guard tree stores the SQLite journal and rotating audit
 
 Permissions on individual log files alone are insufficient: log rotation and SQLite need write permission on the directory. Check ownership, ACLs, volume RW flag, NFS UID mapping, SELinux and filesystem mount options before reducing security. Never use world-writable state directories as the normal fix.
 
-The media bind mount must remain read-only. qBittorrent alone is responsible for deleteFiles=true, including partial files; do not add direct local delete/rmtree calls. Torrent disappearance does not independently certify removal of orphaned/untracked files.
+The main download bind mount remains read-only. qBittorrent `deleteFiles=true`
+is the primary deletion mechanism. Optional local fallback uses only the completed
+root supplied by compose.cleanup.yaml, saved file evidence, a 120-second settle
+interval, current import authorization and fresh client ownership checks. Read
+docs/deletion-verification.md before changes. Never sweep directories, use rmtree,
+follow symlinks, delete unknown/replaced files, or grant write access to a library.
+Persist manifests before API deletion and quarantine paths before rename. Only
+report CLEANED after all recorded names are independently absent. Missing mounts,
+permission errors and legacy missing-torrent records without manifests remain
+pending. Preserve deletion_evidence/deletion_audit tables during upgrades.
 
 Keep .env (qBittorrent password, Arr keys), state DB and logs outside version control. Logs contain torrent titles/infohashes; do not copy API keys into AGENTS, tests or issue templates. Retain restricted container privileges. Do not require Docker socket or root. Do not delete /state, use docker compose down -v, or auto-reinitialize existing journals during upgrades. When migrating a named Docker volume to a bind mount, data is not copied automatically.
 
@@ -122,6 +141,12 @@ Keep .env (qBittorrent password, Arr keys), state DB and logs outside version co
 Key variables: QBIT_URL/USERNAME/PASSWORD, SONARR_URL/API_KEY/CATEGORY/TAG, RADARR_URL/API_KEY/CATEGORY/TAG, DOWNLOADS_HOST_PATH, QBIT_DOWNLOAD_ROOT, GUARD_DOWNLOAD_ROOT, QBIT_COMPLETE_DIR, QBIT_INCOMPLETE_DIR, VERIFY_VIDEO_CONTENT, COMPLETED_SETTLE_SECONDS, FFPROBE_TIMEOUT_SECONDS, POLL_SECONDS, MAX_AGE_HOURS, REJECT_NO_VIDEO, IMPORT_GRACE_MINUTES, IMPORT_CHECK_SECONDS, HISTORY_LOOKBACK_DAYS, DRY_RUN, STATE_DB, LOG_FILE, LOG_LEVEL, LOG_MAX_BYTES, LOG_BACKUP_COUNT, LOG_COLOR and HEALTHCHECK_MAX_AGE_SECONDS.
 
 ### Monitoring contract
+
+Additional cleanup controls are `CLEANUP_LEFTOVERS` (default false),
+`DELETE_SETTLE_SECONDS` (default 120, minimum 30), and the Compose-only
+`CLEANUP_COMPLETE_HOST_PATH`. `compose.cleanup.yaml` explicitly enables fallback.
+Its read/write alias must identify the same completed root as the read-only
+mapping; the application checks device/inode identity before writing.
 
 `LOG_COLOR=always` is the default for live Docker logs; `auto` requires a TTY
 and `never` disables colors. Keep the persistent audit file plain text, escape
@@ -162,15 +187,15 @@ Treat docker compose config output as possibly containing secrets; sanitize befo
 - Preserve dry-run guarantees, cross-Arr category/tag isolation, defer-vs-reject distinction and explicit deletion with data through the qBittorrent API.
 - Test fail-closed behavior on unreachable Arr APIs, incomplete/late move, malformed paths, unknown file types, repeated HTTP errors, journal restarts, and multi-episode partial imports. Assert the ORDER and ABSENCE of destructive calls as well as expected calls.
 - Run: python3 -m unittest discover -s tests -v
-- Run: python3 -m py_compile guard.py scripts/release_notes.py
+- Run: python3 -m py_compile guard.py deletion.py scripts/release_notes.py
 - Run: python3 scripts/release_notes.py (validates version consistency and changelog structure without publishing).
 - Run: docker compose config using safe dummy .env values when appropriate; NEVER commit secrets.
 - Update README, INSTALL.md and .env.example as appropriate when operator-facing flags or behavior change. Document state migrations and safety impact.
 - For app releases, update guard.py VERSION, VERSION file, compose.yaml image tag and CHANGELOG.md together. New versions use only two parts (`0.4`, `0.5`, etc.). Changelog headings use `## X.Y - MM.DD.YYYY` without brackets and each version has Added, Changed and Fixed sections. Preserve historical version spellings such as `0.3.1`; do not add new third-level versions. The GitHub release workflow extracts only that version's changelog entry and triggers on VERSION changes to main; manual dispatch also requires main. Docs-only commits normally need no version bump.
-- Unit tests use mocks. Never claim they verify live qBittorrent/Radarr/Sonarr behavior or physical data deletion. Recommend a dry run and review on the actual media server after a destructive-flow change.
+- API tests use mocks; deletion tests also use actual temporary files and SQLite. Never claim they verify live qBittorrent/Radarr/Sonarr behavior or production data deletion. Review a dry run and disposable-download test on the actual media server after a destructive-flow change.
 
 ## Non-goals and immutable safety rules
 
-Do not delete main library files; do not add filesystem write access to media; do not disable or silently bypass import verification; do not blocklist good imports; do not manage torrents belonging to unrelated qBittorrent categories; do not claim checksum, full decoding or malware safety from ffprobe; do not silently swallow operational errors.
+Do not delete main library files; do not add filesystem write access to libraries or the download parent; do not bypass the opt-in completed-root cleanup restrictions; do not disable or silently bypass import verification; do not blocklist good imports; do not manage torrents belonging to unrelated qBittorrent categories; do not claim checksum, full decoding or malware safety from ffprobe; do not silently swallow operational errors.
 
 Conservative retention is preferable to irreversible data loss.

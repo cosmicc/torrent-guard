@@ -93,6 +93,11 @@ class PollTests(unittest.TestCase):
         self.qb.torrents.return_value = [self.torrent]
         self.qb.files.return_value = [{"name": "Film.EXE"}]
         self.arr.queue_by_hash.return_value = {"abcdef": 42}
+        verifier_patch = patch("guard.FileVerifier")
+        self.verifier = verifier_patch.start().return_value
+        self.addCleanup(verifier_patch.stop)
+        self.verifier.snapshot.side_effect = lambda torrent, files: {"version": 1, "torrent": torrent, "files": files, "items": [{"path": "mock download"}]}
+        self.verifier.remaining.return_value = []
         self.guard = Guard(self.cfg, self.qb, {"RADARR": self.arr})
 
     def tearDown(self):

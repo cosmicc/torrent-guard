@@ -2,7 +2,8 @@
 """Torrent Guard: early malware-file rejection, completed-media validation and Arr-aware cleanup.
 
 Uses the qBittorrent/Arr APIs. ffprobe reads downloads through a read-only mount;
-only qBittorrent can delete torrent payloads (deleteFiles=true).
+qBittorrent is the primary deletion mechanism (deleteFiles=true). Optional
+completed-download cleanup uses persisted file identities and a scoped write bind.
 """
 from __future__ import annotations
 
@@ -23,8 +24,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from deletion import FileVerifier
+
 LOG = logging.getLogger("torrent-guard")
-VERSION = "0.5"
+VERSION = "0.6"
 HEARTBEAT_FILE = Path("/tmp/torrent-guard-heartbeat")
 DEFAULT_VIDEO = frozenset({".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".webm", ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".divx", ".flv"})
 DEFAULT_RISKY = frozenset({".exe", ".scr", ".com", ".bat", ".cmd", ".msi", ".msp", ".msix", ".ps1", ".psm1", ".vbs", ".vbe", ".vb", ".js", ".jse", ".wsf", ".wsh", ".hta", ".lnk", ".pif", ".cpl", ".jar", ".apk", ".appx", ".reg", ".scf", ".sh", ".py"})
@@ -89,6 +92,9 @@ class Config:
     history_lookback_days: int = 30
     completed_settle_seconds: int = 60
     ffprobe_timeout_seconds: int = 30
+    cleanup_leftovers: bool = False
+    cleanup_write_root: str = "/cleanup/completed"
+    delete_settle_seconds: int = 120
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -116,6 +122,9 @@ class Config:
         history = int(os.getenv("HISTORY_LOOKBACK_DAYS", "30"))
         settle = int(os.getenv("COMPLETED_SETTLE_SECONDS", "60"))
         timeout = int(os.getenv("FFPROBE_TIMEOUT_SECONDS", "30"))
+        delete_settle = int(os.getenv("DELETE_SETTLE_SECONDS", "120"))
+        if delete_settle < 30:
+            raise ValueError("DELETE_SETTLE_SECONDS must be at least 30")
         if poll < 2 or not 0 < age < float("inf") or grace < 10 or check < 10 or history < 1 or settle < 0 or timeout < 1:
             raise ValueError("Invalid time settings: poll>=2, age>0, grace>=10m, check>=10s, lookback>=1d, settle>=0, timeout>=1s")
         qroot = os.getenv("QBIT_DOWNLOAD_ROOT", "/downloads").rstrip("/")
@@ -145,6 +154,8 @@ class Config:
             import_grace_minutes=grace, import_check_seconds=check,
             history_lookback_days=history, completed_settle_seconds=settle,
             ffprobe_timeout_seconds=timeout,
+            cleanup_leftovers=boolean("CLEANUP_LEFTOVERS", False),
+            delete_settle_seconds=delete_settle,
         )
 
 
@@ -494,6 +505,13 @@ class PendingStore:
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(pending)")}
         if "kind" not in columns:
             self.db.execute("ALTER TABLE pending ADD COLUMN kind TEXT NOT NULL DEFAULT 'reject'")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS deletion_evidence (
+            hash TEXT PRIMARY KEY, manifest TEXT NOT NULL, requested_at REAL
+        )""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS deletion_audit (
+            id INTEGER PRIMARY KEY, hash TEXT NOT NULL, completed_at REAL NOT NULL,
+            manifest TEXT NOT NULL
+        )""")
         self.db.commit()
 
     def add(self, torrent_hash: str, app: str, name: str, reason: str, kind: str = "reject"):
@@ -508,7 +526,32 @@ class PendingStore:
 
     def remove(self, torrent_hash: str):
         self.db.execute("DELETE FROM pending WHERE hash=?", (torrent_hash,))
+        self.db.execute("DELETE FROM deletion_evidence WHERE hash=?", (torrent_hash,))
         self.db.commit()
+
+    def evidence(self, torrent_hash: str):
+        """Load saved file evidence independently of the pending tuple contract."""
+        row = self.db.execute("SELECT manifest,requested_at FROM deletion_evidence WHERE hash=?", (torrent_hash,)).fetchone()
+        return (json.loads(row[0]), row[1]) if row else None
+
+    def save_manifest(self, torrent_hash: str, manifest: dict):
+        """Commit file identities or quarantine progress before destructive calls."""
+        self.db.execute("""INSERT INTO deletion_evidence(hash,manifest) VALUES (?,?)
+            ON CONFLICT(hash) DO UPDATE SET manifest=excluded.manifest""", (torrent_hash, json.dumps(manifest)))
+        self.db.commit()
+
+    def requested(self, torrent_hash: str, now: float):
+        """Persist when an API deletion was attempted, including restart recovery."""
+        self.db.execute("UPDATE deletion_evidence SET requested_at=? WHERE hash=?", (now, torrent_hash))
+        self.db.commit()
+
+    def finish(self, torrent_hash: str, now: float):
+        """Atomically archive verified evidence and clear pending work."""
+        with self.db:
+            self.db.execute("""INSERT INTO deletion_audit(hash,completed_at,manifest)
+                SELECT hash,?,manifest FROM deletion_evidence WHERE hash=?""", (now, torrent_hash))
+            self.db.execute("DELETE FROM pending WHERE hash=?", (torrent_hash,))
+            self.db.execute("DELETE FROM deletion_evidence WHERE hash=?", (torrent_hash,))
 
     def entries(self):
         return self.db.execute("SELECT hash,app,name,reason,queue_id,phase,kind FROM pending ORDER BY rowid").fetchall()
@@ -518,12 +561,14 @@ class PendingStore:
 
 
 class Guard:
-    def __init__(self, config: Config, qbit=None, arr_clients=None, store=None, validator=None):
+    def __init__(self, config: Config, qbit=None, arr_clients=None, store=None, validator=None, verifier=None):
         self.config = config
         self.qbit = qbit if qbit is not None else Qbit(config)
         self.arr_clients = arr_clients if arr_clients is not None else {name: ArrApi(inst) for name, inst in config.instances.items()}
         self.store = store if store is not None else PendingStore(config.state_db)
         self.validator = validator if validator is not None else MediaValidator(config)
+        self.verifier = verifier if verifier is not None else FileVerifier(config)
+        self.cleanup_messages: dict[str, tuple[str, float]] = {}
         self.metadata_passed: set[str] = set()
         self.completed_passed: set[str] = set()
         self.logged_dry: set[str] = set()
@@ -672,6 +717,83 @@ class Guard:
         )
         return confirmed
 
+    def _request_deletion(self, h: str, torrent: dict, now: float):
+        """Persist all tracked file evidence before requesting API deletion."""
+        current = self.qbit.torrents()
+        if not isinstance(current, list):
+            raise ApiError("Cannot refresh torrent before deletion snapshot")
+        fresh = next((row for row in current if str(row.get("hash", "")).lower() == h), None)
+        fields = ("added_on", "save_path", "download_path", "content_path", "progress", "amount_left", "completion_on", "state")
+        if fresh is None or any(fresh.get(key) != torrent.get(key) for key in fields):
+            raise ValueError("torrent moved or changed before deletion; retrying inspection")
+        evidence = self.store.evidence(h)
+        files = self.qbit.files(h)
+        if evidence is None:
+            manifest = self.verifier.snapshot(torrent, files)
+            self.store.save_manifest(h, manifest)
+        else:
+            manifest = evidence[0]
+            if torrent.get("added_on") != manifest["torrent"].get("added_on"):
+                raise ValueError("torrent incarnation changed; manual review required")
+            if any(torrent.get(key) != manifest["torrent"].get(key)
+                   for key in ("save_path", "download_path", "content_path")):
+                raise ValueError("torrent download paths changed after snapshot; manual review required")
+            if not isinstance(files, list) or {f.get("name") for f in files} != {f.get("name") for f in manifest["files"]}:
+                raise ValueError("tracked file list changed after deletion snapshot; manual review required")
+        self.store.requested(h, now)
+        self.qbit.delete_with_data(h)
+        self.store.set_phase(h, "verify")
+
+    def _cleanup_status(self, h: str, message: str, now: float, level: int = logging.WARNING):
+        """Repeat unresolved status at most once a minute unless the reason changes."""
+        previous, stamp = self.cleanup_messages.get(h, ("", 0.0))
+        if previous != message or now - stamp >= 60:
+            LOG.log(level, "PENDING disk verification hash=%s: %s", h, message)
+            self.cleanup_messages[h] = (message, now)
+
+    def _verify_deletion(self, h: str, app: str, kind: str, now: float):
+        """Confirm disk absence, or remove only authorized unchanged leftovers."""
+        evidence = self.store.evidence(h)
+        if evidence is None or evidence[1] is None:
+            raise ValueError("no saved pre-deletion file evidence; manual review required")
+        manifest, requested_at = evidence
+        remaining = self.verifier.remaining(manifest)
+        if remaining and now - requested_at >= self.config.delete_settle_seconds and self.config.cleanup_leftovers:
+            # Refresh remote state before local cleanup, including unrelated torrents.
+            live = self.qbit.torrents()
+            if not isinstance(live, list):
+                raise ApiError("Cannot establish active torrent ownership")
+            if any(str(t.get("hash", "")).lower() == h for t in live):
+                raise ValueError("torrent reappeared; local removal deferred")
+            if kind == "imported":
+                since = now - self.config.history_lookback_days * 86400
+                original = manifest["torrent"]
+                if int(original.get("added_on") or 0) < since:
+                    raise ValueError("saved import authorization is outside history lookback")
+                history = self.arr_clients[app].imported_history(since)
+                yes, reason = import_confirmed(original, manifest["files"], history.get(h, []), now, self.config.import_grace_minutes)
+                if not yes:
+                    raise ValueError("local removal lacks current import evidence: " + reason)
+            wanted = {(item["root"], item["path"]) for item in manifest["items"]}
+            for torrent in live:
+                files = self.qbit.files(str(torrent.get("hash") or ""))
+                paths = self.verifier.paths(torrent, files)
+                if any((item["root"], item["path"]) in wanted for item in paths):
+                    raise ValueError("another torrent owns a recorded download path")
+            for item in remaining:
+                self.verifier.remove(manifest, item, lambda updated: self.store.save_manifest(h, updated))
+                LOG.warning("LEFTOVER cleanup attempted hash=%s download=%r", h, item["path"])
+            remaining = self.verifier.remaining(manifest)
+        if remaining:
+            paths = ", ".join(repr(item["path"]) for item in remaining[:4])
+            self._cleanup_status(h, f"{len(remaining)} recorded file(s) remain: {paths}; waiting for settle/cleanup or manual review", now)
+            return False
+        self.store.finish(h, now)
+        self.warned_missing.discard(h)
+        self.cleanup_messages.pop(h, None)
+        LOG.info("CLEANED [%s] kind=%s hash=%s torrent absent and all %d recorded file paths independently verified absent", app, kind, h, len(manifest["items"]))
+        return True
+
     def _process_pending(self, by_hash: dict[str, dict], now: float):
         """Retry journal operations while keeping import and rejection paths separate."""
         queue_cache: dict[str, dict[str, int]] = {}
@@ -722,24 +844,26 @@ class Guard:
                     phase = "delete"
                 if phase == "delete":
                     if torrent is None:
-                        LOG.error("PENDING torrent missing before deleteFiles=true: manual file verification needed [%s] %s", app, name)
+                        evidence = self.store.evidence(h)
+                        if evidence is not None and evidence[1] is not None:
+                            self.store.set_phase(h, "verify")
+                            self._verify_deletion(h, app, kind, now)
+                        else:
+                            self._cleanup_status(h, "torrent missing before saved delete request; manual review required", now)
                         continue
                     if kind == "reject":
                         self.qbit.stop(h)
-                    self.qbit.delete_with_data(h)
-                    self.store.set_phase(h, "verify")
+                    self._request_deletion(h, torrent, now)
                     LOG.warning("DELETE requested [%s] kind=%s name=%r hash=%s deleteFiles=true", app, kind, name, h)
                     continue
                 if phase == "verify":
                     if torrent is not None:
-                        self.qbit.delete_with_data(h)
+                        self._request_deletion(h, torrent, now)
                         LOG.warning("PENDING deletion still visible; retrying [%s] %s hash=%s", app, name, h)
                         continue
-                    self.store.remove(h)
-                    self.warned_missing.discard(h)
-                    LOG.info("CLEANED [%s] kind=%s name=%r hash=%s qBittorrent entry absent after deleteFiles=true; reason=%s (disk deletion not independently verified)", app, kind, name, h, reason)
+                    self._verify_deletion(h, app, kind, now)
             except (ApiError, urllib.error.URLError, ValueError, OSError, sqlite3.Error) as exc:
-                LOG.error("Cleanup failed [%s] kind=%s name=%r hash=%s phase=%s (will retry): %s", app, kind, name, h, phase, exc)
+                self._cleanup_status(h, f"cleanup failed [{app}] kind={kind} phase={phase}: {exc}", now, logging.ERROR)
 
 
 class ConsoleFormatter(logging.Formatter):

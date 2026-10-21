@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v0.5** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
+**v0.6** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
 
 Torrent Guard is a background service that examines new and completed movie/TV torrents and cleans up imported releases. It uses **qBittorrent's Web API** and **Sonarr/Radarr's v3 APIs**; no qBittorrent “Run external program on torrent completion” hook is required.
 
@@ -88,7 +88,7 @@ View persistent logs:
 docker compose exec torrent-guard tail -n 100 /state/torrent-guard.log
 ```
 
-### Upgrade to v0.5
+### Upgrade to v0.6
 
 ```bash
 cd torrent-guard
@@ -99,9 +99,13 @@ git pull --ff-only
 docker compose up -d --build --force-recreate
 ```
 
-No new required environment settings or database schema changes are needed for v0.5.
-Import checks remain at 60 seconds by default. This version corrects numeric
-import-event matching and reports each scheduled check and specific wait reasons.
+No new environment settings are required for read-only independent verification.
+v0.6 adds SQLite evidence/audit tables automatically while preserving existing
+pending records. Back up `/state` before upgrading. Missing-torrent legacy records
+without saved file evidence require manual review. Automatic completed-download
+leftover removal requires the explicit cleanup override and host-directory setting
+described in [deletion verification](docs/deletion-verification.md).
+Import checks remain at 60 seconds by default.
 Optional `LOG_COLOR=always` enables the classic console palette by default;
 `HEALTHCHECK_MAX_AGE_SECONDS=300` sets the completed-poll freshness limit.
 Existing journal records are retained. Imported cleanup now rechecks current
@@ -148,6 +152,9 @@ the mount does **not** copy existing data automatically. Do **not** run
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `LOG_COLOR` | `always` | Console ANSI colors: `always`, `auto` (terminal only), or `never`; audit files stay plain text |
 | `HEALTHCHECK_MAX_AGE_SECONDS` | `300` | Positive finite seconds since the last completed poll; allow for the longest full media-validation batch and `POLL_SECONDS` |
+| `CLEANUP_LEFTOVERS` | `false` | Allow guarded local removal of completed leftovers; compose.cleanup.yaml sets this true with the required write bind |
+| `DELETE_SETTLE_SECONDS` | `120` | Wait after the last qBittorrent delete request before local fallback; minimum 30 seconds |
+| `CLEANUP_COMPLETE_HOST_PATH` | unset | Exact host completed-download directory for the optional cleanup override; must correspond to QBIT_COMPLETE_DIR, never a library or download parent |
 
 Use exactly one category per Arr app; tags are optional and must not conflict. To use only one Arr app, remove all of the other app's variables, including its tag.
 
@@ -204,7 +211,7 @@ unhealthy; health status is available for monitoring and alerts.
 
 - **Failed downloads:** Arr queue matching is required to blocklist a bad release. If Arr cannot find that queue item or is offline, the torrent stays stopped/pending and **is not deleted** until the blocklist path succeeds. HTTP 404 after a known match also preserves the torrent: absence does not confirm blocklisting. Review Arr's blocklist and the journal manually; do not bypass this check by repeatedly deleting downloads.
 - **Successfully imported downloads:** Only matching Arr **history** authorizes cleanup. A finished torrent alone, disappearance from Arr's queue, a newly added torrent carrying an old reused hash, or a partial Sonarr season-pack import does **not** authorize deletion. The import event must be at least 10 minutes old. Every deletion attempt, including pending retries, rechecks completion, selected media, and history. The imported path never queries or changes the Arr queue and never blocklists a successful import.
-- **Deletion:** qBittorrent receives the explicit `deleteFiles=true` parameter. It should remove the torrent and its tracked download data, including partial files. Guard verifies **torrent entry disappearance**, not each file's absence on disk. Untracked/orphaned files may require manual cleanup. Files already imported to library paths are not targeted, including hardlinked library copies (which retain their content when the download link is removed).
+- **Deletion:** qBittorrent receives `deleteFiles=true`. Guard saves all tracked filenames before the request and verifies their absence on disk before clearing the journal. Remaining files, unknown state, changed roots and permission failures retain pending work. Optional completed-download cleanup permanently removes verified leftovers using saved identities and narrowly scoped write access. Read [deletion verification and deployment](docs/deletion-verification.md), including the `/mnt/downloads/completed` mapping and existing-orphan limitations. Libraries and untracked files are never cleanup targets.
 - **Media validity:** `ffprobe` checks for readable video stream metadata; it does **not** decode or checksum every frame, certify all audio/subtitle tracks, or guarantee that a file is malware-free. Failure to access a mounted media file **defers** processing rather than falsely classifying the download as malware. A readable but unexpected media codec may still be rejected if ffprobe cannot identify it.
 - **Seeding:** Deleting imported torrents after 10 minutes can interrupt seeding or violate tracker requirements. This is the behavior requested; consider increasing the grace period or maintaining seeding separately for private trackers.
 - **Arr history:** On API outages, missing download IDs, mismatched source paths, too-old history, or ambiguous multi-video matches, the program preserves the torrent. It cannot guarantee that *Arr always associates every imported episode with its torrent hash. Check DEBUG logs if valid releases do not clean up.
@@ -214,7 +221,7 @@ unhealthy; health status is available for monitoring and alerts.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile guard.py scripts/release_notes.py
+python3 -m py_compile guard.py deletion.py scripts/release_notes.py
 python3 scripts/release_notes.py
 # If Docker is available and .env has correct paths:
 docker compose config

@@ -37,6 +37,11 @@ class CompletionTests(unittest.TestCase):
         self.event = {"downloadId": "ABCDE1", "eventType": "downloadFolderImported", "date": when(NOW-1000),
                       "data": {"droppedPath": "/downloads/movies/Movie 2026.mkv", "importedPath": "/library/Movie 2026.mkv"}}
         self.arr.imported_history.return_value = {"abcde1": [self.event]}
+        verifier_patch = patch("guard.FileVerifier")
+        self.verifier = verifier_patch.start().return_value
+        self.addCleanup(verifier_patch.stop)
+        self.verifier.snapshot.side_effect = lambda torrent, files: {"version": 1, "torrent": torrent, "files": files, "items": [{"path": "mock download"}]}
+        self.verifier.remaining.return_value = []
         self.guard = Guard(self.cfg, self.qbit, {"RADARR": self.arr}, validator=self.validator)
 
     def tearDown(self):

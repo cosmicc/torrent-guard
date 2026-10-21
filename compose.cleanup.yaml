@@ -1,0 +1,12 @@
+# Opt-in completed-download write access. The main /downloads mount stays read-only.
+# docker compose -f compose.yaml -f compose.cleanup.yaml up -d --build --force-recreate
+services:
+  torrent-guard:
+    environment:
+      CLEANUP_LEFTOVERS: "true"
+    volumes:
+      - type: bind
+        source: ${CLEANUP_COMPLETE_HOST_PATH:?Set CLEANUP_COMPLETE_HOST_PATH to the completed-download directory only}
+        target: /cleanup/completed
+        bind:
+          create_host_path: false

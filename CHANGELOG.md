@@ -3,6 +3,34 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. All versions below were prepared on 10.20.2026.
 
+## 0.6 - 10.20.2026
+
+### Added
+
+- Persistent per-file deletion manifests and independent checks for every saved
+  download name before reporting cleanup complete, with an audit of verified work.
+- Opt-in automatic removal of unchanged completed-download leftovers using a
+  dedicated writable bind, current import/ownership checks and private quarantine.
+  Verified payloads are permanently unlinked immediately after the final identity
+  check; they are not sent to a recycle bin.
+- Filesystem tests for replacement races, restarts, mounts, permissions,
+  unselected files and protection of imported library copies/hardlinks.
+
+### Changed
+
+- Keep cleanup pending when files remain or verification is uncertain. Allow
+  qBittorrent 120 seconds by default before optional local fallback.
+- Add evidence/audit SQLite tables without discarding existing records. Legacy
+  missing-torrent records without manifests require manual review. Existing
+  orphans from already-cleared v0.5 records are not adopted automatically.
+- Deployment: standard downloads remain read-only. Enabling completed-download
+  fallback requires compose.cleanup.yaml and CLEANUP_COMPLETE_HOST_PATH matching
+  QBIT_COMPLETE_DIR. No writable library or download-parent mount is permitted.
+
+### Fixed
+
+- Do not treat torrent disappearance alone as proof that the files were deleted.
+
 ## 0.5 - 10.20.2026
 
 ### Added

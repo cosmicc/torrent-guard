@@ -4,7 +4,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from guard import ApiError, ArrApi, ArrInstance, Config, Guard, PendingStore
 
@@ -27,6 +27,11 @@ class CleanupSafetyTests(unittest.TestCase):
         self.event = {"date": datetime.fromtimestamp(self.now - 1000, timezone.utc).isoformat(),
                       "data": {"droppedPath": "/downloads/complete/Movie.mkv"}}
         self.arr.imported_history.return_value = {"abc123": [self.event]}
+        verifier_patch = patch("guard.FileVerifier")
+        self.verifier = verifier_patch.start().return_value
+        self.addCleanup(verifier_patch.stop)
+        self.verifier.snapshot.side_effect = lambda torrent, files: {"version": 1, "torrent": torrent, "files": files, "items": [{"path": "mock download"}]}
+        self.verifier.remaining.return_value = []
         self.guard = Guard(self.config, self.qbit, {"RADARR": self.arr}, validator=self.validator)
         self.addCleanup(self.guard.store.db.close)
 
@@ -158,11 +163,11 @@ class CleanupSafetyTests(unittest.TestCase):
         self.guard.poll(now=self.now + 5)
         self.qbit.delete_with_data.assert_not_called()
 
-    def test_verify_absence_clears_import_journal_without_arr_calls(self):
+    def test_legacy_verify_absence_without_manifest_requires_manual_review(self):
         self.schedule("verify")
         self.qbit.torrents.return_value = []
         self.guard.poll(now=self.now)
-        self.assertFalse(self.guard.store.entries())
+        self.assertTrue(self.guard.store.entries())
         self.arr.imported_history.assert_not_called()
         self.arr.blocklist_and_remove.assert_not_called()
 

@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v0.5** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v0.6** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -31,13 +31,18 @@ grace interval has elapsed (10 minutes by default).
 
 Keep qBittorrent's “Append .!qB extension to incomplete files” enabled. No
 completion hook is required. Imported library files are not cleanup targets;
-qBittorrent alone deletes its tracked download data. Guard verifies torrent
-disappearance, not physical deletion of every file. ffprobe checks video stream
+qBittorrent is the primary deletion mechanism. Guard verifies that the torrent
+and all saved download file paths are absent. ffprobe checks video stream
 metadata, not full-file integrity or malware safety.
 
 See [setup, upgrades, and troubleshooting](INSTALL.md),
 [version history](CHANGELOG.md), and [development guidance](AGENTS.md).
 This daemon uses a single changelog; no separate user changelog is maintained.
+
+**v0.6:** independent deletion verification retains unresolved
+operations. Optional [completed-download leftover cleanup](docs/deletion-verification.md)
+uses a narrowly scoped writable bind and saved file identities. Verified leftovers
+are permanently deleted after the final identity check.
 
 ## Monitor
 
@@ -65,7 +70,7 @@ Docker does not automatically restart unhealthy containers.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile guard.py scripts/release_notes.py
+python3 -m py_compile guard.py deletion.py scripts/release_notes.py
 python3 scripts/release_notes.py
 ```
 
