@@ -192,7 +192,7 @@ class DeletionTests(unittest.TestCase):
         evidence = self.guard.store.evidence("abc123")[0]
         item = next(item for item in evidence["items"] if item.get("quarantine"))
         self.assertTrue((self.completed / item["quarantine"] / "payload").exists())
-        self.guard.poll(now=self.now + 125)
+        self.guard.poll(now=self.now + 150)
         self.assertFalse(self.guard.store.entries())
 
     def test_race_captures_changed_object_without_deleting_it(self):
@@ -259,7 +259,7 @@ class DeletionTests(unittest.TestCase):
         self.qbit.torrents.return_value = []
         self.guard.store.db.close()
         self.guard = Guard(self.cfg, self.qbit, {"RADARR": self.arr})
-        self.guard.poll(now=self.now + 5)
+        self.guard.poll(now=self.now + 30)
         self.assertFalse(self.guard.store.entries())
 
     def test_parent_symlink_prevents_snapshot_and_api_deletion(self):

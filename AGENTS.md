@@ -32,6 +32,7 @@ There is no web service, exposed port, qBittorrent completion hook, Docker socke
 - tests/test_v031.py — qBittorrent 5.2+ login compatibility.
 - deletion.py — saved file manifests, independent absence checks, and guarded completed-download quarantine/unlink operations.
 - tests/test_deletion.py — actual temporary-file and SQLite tests for verification, leftover removal, library protection and restart/race handling.
+- tests/test_nfs.py — stale-handle deferral, bounded backoff, persistent access holds and completion-independent retention.
 - Dockerfile — Alpine Python 3.12, ffmpeg/ffprobe, non-root UID/GID 65534.
 - compose.yaml — container with read-only root, no Linux capabilities, no new privileges, temporary /tmp, persistent /state and read-only /downloads.
 - compose.cleanup.yaml — explicit opt-in writable completed-download bind; never mount the download parent or library writable.
@@ -45,6 +46,7 @@ There is no web service, exposed port, qBittorrent completion hook, Docker socke
 - tests/test_monitoring.py — palette isolation, terminal-control escaping and completed-poll health checks.
 - docs/log-palette.svg — approved classic log palette with light/dark reference samples. Green success, blue activity, yellow waiting/warnings, red errors/rejections, purple dry run; exact ANSI shades follow the terminal theme.
 - docs/deletion-verification.md — required reading before modifying file verification, cleanup permissions, journal manifests, quarantine recovery or deletion safety. Contains v0.6 deployment and validation details. Verified leftovers are permanently unlinked; quarantine is only a temporary identity-check step unless safety checks fail.
+- docs/filesystem-retries.md — required reading for v0.7 unresolved filesystem errors, NFS ESTALE handling, ffprobe I/O interpretation, retry persistence and recovery.
 - .github/workflows/test.yml — Python unit tests and syntax checks on push/PR.
 - .github/workflows/release.yml — validates tests and publishes a stable vVERSION GitHub Release explicitly marked Latest when VERSION changes on main or via dispatch.
 - LICENSE — preserve license and honor it for dependencies.
@@ -199,3 +201,16 @@ Treat docker compose config output as possibly containing secrets; sanitize befo
 Do not delete main library files; do not add filesystem write access to libraries or the download parent; do not bypass the opt-in completed-root cleanup restrictions; do not disable or silently bypass import verification; do not blocklist good imports; do not manage torrents belonging to unrelated qBittorrent categories; do not claim checksum, full decoding or malware safety from ffprobe; do not silently swallow operational errors.
 
 Conservative retention is preferable to irreversible data loss.
+
+Filesystem failures take precedence over metadata classification and pending
+cleanup. Persist unresolved holds in filesystem_retry and invalidate cached
+completed-media acceptance. Retry at 30/60/120/240/300 seconds without sleeping
+inside the poll loop; restart or completion-state changes must not bypass a hold.
+Clear it only after actual filesystem checks recover. Dry-run stores new retry
+state only in memory and must not mutate existing retry rows during polling.
+Use DEFER validation for ESTALE and other unresolved resolution/stat/open/read
+failures. ffprobe I/O failures and malformed output are inconclusive; a failed
+probe permits rejection only when access remains readable and the result does
+not report an I/O problem. Check all tracked paths before destructive calls,
+including incomplete metadata-based rejections and pending retries. See the
+filesystem recovery guide for testing and operational limitations.

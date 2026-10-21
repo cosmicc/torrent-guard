@@ -8,6 +8,7 @@ completed-download cleanup uses persisted file identities and a scoped write bin
 from __future__ import annotations
 
 import argparse
+import errno
 import http.cookiejar
 import json
 import logging
@@ -16,6 +17,7 @@ from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path, PurePosixPath
 import sqlite3
+import stat
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -27,7 +29,7 @@ import urllib.request
 from deletion import FileVerifier
 
 LOG = logging.getLogger("torrent-guard")
-VERSION = "0.6"
+VERSION = "0.7"
 HEARTBEAT_FILE = Path("/tmp/torrent-guard-heartbeat")
 DEFAULT_VIDEO = frozenset({".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".webm", ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".divx", ".flv"})
 DEFAULT_RISKY = frozenset({".exe", ".scr", ".com", ".bat", ".cmd", ".msi", ".msp", ".msix", ".ps1", ".psm1", ".vbs", ".vbe", ".vb", ".js", ".jse", ".wsf", ".wsh", ".hta", ".lnk", ".pif", ".cpl", ".jar", ".apk", ".appx", ".reg", ".scf", ".sh", ".py"})
@@ -392,6 +394,39 @@ class MediaValidator:
     def __init__(self, config: Config):
         self.config = config
 
+    @staticmethod
+    def readable(path: Path) -> None:
+        """Exercise stat/open/read, preserving ESTALE and other filesystem errors."""
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError(errno.EIO, "media path is not a regular readable file", str(path))
+        with path.open("rb") as stream:
+            stream.read(65536)
+
+    def check_filesystem(self, torrent: dict, files: list[dict]) -> None:
+        """Check mapped tracked paths without ffprobe, including incomplete torrents."""
+        verifier = FileVerifier(self.config)
+        manifest = verifier.snapshot(torrent, files)
+        for item in manifest["items"]:
+            if item["identity"] is not None:
+                with verifier.parent(verifier.roots[item["root"]], item["path"],
+                                     manifest["roots"][item["root"]]["identity"]) as (directory, name):
+                    if directory is None:
+                        raise FileNotFoundError("tracked file moved during access check")
+                    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+                    try:
+                        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                            raise OSError(errno.EIO, "tracked path changed during access check")
+                        os.read(descriptor, 65536)
+                    finally:
+                        os.close(descriptor)
+
+    @staticmethod
+    def unavailable(name: str, error) -> tuple[str, str]:
+        """Turn access uncertainty into an explicit deferral, never bad-media evidence."""
+        code = errno.errorcode.get(getattr(error, "errno", None), "I/O")
+        return "defer", f"filesystem/validation unavailable ({code}) for {name}: {error}"
+
     def resolve(self, torrent: dict, file: dict) -> Path:
         root = Path(self.config.qbit_download_root)
         save = Path(str(torrent.get("save_path") or ""))
@@ -435,19 +470,38 @@ class MediaValidator:
                 path = self.resolve(torrent, video)
             except ValueError as exc:
                 return "defer", f"media path mapping needs attention for {name}: {exc}"
-            if not path.is_file() or not os.access(path, os.R_OK):
-                return "defer", f"video not readable at {path}; verify read-only bind mount, permissions, and qBittorrent root mapping"
+            except OSError as exc:
+                return self.unavailable(name, exc)
+            try:
+                self.readable(path)
+            except OSError as exc:
+                decision, detail = self.unavailable(name, exc)
+                return decision, f"video not readable at {path}; {detail}"
             if not self.config.verify_video_content:
                 continue  # still require final, existing, readable video files
             try:
                 p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_type,codec_name,width,height", "-of", "json", str(path)], capture_output=True, text=True, timeout=self.config.ffprobe_timeout_seconds, check=False)
             except (FileNotFoundError, PermissionError, subprocess.TimeoutExpired, OSError) as exc:
-                return "defer", f"could not run ffprobe for {name}: {exc}"
+                return self.unavailable(name, exc)
             try:
-                streams = json.loads(p.stdout or "{}").get("streams", [])
-            except ValueError:
-                streams = []
-            if p.returncode != 0 or not any(s.get("codec_type") == "video" and int(s.get("width") or 0) > 0 and int(s.get("height") or 0) > 0 for s in streams):
+                payload = json.loads(p.stdout or "{}")
+                streams = payload.get("streams", []) if isinstance(payload, dict) else None
+                if not isinstance(streams, list) or any(not isinstance(stream, dict) for stream in streams):
+                    raise ValueError("unexpected ffprobe stream metadata")
+                valid_stream = any(s.get("codec_type") == "video" and int(s.get("width") or 0) > 0 and int(s.get("height") or 0) > 0 for s in streams)
+            except (ValueError, TypeError) as exc:
+                return self.unavailable(name, exc)
+            if p.returncode != 0 or not valid_stream:
+                try:
+                    # The mount can fail while ffprobe is running. Access errors
+                    # and reported I/O failures cannot establish invalid media.
+                    self.readable(path)
+                except OSError as exc:
+                    return self.unavailable(name, exc)
+                io_errors = ("stale file handle", "input/output error", "i/o error", "permission denied",
+                             "no such file", "connection timed out", "connection reset", "resource temporarily unavailable")
+                if any(message in p.stderr.casefold() for message in io_errors):
+                    return self.unavailable(name, p.stderr.strip()[:180])
                 return "reject", f"ffprobe found no readable video stream: {name} ({p.stderr.strip()[:180]})"
         if not self.config.verify_video_content:
             return "accept", f"metadata-only: {len(videos)} final video file(s) present/readable (ffprobe DISABLED)"
@@ -512,6 +566,10 @@ class PendingStore:
             id INTEGER PRIMARY KEY, hash TEXT NOT NULL, completed_at REAL NOT NULL,
             manifest TEXT NOT NULL
         )""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS filesystem_retry (
+            hash TEXT PRIMARY KEY, attempts INTEGER NOT NULL,
+            next_at REAL NOT NULL, reason TEXT NOT NULL
+        )""")
         self.db.commit()
 
     def add(self, torrent_hash: str, app: str, name: str, reason: str, kind: str = "reject"):
@@ -559,6 +617,21 @@ class PendingStore:
     def hashes(self):
         return {row[0] for row in self.db.execute("SELECT hash FROM pending")}
 
+    def filesystem_retries(self):
+        """Load unresolved access holds so a restart cannot bypass retention."""
+        return {row[0]: (row[1], row[2], row[3]) for row in self.db.execute(
+            "SELECT hash,attempts,next_at,reason FROM filesystem_retry")}
+
+    def set_filesystem_retry(self, h: str, attempt: int, next_at: float, reason: str):
+        """Persist bounded backoff independently of cleanup authorization."""
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO filesystem_retry VALUES (?,?,?,?)", (h, attempt, next_at, reason))
+
+    def clear_filesystem_retry(self, h: str):
+        """Release a hold only after an actual filesystem recovery check."""
+        with self.db:
+            self.db.execute("DELETE FROM filesystem_retry WHERE hash=?", (h,))
+
 
 class Guard:
     def __init__(self, config: Config, qbit=None, arr_clients=None, store=None, validator=None, verifier=None):
@@ -569,6 +642,7 @@ class Guard:
         self.validator = validator if validator is not None else MediaValidator(config)
         self.verifier = verifier if verifier is not None else FileVerifier(config)
         self.cleanup_messages: dict[str, tuple[str, float]] = {}
+        self.filesystem_retries = self.store.filesystem_retries()
         self.metadata_passed: set[str] = set()
         self.completed_passed: set[str] = set()
         self.logged_dry: set[str] = set()
@@ -596,6 +670,8 @@ class Guard:
             app = torrent_app(torrent, self.config)
             if not app or h in pending:
                 continue
+            if not self._filesystem_ready(h, torrent, now):
+                continue
             name = str(torrent.get("name") or h)
             age = now - int(torrent.get("added_on") or 0)
             fresh = 0 <= age <= self.config.max_age_hours * 3600
@@ -616,6 +692,7 @@ class Guard:
                     continue
                 reason = classify(files, reject_no_video=self.config.reject_no_video)
                 if reason:
+                    self.validator.check_filesystem(torrent, files)
                     self._reject(h, app, name, reason, torrent)
                     continue
                 if h not in self.metadata_passed:
@@ -627,15 +704,15 @@ class Guard:
                         self._reject(h, app, name, "completed payload invalid: " + detail, torrent)
                         continue
                     if result == "defer":
-                        if self.warned_defer.get(h) != detail:
-                            LOG.warning("DEFER validation [%s] name=%r hash=%s reason=%s", app, name, h, detail)
-                            self.warned_defer[h] = detail
+                        self._defer_filesystem(h, detail, now)
                         continue
                     self.completed_passed.add(h)
                     LOG.info("ACCEPT completed [%s] name=%r hash=%s: %s; checking Arr import history", app, name, h, detail)
                 if complete and h in self.completed_passed:
                     candidates[h] = (app, name, torrent, files)
-            except (ApiError, urllib.error.URLError, ValueError, OSError, sqlite3.Error) as exc:
+            except OSError as exc:
+                self._defer_filesystem(h, str(exc), now)
+            except (ApiError, ValueError, sqlite3.Error) as exc:
                 LOG.error("Inspection failed [%s] name=%r hash=%s: %s", app, name, h, exc)
 
         if candidates and (not self.last_import_check or now - self.last_import_check >= self.config.import_check_seconds):
@@ -679,6 +756,8 @@ class Guard:
             self._process_pending(by_hash, now)
 
     def _reject(self, h: str, app: str, name: str, reason: str, torrent: dict):
+        if h in self.filesystem_retries:
+            return  # An unresolved access failure overrides filename-based rejection.
         if h not in self.logged_dry:
             LOG.warning("REJECT candidate [%s] name=%r hash=%s category=%r tags=%r reason=%s", app, name, h, torrent.get("category"), torrent.get("tags"), reason)
         if self.config.dry_run:
@@ -687,6 +766,46 @@ class Guard:
             self.logged_dry.add(h)
         else:
             self.store.add(h, app, name, reason, kind="reject")
+
+    def _defer_filesystem(self, h: str, reason: str, now: float):
+        """Retain the torrent and schedule 30/60/120/240/300-second retries."""
+        attempt = self.filesystem_retries.get(h, (0, 0, ""))[0] + 1
+        delay = min(300, 30 * 2 ** min(attempt - 1, 4))
+        self.filesystem_retries[h] = (attempt, now + delay, reason)
+        self.completed_passed.discard(h)
+        if not self.config.dry_run:
+            self.store.set_filesystem_retry(h, attempt, now + delay, reason)
+        LOG.warning("DEFER validation hash=%s reason=%s; retry_in=%ds attempt=%d", h, reason, delay, attempt)
+
+    def _clear_filesystem(self, h: str):
+        """Clear retry state after recovery without changing dry-run journals."""
+        self.filesystem_retries.pop(h, None)
+        if not self.config.dry_run:
+            self.store.clear_filesystem_retry(h)
+
+    def _filesystem_ready(self, h: str, torrent: dict | None, now: float) -> bool:
+        """A completion/state change never bypasses an unresolved filesystem hold."""
+        retry = self.filesystem_retries.get(h)
+        if retry is None:
+            return True
+        if now < retry[1]:
+            return False
+        if torrent is None:
+            return True  # Saved-path verification below must establish recovery.
+        try:
+            files = self.qbit.files(h)
+            self.validator.check_filesystem(torrent, files)
+            if is_complete(torrent):
+                result, reason = self.validator.inspect(torrent, files)
+                if result == "defer":
+                    self._defer_filesystem(h, reason, now)
+                    return False
+            self._clear_filesystem(h)
+            LOG.info("Filesystem access recovered hash=%s; resuming inspection", h)
+            return True
+        except (ApiError, ValueError, OSError) as exc:
+            self._defer_filesystem(h, str(exc), now)
+            return False
 
     def _import_cleanup_ready(self, torrent: dict, h: str, app: str, now: float,
                               history_cache: dict[str, dict]) -> bool:
@@ -707,7 +826,10 @@ class Guard:
             return False
         result, detail = self.validator.inspect(torrent, files)
         if result != "accept":
-            LOG.warning("PENDING imported media not ready [%s] hash=%s: %s", app, h, detail)
+            if result == "defer":
+                self._defer_filesystem(h, detail, now)
+            else:
+                LOG.warning("PENDING imported media not ready [%s] hash=%s: %s", app, h, detail)
             return False
         if app not in history_cache:
             history_cache[app] = self.arr_clients[app].imported_history(since)
@@ -787,7 +909,9 @@ class Guard:
         if remaining:
             paths = ", ".join(repr(item["path"]) for item in remaining[:4])
             self._cleanup_status(h, f"{len(remaining)} recorded file(s) remain: {paths}; waiting for settle/cleanup or manual review", now)
+            self._clear_filesystem(h)
             return False
+        self._clear_filesystem(h)
         self.store.finish(h, now)
         self.warned_missing.discard(h)
         self.cleanup_messages.pop(h, None)
@@ -807,6 +931,12 @@ class Guard:
                 if torrent and torrent_app(torrent, self.config) != app:
                     LOG.error("PENDING ownership changed; manual review required [%s] %s hash=%s", app, name, h)
                     continue
+                if not self._filesystem_ready(h, torrent, now):
+                    continue
+                if torrent is not None:
+                    # Check access before stop/blocklist/API deletion, including
+                    # metadata-only rejection of incomplete torrents.
+                    self.validator.check_filesystem(torrent, self.qbit.files(h))
                 if kind == "imported":
                     if torrent is not None:
                         if not self._import_cleanup_ready(torrent, h, app, now, history_cache):
@@ -862,7 +992,9 @@ class Guard:
                         LOG.warning("PENDING deletion still visible; retrying [%s] %s hash=%s", app, name, h)
                         continue
                     self._verify_deletion(h, app, kind, now)
-            except (ApiError, urllib.error.URLError, ValueError, OSError, sqlite3.Error) as exc:
+            except OSError as exc:
+                self._defer_filesystem(h, str(exc), now)
+            except (ApiError, ValueError, sqlite3.Error) as exc:
                 self._cleanup_status(h, f"cleanup failed [{app}] kind={kind} phase={phase}: {exc}", now, logging.ERROR)
 
 

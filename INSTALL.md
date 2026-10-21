@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v0.6** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
+**v0.7** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
 
 Torrent Guard is a background service that examines new and completed movie/TV torrents and cleans up imported releases. It uses **qBittorrent's Web API** and **Sonarr/Radarr's v3 APIs**; no qBittorrent “Run external program on torrent completion” hook is required.
 
@@ -88,7 +88,7 @@ View persistent logs:
 docker compose exec torrent-guard tail -n 100 /state/torrent-guard.log
 ```
 
-### Upgrade to v0.6
+### Upgrade to v0.7
 
 ```bash
 cd torrent-guard
@@ -100,8 +100,9 @@ docker compose up -d --build --force-recreate
 ```
 
 No new environment settings are required for read-only independent verification.
-v0.6 adds SQLite evidence/audit tables automatically while preserving existing
-pending records. Back up `/state` before upgrading. Missing-torrent legacy records
+v0.7 adds the filesystem_retry table automatically; the evidence/audit tables
+introduced in v0.6 and existing pending records are preserved. Back up `/state`
+before upgrading. Missing-torrent legacy records
 without saved file evidence require manual review. Automatic completed-download
 leftover removal requires the explicit cleanup override and host-directory setting
 described in [deletion verification](docs/deletion-verification.md).
@@ -232,6 +233,12 @@ The tests use mocked qBittorrent/Arr HTTP clients and ffprobe; they don't prove 
 Project files: `guard.py`, `Dockerfile`, `compose.yaml`, `.env.example`, `README.md`, `INSTALL.md`, `CHANGELOG.md`, `VERSION`, `.gitignore`, `.dockerignore`, `scripts/`, `tests/`, `.github/workflows/`.
 
 ## Troubleshooting
+
+In v0.7, filesystem failures, including NFS `ESTALE`, create a
+persistent per-torrent hold. `DEFER validation` includes the retry delay;
+30/60/120/240/300-second backoff replaces five-second retry/error loops. A state
+change or daemon restart does not permit deletion while access is unresolved.
+See [filesystem recovery](docs/filesystem-retries.md). No new settings are needed.
 
 - **State/log permission errors:** verify ownership and directory write permission
   for UID/GID 65534, the bind mount's writable flag, ACLs, SELinux, and NFS UID

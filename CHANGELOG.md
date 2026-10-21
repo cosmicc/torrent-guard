@@ -3,6 +3,29 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. All versions below were prepared on 10.20.2026.
 
+## 0.7 - 10.20.2026
+
+### Added
+
+- Persistent filesystem-error holds and per-torrent retry backoff of 30, 60,
+  120, 240, then 300 seconds, including across daemon restarts.
+- Regression tests for stale handles during resolution/stat/open, ffprobe I/O
+  failures, incomplete-torrent retention, recovery, and dry-run journal safety.
+
+### Changed
+
+- Check actual stat/open/read access and preflight tracked files before destructive
+  operations. Completion-state changes cannot bypass unresolved filesystem errors.
+- Add a filesystem_retry SQLite table automatically without discarding existing
+  state. No new environment settings are required.
+
+### Fixed
+
+- Treat ESTALE and unresolved filesystem access failures as DEFER validation,
+  never as proof of invalid media.
+- Recheck access after failed ffprobe validation; defer reported I/O errors and
+  malformed probe responses while still rejecting readable, genuinely invalid media.
+
 ## 0.6 - 10.20.2026
 
 ### Added

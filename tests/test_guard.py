@@ -98,6 +98,9 @@ class PollTests(unittest.TestCase):
         self.addCleanup(verifier_patch.stop)
         self.verifier.snapshot.side_effect = lambda torrent, files: {"version": 1, "torrent": torrent, "files": files, "items": [{"path": "mock download"}]}
         self.verifier.remaining.return_value = []
+        access_patch = patch("guard.MediaValidator.check_filesystem", return_value=None)
+        access_patch.start()
+        self.addCleanup(access_patch.stop)
         self.guard = Guard(self.cfg, self.qb, {"RADARR": self.arr})
 
     def tearDown(self):
