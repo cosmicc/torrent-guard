@@ -87,11 +87,11 @@ records already started at `delete`; v0.4 adds explicit isolation for every phas
 User's qBittorrent setup:
 
     /downloads/incomplete/  -- actively downloading files; often *.mkv.!qB
-    /downloads/completed/   -- operator's confirmed final location
+    /downloads/complete/   -- operator's corrected final location
 
-The host final directory is `/mnt/downloads/completed`; the operator sets
-`QBIT_COMPLETE_DIR=/downloads/completed` in the host `.env`. Repository defaults
-retain `/downloads/complete` for compatibility; never silently rewrite an
+The host final directory is `/mnt/downloads/complete`; the operator sets
+`QBIT_COMPLETE_DIR=/downloads/complete` in the host `.env`. Repository defaults
+use the same final-directory name; never silently rewrite an
 existing installation's environment or infer the final directory from its title.
 
 qBittorrent's Append .!qB extension to incomplete files should remain enabled. The qBittorrent API generally exposes original filenames; normalized_name also strips an optional trailing .!qB for metadata classification. Thus fake.exe.!qB remains detectable as executable. NEVER ffprobe an incomplete .!qB file; wait for qBittorrent to finish, rename and move it.
@@ -149,6 +149,10 @@ Additional cleanup controls are `CLEANUP_LEFTOVERS` (default false),
 `CLEANUP_COMPLETE_HOST_PATH`. `compose.cleanup.yaml` explicitly enables fallback.
 Its read/write alias must identify the same completed root as the read-only
 mapping; the application checks device/inode identity before writing.
+Log effective cleanup settings at startup. Pending-file warnings must identify
+whether automatic cleanup is disabled, its settle deadline, or files remain
+after an attempt. Never recommend deleting the journal to retry leftovers;
+recreating with the explicit cleanup override resumes existing evidence.
 
 `LOG_COLOR=always` is the default for live Docker logs; `auto` requires a TTY
 and `never` disables colors. Keep the persistent audit file plain text, escape

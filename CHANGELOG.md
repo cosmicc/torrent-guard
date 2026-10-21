@@ -1,7 +1,26 @@
 # Changelog
 
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
-notes recorded in Git. All versions below were prepared on 10.20.2026.
+notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
+
+## 0.8 - 10.21.2026
+
+### Added
+
+- Startup log reports whether automatic leftover cleanup is enabled, its settle
+  interval, and its writable completed-root alias.
+
+### Changed
+
+- Pending disk verification distinguishes disabled cleanup, the deletion settle
+  deadline, and paths still present after an automatic cleanup attempt.
+
+### Fixed
+
+- Replace the ambiguous “waiting for settle/cleanup or manual review” warning
+  with the actual blocker and instructions to enable the cleanup override.
+- Correct host/container path examples to `/mnt/downloads/complete` and
+  `/downloads/complete`; clarify the separate `/cleanup/completed` write alias.
 
 ## 0.7 - 10.20.2026
 

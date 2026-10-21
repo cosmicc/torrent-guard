@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v0.7** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v0.8** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -43,6 +43,10 @@ This daemon uses a single changelog; no separate user changelog is maintained.
 operations. Optional [completed-download leftover cleanup](docs/deletion-verification.md)
 uses a narrowly scoped writable bind and saved file identities. Verified leftovers
 are permanently deleted after the final identity check.
+
+Automatic leftover removal requires starting with both Compose files; plain
+`docker compose up` runs verification with read-only downloads. See the
+[cleanup deployment commands](docs/deletion-verification.md#optional-completed-download-write-access).
 
 **v0.7 filesystem protection:** stale NFS handles and other inconclusive access
 failures preserve downloads and retry with backoff. See

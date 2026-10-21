@@ -29,7 +29,7 @@ import urllib.request
 from deletion import FileVerifier
 
 LOG = logging.getLogger("torrent-guard")
-VERSION = "0.7"
+VERSION = "0.8"
 HEARTBEAT_FILE = Path("/tmp/torrent-guard-heartbeat")
 DEFAULT_VIDEO = frozenset({".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".webm", ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".divx", ".flv"})
 DEFAULT_RISKY = frozenset({".exe", ".scr", ".com", ".bat", ".cmd", ".msi", ".msp", ".msix", ".ps1", ".psm1", ".vbs", ".vbe", ".vb", ".js", ".jse", ".wsf", ".wsh", ".hta", ".lnk", ".pif", ".cpl", ".jar", ".apk", ".appx", ".reg", ".scf", ".sh", ".py"})
@@ -908,7 +908,14 @@ class Guard:
             remaining = self.verifier.remaining(manifest)
         if remaining:
             paths = ", ".join(repr(item["path"]) for item in remaining[:4])
-            self._cleanup_status(h, f"{len(remaining)} recorded file(s) remain: {paths}; waiting for settle/cleanup or manual review", now)
+            if not self.config.cleanup_leftovers:
+                blocker = "automatic leftover cleanup disabled (CLEANUP_LEFTOVERS=false); enable compose.cleanup.yaml with the completed-directory write bind"
+            elif now - requested_at < self.config.delete_settle_seconds:
+                deadline = datetime.fromtimestamp(requested_at + self.config.delete_settle_seconds, timezone.utc).isoformat()
+                blocker = f"waiting for qBittorrent deletion settle period until {deadline}"
+            else:
+                blocker = "automatic cleanup ran but the filesystem still reports saved paths; review LEFTOVER messages and filesystem errors"
+            self._cleanup_status(h, f"{len(remaining)} recorded file(s) remain: {paths}; {blocker}", now)
             self._clear_filesystem(h)
             return False
         self._clear_filesystem(h)
@@ -1082,6 +1089,7 @@ def main():
     setup_logging()
     config = Config.from_env()
     LOG.info("Starting v%s categories=%r tags=%r poll=%ds dry_run=%s verify_media=%s import_grace=%dm complete_dir=%s incomplete_dir=%s incomplete_suffix=.!qB state=%s", VERSION, config.categories, config.tags, config.poll_seconds, config.dry_run, config.verify_video_content, config.import_grace_minutes, config.qbit_complete_dir, config.qbit_incomplete_dir, config.state_db)
+    LOG.info("Cleanup settings automatic_leftovers=%s delete_settle_seconds=%d write_root=%s", config.cleanup_leftovers, config.delete_settle_seconds, config.cleanup_write_root)
     guard = None
     last_status = None
     while True:

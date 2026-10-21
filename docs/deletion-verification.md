@@ -48,15 +48,16 @@ existing host `.env` without replacing credentials or other settings:
 ```dotenv
 DOWNLOADS_HOST_PATH=/mnt/downloads
 QBIT_DOWNLOAD_ROOT=/downloads
-QBIT_COMPLETE_DIR=/downloads/completed
-CLEANUP_COMPLETE_HOST_PATH=/mnt/downloads/completed
+QBIT_COMPLETE_DIR=/downloads/complete
+CLEANUP_COMPLETE_HOST_PATH=/mnt/downloads/complete
 DELETE_SETTLE_SECONDS=120
 DRY_RUN=true
 ```
 
 Retain the actual configured `QBIT_INCOMPLETE_DIR`. Do not replace it based on
-this completed-directory example. The default example uses `complete`; this
-operator's directory is named `completed`, so `QBIT_COMPLETE_DIR` must agree.
+this completed-directory example. Both the repository default and this operator's directory use `complete`.
+`CLEANUP_COMPLETE_HOST_PATH` is a host bind source; `/cleanup/completed` is the
+separate internal write alias, independent of the host directory's final name.
 
 Deploy the override explicitly:
 
@@ -133,7 +134,7 @@ or tracked filename list changes after the snapshot.
 The reported Greenland journal entry was already removed by v0.5. Neither its
 file identity nor a full tracked-file list can be reconstructed from the log or
 torrent title. This implementation does not automatically adopt that orphan or
-scan `/mnt/downloads/completed` for likely matches. Review that specific leftover
+scan `/mnt/downloads/complete` for likely matches. Review that specific leftover
 manually after checking its imported library copy. New operations retain the
 necessary evidence before qBittorrent forgets the torrent.
 
@@ -151,3 +152,12 @@ cannot prove the production server's API behavior, bind mounts, or permissions.
 client absence and independent recorded-file absence. Persistent errors repeat
 at most once a minute unless the reason changes. The ordinary healthcheck still
 measures completed polling, not whether all cleanups succeed.
+
+If only plain `docker compose up` was used, automatic leftover removal is
+disabled by default. Enable the override using the commands above; a container
+restart alone does not add the write mount or reload its environment. Existing
+pending evidence is retained and retried after recreation. Do not erase the
+database or delete/re-add torrents to make Guard retry. The startup `Cleanup
+settings` log shows the active flag and settle interval. Starting with v0.8, diagnostics
+explicitly distinguish disabled cleanup, a settle deadline, and files still
+present after an attempted removal; v0.7 used a generic warning for all three.

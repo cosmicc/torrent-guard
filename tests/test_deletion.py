@@ -77,7 +77,10 @@ class DeletionTests(unittest.TestCase):
 
     def test_leftovers_remain_pending_during_settle_then_are_removed(self):
         self.request()
-        self.guard.poll(now=self.now + 5)
+        with self.assertLogs("torrent-guard", level="WARNING") as logs:
+            self.guard.poll(now=self.now + 5)
+        self.assertTrue(any("waiting for qBittorrent deletion settle period until" in line for line in logs.output))
+        self.assertFalse(any("cleanup disabled" in line for line in logs.output))
         self.assertTrue(self.path.exists())
         self.assertTrue(self.guard.store.entries())
         self.guard.poll(now=self.now + 120)
@@ -100,7 +103,10 @@ class DeletionTests(unittest.TestCase):
     def test_disabled_local_cleanup_keeps_evidence_and_files(self):
         self.guard.config = replace(self.cfg, cleanup_leftovers=False)
         self.request()
-        self.guard.poll(now=self.now + 1000)
+        with self.assertLogs("torrent-guard", level="WARNING") as logs:
+            self.guard.poll(now=self.now + 1000)
+        self.assertTrue(any("automatic leftover cleanup disabled (CLEANUP_LEFTOVERS=false)" in line for line in logs.output))
+        self.assertTrue(any("compose.cleanup.yaml" in line for line in logs.output))
         self.assertTrue(self.path.exists())
         self.assertIsNotNone(self.guard.store.evidence("abc123"))
         self.assertTrue(self.guard.store.entries())

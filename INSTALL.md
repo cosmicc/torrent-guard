@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v0.7** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
+**v0.8** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
 
 Torrent Guard is a background service that examines new and completed movie/TV torrents and cleans up imported releases. It uses **qBittorrent's Web API** and **Sonarr/Radarr's v3 APIs**; no qBittorrent “Run external program on torrent completion” hook is required.
 
@@ -88,7 +88,7 @@ View persistent logs:
 docker compose exec torrent-guard tail -n 100 /state/torrent-guard.log
 ```
 
-### Upgrade to v0.7
+### Upgrade to v0.8
 
 ```bash
 cd torrent-guard
@@ -99,6 +99,13 @@ git pull --ff-only
 docker compose up -d --build --force-recreate
 ```
 
+If automatic leftover cleanup is enabled, retain its override when upgrading:
+
+```bash
+docker compose -f compose.yaml -f compose.cleanup.yaml up -d --build --force-recreate
+```
+
+v0.8 introduces no new settings or database schema changes relative to v0.7.
 No new environment settings are required for read-only independent verification.
 v0.7 adds the filesystem_retry table automatically; the evidence/audit tables
 introduced in v0.6 and existing pending records are preserved. Back up `/state`
@@ -212,7 +219,7 @@ unhealthy; health status is available for monitoring and alerts.
 
 - **Failed downloads:** Arr queue matching is required to blocklist a bad release. If Arr cannot find that queue item or is offline, the torrent stays stopped/pending and **is not deleted** until the blocklist path succeeds. HTTP 404 after a known match also preserves the torrent: absence does not confirm blocklisting. Review Arr's blocklist and the journal manually; do not bypass this check by repeatedly deleting downloads.
 - **Successfully imported downloads:** Only matching Arr **history** authorizes cleanup. A finished torrent alone, disappearance from Arr's queue, a newly added torrent carrying an old reused hash, or a partial Sonarr season-pack import does **not** authorize deletion. The import event must be at least 10 minutes old. Every deletion attempt, including pending retries, rechecks completion, selected media, and history. The imported path never queries or changes the Arr queue and never blocklists a successful import.
-- **Deletion:** qBittorrent receives `deleteFiles=true`. Guard saves all tracked filenames before the request and verifies their absence on disk before clearing the journal. Remaining files, unknown state, changed roots and permission failures retain pending work. Optional completed-download cleanup permanently removes verified leftovers using saved identities and narrowly scoped write access. Read [deletion verification and deployment](docs/deletion-verification.md), including the `/mnt/downloads/completed` mapping and existing-orphan limitations. Libraries and untracked files are never cleanup targets.
+- **Deletion:** qBittorrent receives `deleteFiles=true`. Guard saves all tracked filenames before the request and verifies their absence on disk before clearing the journal. Remaining files, unknown state, changed roots and permission failures retain pending work. Optional completed-download cleanup permanently removes verified leftovers using saved identities and narrowly scoped write access. Read [deletion verification and deployment](docs/deletion-verification.md), including the `/mnt/downloads/complete` mapping and existing-orphan limitations. Libraries and untracked files are never cleanup targets.
 - **Media validity:** `ffprobe` checks for readable video stream metadata; it does **not** decode or checksum every frame, certify all audio/subtitle tracks, or guarantee that a file is malware-free. Failure to access a mounted media file **defers** processing rather than falsely classifying the download as malware. A readable but unexpected media codec may still be rejected if ffprobe cannot identify it.
 - **Seeding:** Deleting imported torrents after 10 minutes can interrupt seeding or violate tracker requirements. This is the behavior requested; consider increasing the grace period or maintaining seeding separately for private trackers.
 - **Arr history:** On API outages, missing download IDs, mismatched source paths, too-old history, or ambiguous multi-video matches, the program preserves the torrent. It cannot guarantee that *Arr always associates every imported episode with its torrent hash. Check DEBUG logs if valid releases do not clean up.
@@ -233,6 +240,13 @@ The tests use mocked qBittorrent/Arr HTTP clients and ffprobe; they don't prove 
 Project files: `guard.py`, `Dockerfile`, `compose.yaml`, `.env.example`, `README.md`, `INSTALL.md`, `CHANGELOG.md`, `VERSION`, `.gitignore`, `.dockerignore`, `scripts/`, `tests/`, `.github/workflows/`.
 
 ## Troubleshooting
+
+- **Files remain and only `PENDING disk verification` repeats:** plain
+  `docker compose up` does not enable local leftover removal. Set
+  `CLEANUP_COMPLETE_HOST_PATH` to the exact completed-download host directory and
+  recreate with both `compose.yaml` and `compose.cleanup.yaml`. Existing pending
+  records retry automatically; retain the journal. v0.8 diagnostics name
+  disabled cleanup or show the settle deadline explicitly.
 
 In v0.7, filesystem failures, including NFS `ESTALE`, create a
 persistent per-torrent hold. `DEFER validation` includes the retry delay;
