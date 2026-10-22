@@ -3,7 +3,7 @@ services:
   torrent-guard:
     build:
       context: .
-    image: torrent-guard:1.0
+    image: torrent-guard:1.1
     container_name: torrent-guard
     restart: unless-stopped
     init: true

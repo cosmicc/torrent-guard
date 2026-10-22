@@ -3,6 +3,29 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 1.1 - 10.22.2026
+
+### Added
+
+- Numeric INFO status every 60 seconds after completed polls: pending deletion,
+  deletion verification, waiting for import, import grace, metadata waits,
+  filesystem holds and cleanup retries.
+
+### Changed
+
+- Move polling heartbeat messages to DEBUG; Docker healthcheck markers remain
+  tied to completed polls.
+- Refresh bad-release evidence before pending destructive actions and immediately
+  before API deletion. Local rejected leftovers require verified rejection evidence.
+- Preserve existing rejection rules and verified zero-payload metadata timeouts;
+  a timeout never authorizes deleting files. No new settings or schema migration.
+
+### Fixed
+
+- Retain recovered or inconclusive payloads when an old rejection is retried.
+- Recheck import history for the exact current file list before API deletion,
+  and defer deletion if ownership categories or tags changed during processing.
+
 ## 1.0 - 10.21.2026
 
 ### Added

@@ -223,3 +223,15 @@ database or delete/re-add torrents to make Guard retry. The startup `Cleanup
 settings` log shows the active flag and settle interval. Starting with v0.8, diagnostics
 explicitly distinguish disabled cleanup, a settle deadline, and files still
 present after an attempted removal; v0.7 used a generic warning for all three.
+
+## v1.1 authorization refresh
+
+A saved rejection reason alone cannot authorize file deletion. Retries recheck
+current filename classification or settled completed-media rejection before
+stopping, blocklisting or deleting. Immediately before API deletion, Guard
+refreshes rejection evidence or all-video import history for the exact files
+being saved, and checks for ownership/category/tag changes. Recovered, unknown
+or unreadable payloads remain pending. Local rejected leftovers require
+bad-release evidence from the saved, identity-protected payload; inconclusive
+legacy evidence is retained for review. Zero-payload timeout removal still has
+no filesystem targets. No schema migration or new setting is needed.

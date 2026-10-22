@@ -154,6 +154,7 @@ class CleanupSafetyTests(unittest.TestCase):
             self.qbit.delete_with_data.assert_called_once_with("abc123")
 
     def test_arr_404_is_not_confirmed_blocklisting(self):
+        self.qbit.files.return_value = [{"name": "Fake.exe", "size": 100}]
         self.guard.store.add("abc123", "RADARR", "Movie", "risky payload")
         self.arr.queue_by_hash.return_value = {"abc123": 42}
         self.arr.blocklist_and_remove.side_effect = ApiError("not found", 404)
@@ -162,6 +163,75 @@ class CleanupSafetyTests(unittest.TestCase):
         self.assertEqual(self.guard.store.entries()[0][-2], "arr")
         self.guard.poll(now=self.now + 5)
         self.qbit.delete_with_data.assert_not_called()
+
+    def test_old_rejection_requires_current_bad_payload_in_every_phase(self):
+        for phase in ("match", "arr", "delete", "verify"):
+            with self.subTest(phase=phase):
+                self.guard.store.add("abc123", "RADARR", "Movie", "old rejection")
+                self.guard.store.set_phase("abc123", phase, 42)
+                self.guard.poll(now=self.now)
+                self.assert_preserved()
+                self.guard.store.remove("abc123")
+
+    def test_rejection_rechecks_files_after_arr_blocklist(self):
+        self.qbit.files.return_value = [{"name": "Fake.exe", "size": 100}]
+        self.arr.queue_by_hash.return_value = {"abc123": 42}
+
+        def recover(_queue_id):
+            self.qbit.files.return_value = [{"name": "Movie.mkv", "size": 100, "progress": 1}]
+
+        self.arr.blocklist_and_remove.side_effect = recover
+        self.guard.poll(now=self.now)
+        self.arr.blocklist_and_remove.assert_called_once_with(42)
+        self.qbit.delete_with_data.assert_not_called()
+        self.verifier.snapshot.assert_not_called()
+
+    def test_import_snapshot_new_video_requires_its_import(self):
+        self.schedule()
+        original = self.qbit.files.return_value
+        # Pending check succeeds, but the snapshot has another selected video.
+        self.qbit.files.side_effect = [original, original,
+                                      original + [{"name": "Other.mkv", "size": 100, "progress": 1}]]
+        self.guard.poll(now=self.now)
+        self.assert_preserved()
+
+    def test_snapshot_ownership_change_preserves_import(self):
+        self.schedule()
+        self.qbit.torrents.side_effect = [[self.torrent], [{**self.torrent, "category": "manual"}]]
+        self.guard.poll(now=self.now)
+        self.assert_preserved()
+
+    def test_status_counts_are_numeric_read_only_and_distinguish_grace(self):
+        self.guard.store.add("pending", "RADARR", "Other", "test")
+        self.guard.store.set_phase("pending", "verify")
+        self.guard.import_candidates = {"missing", "grace", "pending"}
+        self.guard.import_grace_waits = {"grace"}
+        self.guard.metadata_waits = {"magnet": (1, "RADARR", 1), "pending": (1, "RADARR", 1)}
+        self.guard.filesystem_retries = {"pending": (1, self.now + 60, "test")}
+        self.guard.cleanup_retries = {"pending": (1, self.now + 60, "test")}
+        before = self.guard.store.db.total_changes
+        with self.assertLogs("torrent-guard", level="INFO") as logs:
+            self.guard.log_status()
+        self.assertEqual(logs.output, [
+            "INFO:torrent-guard:STATUS pending_deletion=1 verifying_deletion=1 "
+            "waiting_for_import=1 import_grace=1 metadata_waits=1 filesystem_holds=1 cleanup_retries=1"])
+        self.assertEqual(before, self.guard.store.db.total_changes)
+        self.qbit.torrents.assert_not_called()
+        self.arr.imported_history.assert_not_called()
+
+    def test_status_import_counts_follow_poll_and_recovery(self):
+        self.arr.imported_history.return_value = {}
+        self.guard.poll(now=self.now)
+        self.assertEqual(self.guard.import_candidates, {"abc123"})
+        self.assertFalse(self.guard.import_grace_waits)
+        self.event["date"] = datetime.fromtimestamp(self.now, timezone.utc).isoformat()
+        self.arr.imported_history.return_value = {"abc123": [self.event]}
+        self.guard.poll(now=self.now + 60)
+        self.assertEqual(self.guard.import_grace_waits, {"abc123"})
+        self.guard.poll(now=self.now + 700)
+        self.assertFalse(self.guard.import_candidates)
+        self.assertFalse(self.guard.import_grace_waits)
+        self.qbit.delete_with_data.assert_called_once_with("abc123")
 
     def test_legacy_verify_absence_without_manifest_requires_manual_review(self):
         self.schedule("verify")

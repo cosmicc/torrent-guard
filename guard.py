@@ -29,7 +29,7 @@ import urllib.request
 from deletion import FileVerifier, metadata_manifest, validate_metadata_manifest, zero_payload
 
 LOG = logging.getLogger("torrent-guard")
-VERSION = "1.0"
+VERSION = "1.1"
 METADATA_TIMEOUT_SECONDS = 3600
 METADATA_STATES = frozenset({"metaDL", "forcedMetaDL"})
 HEARTBEAT_FILE = Path("/tmp/torrent-guard-heartbeat")
@@ -720,6 +720,8 @@ class Guard:
         self.warned_missing: set[str] = set()
         self.warned_defer: dict[str, str] = {}
         self.import_wait_reasons: dict[str, str] = {}
+        self.import_candidates: set[str] = set()
+        self.import_grace_waits: set[str] = set()
         self.last_import_check: float = 0.0
 
     def poll(self, now: float | None = None):
@@ -820,6 +822,7 @@ class Guard:
                     if own_app != app or h in pending:
                         continue
                     if int(torrent.get("added_on") or 0) < since:
+                        self.import_grace_waits.discard(h)
                         reason = "torrent predates configured history lookback; manual review required"
                         if self.import_wait_reasons.get(h) != reason:
                             LOG.info("WAIT import [%s] %s: %s", app, self.log_context[h], reason)
@@ -827,11 +830,18 @@ class Guard:
                         continue
                     yes, reason = import_confirmed(torrent, files, imports.get(h, []), now, self.config.import_grace_minutes)
                     if not yes:
+                        # Separate complete import evidence from missing/partial
+                        # evidence without relying on human-readable reason text.
+                        if import_confirmed(torrent, files, imports.get(h, []), now, 0)[0]:
+                            self.import_grace_waits.add(h)
+                        else:
+                            self.import_grace_waits.discard(h)
                         if self.import_wait_reasons.get(h) != reason:
                             LOG.info("WAIT import [%s] %s: %s", app, self.log_context[h], reason)
                             self.import_wait_reasons[h] = reason
                         continue
                     self.import_wait_reasons.pop(h, None)
+                    self.import_grace_waits.discard(h)
                     if self.config.dry_run:
                         if h not in self.logged_import_dry:
                             LOG.info("DRY RUN: ACCEPT imported [%s] %s: %s; would delete torrent + qBit data", app, self.log_context[h], reason)
@@ -842,6 +852,41 @@ class Guard:
                         pending.add(h)
         if not self.config.dry_run:
             self._process_pending(by_hash, now)
+        self.import_candidates = set(candidates) - self.store.hashes() - self.logged_import_dry
+        self.import_grace_waits.intersection_update(self.import_candidates)
+
+    def log_status(self) -> None:
+        """Report numeric work counts from the last completed poll, read-only.
+
+        Pending deletion includes all journal phases; verification and retry
+        counts are subsets and may overlap. Import counts are last observed
+        evidence, not dependency health or deletion authorization.
+        """
+        entries = self.store.entries()
+        pending = {row[0] for row in entries}
+        waiting = self.import_candidates - pending
+        grace = self.import_grace_waits & waiting
+        LOG.info(
+            "STATUS pending_deletion=%d verifying_deletion=%d waiting_for_import=%d "
+            "import_grace=%d metadata_waits=%d filesystem_holds=%d cleanup_retries=%d",
+            len(pending), sum(row[5] == "verify" for row in entries),
+            len(waiting - grace), len(grace), len(set(self.metadata_waits) - pending),
+            len(self.filesystem_retries), len(self.cleanup_retries),
+        )
+
+    def _rejection_ready(self, h: str, torrent: dict, files: list, now: float) -> bool:
+        """Require current rejection evidence; a journal reason alone is insufficient."""
+        if not isinstance(files, list) or not files:
+            return False
+        if classify(files, reject_no_video=self.config.reject_no_video):
+            return True
+        if (not is_complete(torrent)
+                or now - int(torrent["completion_on"]) < self.config.completed_settle_seconds):
+            return False
+        result, detail = self.validator.inspect(torrent, files)
+        if result == "defer":
+            self._defer_filesystem(h, detail, now)
+        return result == "reject"
 
     def _track_metadata_waits(self, by_hash: dict, now: float) -> None:
         """Track owned metadata states across polls/restarts; dry run is memory-only.
@@ -935,7 +980,7 @@ class Guard:
             return False
 
     def _import_cleanup_ready(self, torrent: dict, h: str, app: str, now: float,
-                              history_cache: dict[str, dict]) -> bool:
+                              history_cache: dict[str, dict], files: list | None = None) -> bool:
         """Revalidate current evidence before every imported deletion attempt.
 
         A persisted decision is not permission to delete changed or moved data.
@@ -946,7 +991,7 @@ class Guard:
         if (not is_complete(torrent) or not 0 < added <= now or added < since
                 or now - int(torrent["completion_on"]) < self.config.completed_settle_seconds):
             return False
-        files = self.qbit.files(h)
+        files = self.qbit.files(h) if files is None else files
         if not isinstance(files, list):
             raise ApiError("Unexpected qBittorrent file-list response")
         if not files or classify(files, reject_no_video=self.config.reject_no_video):
@@ -966,17 +1011,26 @@ class Guard:
         )
         return confirmed
 
-    def _request_deletion(self, h: str, torrent: dict, now: float, metadata_only: bool = False):
+    def _request_deletion(self, h: str, torrent: dict, now: float, metadata_only: bool = False,
+                          kind: str = "reject"):
         """Persist all tracked file evidence before requesting API deletion."""
         current = self.qbit.torrents()
         if not isinstance(current, list):
             raise ApiError("Cannot refresh torrent before deletion snapshot")
         fresh = next((row for row in current if str(row.get("hash", "")).lower() == h), None)
-        fields = ("added_on", "save_path", "download_path", "content_path", "progress", "amount_left", "completion_on", "state")
+        fields = ("added_on", "save_path", "download_path", "content_path", "progress", "amount_left", "completion_on", "state", "category", "tags")
         if fresh is None or any(fresh.get(key) != torrent.get(key) for key in fields):
             raise ValueError("torrent moved or changed before deletion; retrying inspection")
         evidence = self.store.evidence(h)
         files = self.qbit.files(h)
+        if kind == "imported":
+            app = torrent_app(fresh, self.config)
+            if not app or not self._import_cleanup_ready(fresh, h, app, now, {}, files=files):
+                raise ValueError("current payload lacks verified import evidence; preserving download")
+        if not metadata_only and kind == "reject":
+            self.validator.check_filesystem(fresh, files)
+            if not self._rejection_ready(h, fresh, files, now):
+                raise ValueError("current payload is not verified as a bad release; preserving download")
         if metadata_only:
             self._metadata_removal_ready(h, fresh, files)
             manifest = self.store.evidence(h)[0]
@@ -1083,6 +1137,9 @@ class Guard:
                 yes, reason = import_confirmed(original, manifest["files"], history.get(h, []), now, self.config.import_grace_minutes)
                 if not yes:
                     raise ValueError("local removal lacks current import evidence: " + reason)
+            elif kind == "reject":
+                if not self._rejection_ready(h, manifest["torrent"], manifest["files"], now):
+                    raise ValueError("local removal lacks verified bad-release evidence; preserving files")
             wanted = {(item["root"], item["path"]) for item in manifest["items"]}
             for root, relative in wanted:
                 target = PurePosixPath(root) / relative
@@ -1152,6 +1209,9 @@ class Guard:
                         self._metadata_removal_ready(h, torrent, current_files)
                     else:
                         self.validator.check_filesystem(torrent, current_files)
+                        if kind == "reject" and not self._rejection_ready(h, torrent, current_files, now):
+                            self._cleanup_status(h, "current payload is not verified as a bad release; preserving download", now)
+                            continue
                 if kind == "imported":
                     if torrent is not None:
                         if not self._import_cleanup_ready(torrent, h, app, now, history_cache):
@@ -1198,12 +1258,12 @@ class Guard:
                         continue
                     if kind in {"reject", "metadata"}:
                         self.qbit.stop(h)
-                    self._request_deletion(h, torrent, now, metadata_only=kind == "metadata")
+                    self._request_deletion(h, torrent, now, metadata_only=kind == "metadata", kind=kind)
                     LOG.warning("DELETE requested [%s] kind=%s %s deleteFiles=true", app, kind, self.log_context[h])
                     continue
                 if phase == "verify":
                     if torrent is not None:
-                        self._request_deletion(h, torrent, now, metadata_only=kind == "metadata")
+                        self._request_deletion(h, torrent, now, metadata_only=kind == "metadata", kind=kind)
                         self._defer_cleanup(h, f"qBittorrent entry still visible [{app}]; deleteFiles=true requested again", now)
                         continue
                     self._verify_deletion(h, app, kind, now, ownership_cache)
@@ -1307,7 +1367,8 @@ def main():
             guard.poll()
             write_heartbeat()
             if last_status is None or time.monotonic() - last_status >= 60:
-                LOG.info("HEARTBEAT polling active dry_run=%s pending=%d", config.dry_run, len(guard.store.hashes()))
+                LOG.debug("HEARTBEAT polling active dry_run=%s pending=%d", config.dry_run, len(guard.store.hashes()))
+                guard.log_status()
                 last_status = time.monotonic()
         except (ApiError, urllib.error.URLError, OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
             LOG.exception("Poll failed; will retry: %s", exc)
