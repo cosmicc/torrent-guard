@@ -3,6 +3,40 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 1.0 - 10.21.2026
+
+### Added
+
+- One-hour observed metadata-download timeout for Sonarr/Radarr torrents, with
+  persistent timers, Arr blocklisting before removal, and zero-payload audit evidence.
+- Read-only SSH log viewer with event blocks, indented details, terminal-width
+  wrapping, rotation following and optional container execution.
+- Recognize zero-data `queuedDL`, `metaDL` and `forcedMetaDL` downloads using
+  explicit zero progress, lifetime downloaded bytes and completed bytes.
+
+### Changed
+
+- Start the metadata timer when Guard first observes metadata downloading;
+  preserve it across restarts and reset it on observed state exit, disappearance,
+  torrent replacement or ownership change. Queued downloads do not time out.
+- Use bright dark-background ANSI colors, replacing blue activity with cyan.
+- Wait normally for zero-data queues and metadata downloads with empty file
+  metadata; their download directories do not need to exist yet.
+- Upgrade adds the SQLite `metadata_wait` table without replacing existing
+  journals or file evidence. No new environment settings are required. Rebuild
+  and recreate the image, retaining any cleanup override and existing `/state`.
+
+### Fixed
+
+- Zero-data queued and metadata torrents no longer block unrelated leftover
+  cleanup. Known files/content paths, unresolved filesystem holds, prior data,
+  missing counters and API failures retain normal ownership protections.
+- Reject timed-out zero-payload magnets without inventing filenames or claiming
+  filesystem deletion. Missing Arr queue matches and unconfirmed blocklisting
+  still prevent removal; recovered metadata or changed data retain the torrent.
+- Make long audit messages readable over SSH without discarding details or
+  embedding color codes in saved logs.
+
 ## 0.9 - 10.21.2026
 
 ### Added

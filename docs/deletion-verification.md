@@ -33,6 +33,25 @@ that arbitrary untracked files or empty torrent directories have been removed.
 Imported library copies and hardlinks remain intact when a download name is
 removed. Logs count original/incomplete path variants, not just video files.
 
+## Metadata-only failure evidence (v1.0)
+
+A magnet continuously observed in `metaDL`/`forcedMetaDL` for more than one hour
+can fail without a file list. The new `metadata_wait` table stores observation
+times; it does not replace existing journal tables. Pending `kind=metadata`
+follows the same stop, matching Arr blocklist, explicit qBittorrent deletion and
+client-absence verification order. Arr errors or missing queue matches retain it.
+
+This path requires explicit zero progress/lifetime downloaded/completed bytes
+and no past completion or unresolved filesystem hold. A distinct version-2
+`metadata_only` manifest stores allowlisted torrent facts with empty files,
+roots and targets; it is saved before stop/blocklisting, revalidated before
+API deletion, and archived after the client record disappears. It is never
+accepted as a version-1 file manifest or passed to local cleanup. No download
+paths are inferred, no filesystem writes occur, and the completion message does
+not claim to verify arbitrary filesystem absence. Metadata recovery, payload
+changes or replaced torrents stop automatic removal for review. Existing
+payload-bearing and legacy records retain all version-1 verification rules.
+
 ## Optional completed-download write access
 
 Standard Compose keeps `/downloads` read-only. Enable `compose.cleanup.yaml`
@@ -93,7 +112,8 @@ After this delay, local removal requires all of the following:
   the existing Arr blocklist phase.
 - A fresh qBittorrent inventory with no same-hash reappearance and no other
   torrent claiming a recorded path. Missing or ambiguous client metadata defers
-  local removal, including metadata for unrelated torrents.
+  local removal, including metadata for unrelated torrents, except for the
+  narrowly defined unstarted queues described below.
 - The same configured read/write root identity and the original regular file's
   device, inode, size, and nanosecond modification time.
 
@@ -171,6 +191,17 @@ metadata or a stalled/error state. Allow metadata to finish or resolve its clien
 error. Guard automatically resumes at the next retry once ownership can be
 established. Missing metadata remains a reason to preserve files; backoff does
 not bypass shared-file protection or guarantee cleanup while a blocker remains.
+
+A torrent waiting in `queuedDL`, `metaDL` or `forcedMetaDL` may have no file
+metadata or download directory yet. If qBittorrent explicitly reports zero progress, zero lifetime downloaded
+bytes, zero completed bytes and no positive completion timestamp, Guard treats
+an empty file list as an expected wait and skips it during unrelated ownership
+checks. It does not create directories, reject the queue or delete that torrent.
+Its reported content path still protects overlapping files or directories, and
+any available file list is checked normally. An unresolved filesystem hold
+prevents this exception. Nonempty prior data, missing/invalid counters and API
+errors still block cleanup. State is refreshed on each scan, so normal checks
+resume when downloading starts; a queue or metadata label alone never proves no data exists.
 
 Failed ownership scans are shared within a poll so many pending leftovers do not
 each repeat the same remote scan. Successful ownership is checked afresh before

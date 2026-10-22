@@ -105,6 +105,12 @@ If automatic leftover cleanup is enabled, retain its override when upgrading:
 docker compose -f compose.yaml -f compose.cleanup.yaml up -d --build --force-recreate
 ```
 
+v1.0 adds `metadata_wait` automatically and preserves existing pending work,
+file evidence, audits and retry records. Back up `/state` before upgrading;
+do not replace the database. No new environment variables are required. Existing
+metadata downloads receive a full hour starting with their first observation by
+v1.0; their qBittorrent added time is not used as the timeout start.
+
 v0.8 introduces no new settings or database schema changes relative to v0.7.
 No new environment settings are required for read-only independent verification.
 v0.7 adds the filesystem_retry table automatically; the evidence/audit tables
@@ -114,7 +120,7 @@ without saved file evidence require manual review. Automatic completed-download
 leftover removal requires the explicit cleanup override and host-directory setting
 described in [deletion verification](docs/deletion-verification.md).
 Import checks remain at 60 seconds by default.
-Optional `LOG_COLOR=always` enables the classic console palette by default;
+Optional `LOG_COLOR=always` enables the bright console palette by default;
 `HEALTHCHECK_MAX_AGE_SECONDS=300` sets the completed-poll freshness limit.
 Existing journal records are retained. Imported cleanup now rechecks current
 media and Arr history on every deletion attempt, including after a restart;
@@ -177,7 +183,76 @@ successful scheduled history check. Matching history still needs filename,
 timestamp, and grace validation before cleanup. `ACCEPT completed` only reports
 video validation; it does not mean import is still pending.
 
+## Stalled metadata downloads
+
+Guard fails owned torrents that remain in qBittorrent's `metaDL` or
+`forcedMetaDL` state for **more than one hour**, measured from Guard's first
+observation. Normal `queuedDL` waits are excluded. Timers survive daemon restarts;
+switching between the two metadata states does not reset them. Leaving metadata,
+disappearing from the client, changing owner or re-adding the torrent starts a
+new observation period. An API outage cannot prove a state exit: elapsed time
+continues across it and restarts. Clock rollback restarts the affected timer.
+
+Failure uses the owning Sonarr/Radarr queue and blocklist, with replacement
+search permitted. Guard stops the torrent, confirms Arr blocklisting, then
+requests qBittorrent deletion. Missing queue matches, Arr errors (including 404),
+prior filesystem holds or recovered metadata preserve pending work. The Arr
+blocklist controls future release selection; it is not a global ban across every
+indexer or manually added download.
+
+Empty-metadata removal requires explicit zero progress, zero lifetime downloaded
+and completed bytes, and no completed timestamp. Missing counters or any payload
+remain inconclusive and require review. Guard saves a distinct zero-payload
+audit record without guessed paths; it never sweeps directories or claims to
+verify filesystem absence from this record. If files appear before removal,
+Guard retains the torrent for review. Dry-run timers are memory-only and no
+stop, blocklist, deletion or polling journal mutation occurs. Timer/rejection
+messages are visible in the SSH viewer and normal logs. Imported downloads
+retain their existing history and grace requirements.
+
 ## Live monitoring and Docker health
+
+### SSH event viewer
+
+From the checkout on the Docker host:
+
+```bash
+python3 scripts/watch_logs.py
+# Custom log location, recent history, or fixed width:
+python3 scripts/watch_logs.py --file /config/torrent-guard/torrent-guard.log --tail 20 --width 100
+```
+
+Use an account with read access to the audit log; retain its restricted
+permissions. No additional Python packages are required. The viewer shows event
+blocks with indented download names/details, wraps long paths, preserves all
+message text, follows rename rotation, and detects truncation when the file
+shrinks below its read position. It waits if the log is temporarily absent.
+It reads only the log, never the journal or APIs. Tracebacks and unfamiliar
+lines remain visible. `--tail` counts physical log lines, including traceback
+lines; use `--tail 0` to watch only new lines. Ctrl+C exits.
+
+With the updated image, host Python is optional:
+
+```bash
+docker compose exec torrent-guard python /app/watch_logs.py --file /state/torrent-guard.log
+```
+
+Compose exec allocates a terminal by default. Rebuild/recreate once to include
+the viewer in an existing image; keep any cleanup override you already use.
+The host script works with existing audit logs without a daemon upgrade.
+Colors default to automatic terminal detection; use `--color always` to force
+or `--color never` to disable. `--once` prints recent events and exits.
+Width adapts for each batch after resizing the terminal. Extremely narrow
+terminals below 20 columns are unsupported. Bright green success, cyan activity,
+yellow waiting/warnings, red errors/rejections, and magenta dry runs are intended
+for dark shells; exact shades still depend on PuTTY's ANSI palette settings.
+The viewer colors event headings and leaves details in the terminal's normal
+foreground. Live daemon output uses the same bright palette; audit files stay
+plain text. `LOG_COLOR` controls only daemon console output, independently of
+the viewer's `--color` setting. No new environment variables or state migrations
+are required. The viewer has no search/pause interface; use terminal scrollback.
+
+### Docker health and raw logs
 
 ```bash
 docker compose logs -f --tail=100 torrent-guard
@@ -187,7 +262,7 @@ docker inspect --format '{{json .State.Health}}' torrent-guard
 docker compose exec torrent-guard python /app/guard.py --healthcheck
 ```
 
-The classic palette is green for `ACCEPT`/`CLEANED`, blue for routine activity
+The bright palette is green for `ACCEPT`/`CLEANED`, bright cyan for routine activity
 and `HEARTBEAT`, yellow for waiting/warnings, red for errors/rejections, and
 purple for dry runs. Colors use ANSI codes, so exact shades depend on the
 terminal theme. See [light and dark palette samples](docs/log-palette.svg).
@@ -229,7 +304,7 @@ unhealthy; health status is available for monitoring and alerts.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile guard.py deletion.py scripts/release_notes.py
+python3 -m py_compile guard.py deletion.py scripts/release_notes.py scripts/watch_logs.py
 python3 scripts/release_notes.py
 # If Docker is available and .env has correct paths:
 docker compose config
@@ -269,6 +344,10 @@ See [filesystem recovery](docs/filesystem-retries.md). No new settings are neede
   retry time. An ownership-metadata warning also names the blocking live torrent;
   resolve its missing metadata or client error. See
   [cleanup retry troubleshooting](docs/deletion-verification.md#cleanup-retries-and-missing-metadata).
+  Empty metadata is expected for `queuedDL`, `metaDL` or `forcedMetaDL` with explicit
+  zero progress/downloaded/completed counters and no past completion. It can
+  wait without directories and does not block unrelated cleanup. Known path
+  overlaps, prior filesystem errors and resumed downloads remain protected.
   Changed ownership, missing media, incomplete imports, and unconfirmed
   blocklisting require review. Never delete the journal to force retries.
 - **Changed environment:** recreate the container with

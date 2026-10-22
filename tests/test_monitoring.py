@@ -13,15 +13,15 @@ from guard import ConsoleFormatter, LOG, healthcheck, main, setup_logging, write
 class ColorLoggingTests(unittest.TestCase):
     """Keep decision colors on the console, with safe plain audit output."""
 
-    def test_classic_palette_decision_mapping(self):
-        cases = [("ACCEPT completed", logging.INFO, "32"),
-                 ("CLEANED movie", logging.INFO, "32"),
-                 ("HEARTBEAT polling active", logging.INFO, "34"),
-                 ("WAIT import", logging.DEBUG, "33"),
-                 ("PENDING stopped", logging.WARNING, "33"),
-                 ("REJECT candidate", logging.WARNING, "31"),
-                 ("DRY RUN: would delete", logging.WARNING, "35"),
-                 ("Import history failed", logging.ERROR, "31")]
+    def test_bright_palette_decision_mapping(self):
+        cases = [("ACCEPT completed", logging.INFO, "92"),
+                 ("CLEANED movie", logging.INFO, "92"),
+                 ("HEARTBEAT polling active", logging.INFO, "96"),
+                 ("WAIT import", logging.DEBUG, "93"),
+                 ("PENDING stopped", logging.WARNING, "93"),
+                 ("REJECT candidate", logging.WARNING, "91"),
+                 ("DRY RUN: would delete", logging.WARNING, "95"),
+                 ("Import history failed", logging.ERROR, "91")]
         for message, level, code in cases:
             with self.subTest(message=message):
                 record = logging.makeLogRecord({"msg": message, "levelno": level})
@@ -50,7 +50,7 @@ class ColorLoggingTests(unittest.TestCase):
                     with patch.dict(os.environ, {"LOG_FILE": "", "LOG_COLOR": mode}), patch("sys.stderr", stream), patch.object(stream, "isatty", return_value=terminal):
                         setup_logging()
                         LOG.info("HEARTBEAT polling active")
-                    self.assertEqual("\033[34m" in stream.getvalue(), colored)
+                    self.assertEqual("\033[96m" in stream.getvalue(), colored)
                 finally:
                     for handler in LOG.handlers:
                         handler.close()
@@ -67,7 +67,7 @@ class ColorLoggingTests(unittest.TestCase):
                 with patch.dict(os.environ, {"LOG_FILE": str(filename), "LOG_COLOR": "always"}), patch("sys.stderr", stream):
                     setup_logging()
                     LOG.info("ACCEPT completed")
-                self.assertIn("\033[32m", stream.getvalue())
+                self.assertIn("\033[92m", stream.getvalue())
                 self.assertNotIn("\033", filename.read_text())
                 self.assertIn("ACCEPT completed", filename.read_text())
             finally:

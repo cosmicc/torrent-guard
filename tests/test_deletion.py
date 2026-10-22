@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from guard import ArrInstance, Config, Guard, PendingStore
+from guard import ArrInstance, Config, Guard, PendingStore, is_unstarted_download
 
 
 class DeletionTests(unittest.TestCase):
@@ -173,6 +173,146 @@ class DeletionTests(unittest.TestCase):
         self.guard.poll(now=self.now + 120)
         self.assertTrue(self.path.exists())
         self.assertTrue(self.guard.store.entries())
+
+    def queued_torrent(self):
+        """A real queue state with explicit zero lifetime and completed data."""
+        return {**self.torrent, "hash": "queued", "category": "manual", "name": "Not started",
+                "state": "queuedDL", "progress": 0, "downloaded": 0, "completed": 0,
+                "completion_on": -1, "content_path": "/downloads/completed/Not started"}
+
+    def test_zero_data_queued_torrent_without_files_does_not_block_cleanup(self):
+        self.request()
+        self.qbit.torrents.return_value = [self.queued_torrent()]
+        self.qbit.files.return_value = []
+        self.guard.poll(now=self.now + 120)
+        self.assertFalse(self.path.exists())
+        self.assertFalse(self.guard.store.entries())
+        self.assertFalse(self.guard.store.cleanup_retries())
+        self.qbit.stop.assert_not_called()
+        self.qbit.delete_with_data.assert_called_once_with("abc123")
+        self.assertFalse((self.completed / "Not started").exists())
+
+    def test_unstarted_magnet_without_content_path_does_not_block_cleanup(self):
+        self.request()
+        self.qbit.torrents.return_value = [{**self.queued_torrent(), "content_path": ""}]
+        self.qbit.files.return_value = []
+        self.guard.poll(now=self.now + 120)
+        self.assertFalse(self.path.exists())
+
+    def assert_metadata_wait_allows_unrelated_cleanup(self, state):
+        """An empty zero-data magnet must not freeze unrelated saved cleanup."""
+        self.request()
+        self.qbit.torrents.return_value = [{**self.queued_torrent(), "state": state, "content_path": ""}]
+        self.qbit.files.return_value = []
+        self.guard.poll(now=self.now + 120)
+        self.assertFalse(self.path.exists())
+        self.assertFalse(self.guard.store.entries())
+        self.qbit.stop.assert_not_called()
+        self.qbit.delete_with_data.assert_called_once_with("abc123")
+        self.arr.blocklist_and_remove.assert_not_called()
+
+    def test_zero_data_metadata_download_allows_unrelated_cleanup(self):
+        self.assert_metadata_wait_allows_unrelated_cleanup("metaDL")
+
+    def test_zero_data_forced_metadata_download_allows_unrelated_cleanup(self):
+        self.assert_metadata_wait_allows_unrelated_cleanup("forcedMetaDL")
+
+    def test_metadata_wait_exception_preserves_safety_checks(self):
+        self.request()
+        for state in ("metaDL", "forcedMetaDL"):
+            waiting = {**self.queued_torrent(), "state": state, "content_path": ""}
+            invalid = [{**waiting, field: value} for field, value in (
+                ("downloaded", 1), ("completed", 1), ("progress", 0.1),
+                ("completion_on", self.now), ("downloaded", None),
+            )]
+            for field in ("progress", "downloaded", "completed", "completion_on"):
+                invalid.append({key: value for key, value in waiting.items() if key != field})
+            self.qbit.files.return_value = []
+            for torrent in invalid:
+                with self.subTest(state=state, torrent=torrent):
+                    self.assertFalse(is_unstarted_download(torrent))
+                    self.qbit.torrents.return_value = [torrent]
+                    with self.assertRaisesRegex(ValueError, "file metadata is unavailable"):
+                        self.guard._verify_deletion("abc123", "RADARR", "imported", self.now + 120)
+                    self.assertTrue(self.path.exists())
+            self.qbit.torrents.return_value = [{**waiting, "content_path": self.torrent["content_path"]}]
+            with self.assertRaisesRegex(ValueError, "reserves recorded download path"):
+                self.guard._verify_deletion("abc123", "RADARR", "imported", self.now + 120)
+            self.qbit.torrents.return_value = [waiting]
+            self.guard._defer_filesystem("queued", "unresolved I/O", self.now)
+            with self.assertRaisesRegex(ValueError, "file metadata is unavailable"):
+                self.guard._verify_deletion("abc123", "RADARR", "imported", self.now + 120)
+            self.guard._clear_filesystem("queued")
+            self.qbit.files.return_value = self.files
+            with self.assertRaisesRegex(ValueError, "another torrent owns"):
+                self.guard._verify_deletion("abc123", "RADARR", "imported", self.now + 120)
+            self.assertTrue(self.path.exists())
+
+    def test_queued_known_file_list_still_protects_overlapping_files(self):
+        self.request()
+        self.qbit.torrents.return_value = [self.queued_torrent()]
+        self.guard.poll(now=self.now + 120)
+        self.assertTrue(self.path.exists())
+        self.assertTrue(self.guard.store.entries())
+
+    def test_queued_content_path_still_protects_existing_download(self):
+        self.request()
+        self.qbit.torrents.return_value = [{**self.queued_torrent(), "content_path": self.torrent["content_path"]}]
+        self.qbit.files.return_value = []
+        with self.assertLogs("torrent-guard", level="WARNING") as logs:
+            self.guard.poll(now=self.now + 120)
+        self.assertTrue(any("metadata/queued torrent reserves recorded download path" in line for line in logs.output))
+        self.assertTrue(self.path.exists())
+
+    def test_queued_with_unresolved_filesystem_hold_still_blocks_cleanup(self):
+        self.request()
+        self.guard._defer_filesystem("queued", "unresolved access error", self.now)
+        self.qbit.torrents.return_value = [self.queued_torrent()]
+        self.qbit.files.return_value = []
+        self.guard.poll(now=self.now + 120)
+        self.assertTrue(self.path.exists())
+        self.assertIn("queued", self.guard.filesystem_retries)
+
+    def test_unstarted_queue_requires_explicit_consistent_counters(self):
+        queued = self.queued_torrent()
+        self.assertTrue(is_unstarted_download(queued))
+        for key, value in (("state", "downloading"), ("state", "queuedUP"), ("progress", 0.1),
+                           ("downloaded", 1), ("completed", 1), ("completion_on", self.now),
+                           ("downloaded", None), ("completed", "0"), ("progress", False),
+                           ("progress", float("nan"))):
+            with self.subTest(key=key, value=value):
+                self.assertFalse(is_unstarted_download({**queued, key: value}))
+        for key in ("downloaded", "completed", "progress", "completion_on"):
+            without = dict(queued)
+            del without[key]
+            self.assertFalse(is_unstarted_download(without))
+
+    def test_started_download_is_rechecked_after_queue_wait(self):
+        queued = self.queued_torrent()
+        self.qbit.torrents.return_value = [queued]
+        self.qbit.files.return_value = []
+        self.assertEqual(self.guard._ownership_paths({}), set())
+        self.qbit.torrents.return_value = [{**queued, "state": "downloading", "downloaded": 1}]
+        with self.assertRaisesRegex(ValueError, "complete qBittorrent file metadata is unavailable"):
+            self.guard._ownership_paths({})
+
+    def test_queued_file_api_failure_is_not_treated_as_empty_metadata(self):
+        self.request()
+        self.qbit.torrents.return_value = [self.queued_torrent()]
+        self.qbit.files.side_effect = ValueError("invalid API response")
+        self.guard.poll(now=self.now + 120)
+        self.assertTrue(self.path.exists())
+        self.assertTrue(self.guard.store.entries())
+
+    def test_owned_queued_torrent_waits_without_filesystem_validation_or_rejection(self):
+        self.qbit.torrents.return_value = [{**self.queued_torrent(), "category": "movies"}]
+        self.qbit.files.return_value = []
+        self.guard.poll(now=self.now)
+        self.assertFalse(self.guard.store.entries())
+        self.assertFalse(self.guard.filesystem_retries)
+        self.qbit.stop.assert_not_called()
+        self.qbit.delete_with_data.assert_not_called()
+        self.arr.blocklist_and_remove.assert_not_called()
 
     def test_missing_ownership_metadata_names_both_downloads_and_backs_off(self):
         self.request()
