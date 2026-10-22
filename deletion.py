@@ -26,6 +26,45 @@ def parts(name: str) -> tuple[str, ...]:
     return components
 
 
+def zero_payload(torrent: dict) -> bool:
+    """Require explicit lifetime/completed zero bytes, never missing counters."""
+    for key in ("progress", "downloaded", "completed"):
+        value = torrent.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value != 0:
+            return False
+    completed_on = torrent.get("completion_on")
+    return (isinstance(completed_on, (int, float)) and not isinstance(completed_on, bool)
+            and completed_on <= 0)
+
+
+def metadata_manifest(torrent: dict) -> dict:
+    """Record a zero-payload magnet, with no guessed filesystem deletion targets.
+
+    Stopped states support recovery after Guard has stopped a timed-out magnet.
+    This manifest is never accepted by the ordinary file-removal verifier.
+    """
+    added = torrent.get("added_on")
+    if (not zero_payload(torrent)
+            or torrent.get("state") not in {"metaDL", "forcedMetaDL", "stoppedDL", "pausedDL"}
+            or not torrent.get("hash") or isinstance(added, bool)
+            or not isinstance(added, (int, float)) or not 0 < added < float("inf")):
+        raise ValueError("metadata removal requires explicit zero payload and an unchanged metadata/stopped state")
+    fields = ("hash", "added_on", "category", "tags", "state", "progress", "downloaded", "completed",
+              "completion_on", "save_path", "download_path", "content_path")
+    return {"version": 2, "kind": "metadata_only", "torrent": {key: torrent[key] for key in fields if key in torrent},
+            "files": [], "roots": {}, "items": []}
+
+
+def validate_metadata_manifest(manifest: dict) -> None:
+    """Reject malformed zero-payload evidence without treating it as file absence."""
+    if (not isinstance(manifest, dict) or manifest.get("version") != 2
+            or manifest.get("kind") != "metadata_only" or manifest.get("files") != []
+            or manifest.get("items") != [] or manifest.get("roots") != {}
+            or not isinstance(manifest.get("torrent"), dict)):
+        raise ValueError("invalid metadata-only deletion evidence; manual review required")
+    metadata_manifest(manifest["torrent"])
+
+
 def rename_exclusive(source_fd: int, source: str, target_fd: int, target: str) -> None:
     """Linux renameat2 prevents replacing a pre-existing quarantine payload."""
     library = ctypes.CDLL(None, use_errno=True)

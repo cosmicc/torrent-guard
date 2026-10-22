@@ -26,10 +26,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from deletion import FileVerifier
+from deletion import FileVerifier, metadata_manifest, validate_metadata_manifest, zero_payload
 
 LOG = logging.getLogger("torrent-guard")
-VERSION = "0.9"
+VERSION = "1.0"
+METADATA_TIMEOUT_SECONDS = 3600
+METADATA_STATES = frozenset({"metaDL", "forcedMetaDL"})
 HEARTBEAT_FILE = Path("/tmp/torrent-guard-heartbeat")
 DEFAULT_VIDEO = frozenset({".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".webm", ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".divx", ".flv"})
 DEFAULT_RISKY = frozenset({".exe", ".scr", ".com", ".bat", ".cmd", ".msi", ".msp", ".msix", ".ps1", ".psm1", ".vbs", ".vbe", ".vb", ".js", ".jse", ".wsf", ".wsh", ".hta", ".lnk", ".pif", ".cpl", ".jar", ".apk", ".appx", ".reg", ".scf", ".sh", ".py"})
@@ -376,6 +378,17 @@ def torrent_app(torrent: dict, config: Config) -> str | None:
     return cat or (next(iter(tagged)) if tagged else None)
 
 
+def is_unstarted_download(torrent: dict) -> bool:
+    """Recognize explicit zero-data queues and metadata-download waits.
+
+    Missing counters are uncertainty, not zero. In particular, a resumed queue
+    can own useful data even when its current-session transfer count is zero.
+    """
+    if torrent.get("state") not in {"queuedDL", "metaDL", "forcedMetaDL"}:
+        return False
+    return zero_payload(torrent)
+
+
 def is_complete(torrent: dict) -> bool:
     """Require explicit completion metadata and no active move or recheck."""
     state = str(torrent.get("state") or "").casefold()
@@ -596,12 +609,28 @@ class PendingStore:
             hash TEXT PRIMARY KEY, attempts INTEGER NOT NULL,
             next_at REAL NOT NULL, reason TEXT NOT NULL
         )""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS metadata_wait (
+            hash TEXT PRIMARY KEY, added_on REAL NOT NULL,
+            app TEXT NOT NULL, first_seen REAL NOT NULL
+        )""")
         self.db.commit()
 
+    def metadata_waits(self) -> dict:
+        """Restore observed metadata-wait timers without inferring torrent age."""
+        return {row[0]: (row[1], row[2], row[3]) for row in self.db.execute(
+            "SELECT hash,added_on,app,first_seen FROM metadata_wait")}
+
+    def save_metadata_waits(self, waits: dict) -> None:
+        """Atomically reconcile only the small timer table, preserving all journals."""
+        with self.db:
+            self.db.execute("DELETE FROM metadata_wait")
+            self.db.executemany("INSERT INTO metadata_wait VALUES (?,?,?,?)",
+                                [(h, *entry) for h, entry in waits.items()])
+
     def add(self, torrent_hash: str, app: str, name: str, reason: str, kind: str = "reject"):
-        if kind not in {"reject", "imported"}:
+        if kind not in {"reject", "imported", "metadata"}:
             raise ValueError("invalid journal kind")
-        self.db.execute("INSERT OR IGNORE INTO pending (hash,app,name,reason,queue_id,phase,kind) VALUES (?,?,?,?,NULL,?,?)", (torrent_hash, app, name, reason, "match" if kind == "reject" else "delete", kind))
+        self.db.execute("INSERT OR IGNORE INTO pending (hash,app,name,reason,queue_id,phase,kind) VALUES (?,?,?,?,NULL,?,?)", (torrent_hash, app, name, reason, "delete" if kind == "imported" else "match", kind))
         self.db.commit()
 
     def set_phase(self, torrent_hash: str, phase: str, queue_id: int | None = None):
@@ -683,6 +712,7 @@ class Guard:
         self.log_context: dict[str, str] = {}
         self.cleanup_retries = self.store.cleanup_retries()
         self.filesystem_retries = self.store.filesystem_retries()
+        self.metadata_waits = self.store.metadata_waits()
         self.metadata_passed: set[str] = set()
         self.completed_passed: set[str] = set()
         self.logged_dry: set[str] = set()
@@ -698,6 +728,7 @@ class Guard:
         if not isinstance(torrents, list):
             raise ApiError("Unexpected qBittorrent torrent-list response")
         by_hash = {str(t.get("hash", "")).lower(): t for t in torrents if t.get("hash")}
+        self._track_metadata_waits(by_hash, now)
         pending = self.store.hashes()
         self.log_context = {h: context for h, context in self.log_context.items() if h in by_hash or h in pending}
         self.log_context.update({h: download_context(t) for h, t in by_hash.items()})
@@ -715,6 +746,19 @@ class Guard:
             if not self._filesystem_ready(h, torrent, now):
                 continue
             name = str(torrent.get("name") or "<unnamed torrent>")
+            wait = self.metadata_waits.get(h)
+            if wait and now - wait[2] > METADATA_TIMEOUT_SECONDS:
+                try:
+                    files = self.qbit.files(h)
+                    if files != [] or not zero_payload(torrent):
+                        raise ValueError("metadata timeout has payload or inconclusive file metadata; preserving download")
+                    self._reject(h, app, name, "metadata download exceeded one hour of observed waiting", torrent, kind="metadata")
+                except (ApiError, ValueError, OSError) as exc:
+                    message = str(exc)
+                    if self.warned_defer.get(h) != message:
+                        LOG.warning("WAIT metadata timeout %s: %s", self.log_context[h], message)
+                        self.warned_defer[h] = message
+                continue
             age = now - int(torrent.get("added_on") or 0)
             fresh = 0 <= age <= self.config.max_age_hours * 3600
             complete = is_complete(torrent)
@@ -730,7 +774,8 @@ class Guard:
                 if not isinstance(files, list):
                     raise ApiError("Unexpected qBittorrent file-list response")
                 if not files:
-                    LOG.debug("WAIT metadata [%s] %s", app, self.log_context[h])
+                    label = "metadata/queue; no payload downloaded" if is_unstarted_download(torrent) else "metadata"
+                    LOG.debug("WAIT %s [%s] %s", label, app, self.log_context[h])
                     continue
                 self.log_context[h] = download_context(torrent, files)
                 reason = classify(files, reject_no_video=self.config.reject_no_video)
@@ -798,7 +843,46 @@ class Guard:
         if not self.config.dry_run:
             self._process_pending(by_hash, now)
 
-    def _reject(self, h: str, app: str, name: str, reason: str, torrent: dict):
+    def _track_metadata_waits(self, by_hash: dict, now: float) -> None:
+        """Track owned metadata states across polls/restarts; dry run is memory-only.
+
+        Reset on observed state exit, disappearance, owner/incarnation changes or
+        clock rollback. API outages provide no evidence of a state transition.
+        """
+        waits = {}
+        for h, torrent in by_hash.items():
+            app = torrent_app(torrent, self.config)
+            added = torrent.get("added_on")
+            if (not app or torrent.get("state") not in METADATA_STATES
+                    or isinstance(added, bool) or not isinstance(added, (int, float))
+                    or not 0 < added <= now):
+                continue
+            previous = self.metadata_waits.get(h)
+            if previous is None or previous[:2] != (added, app) or now < previous[2]:
+                waits[h] = (added, app, now)
+                LOG.info("WAIT metadata [%s] %s; one-hour timeout starts now", app, download_context(torrent))
+            else:
+                waits[h] = previous
+        if waits != self.metadata_waits and not self.config.dry_run:
+            self.store.save_metadata_waits(waits)
+        self.metadata_waits = waits
+
+    def _metadata_removal_ready(self, h: str, torrent: dict, files: list) -> None:
+        """Persist empty-payload evidence before stopping/blocklisting a magnet."""
+        if files != []:
+            raise ValueError("metadata recovered or file list unavailable; preserving download for review")
+        manifest = metadata_manifest(torrent)
+        saved = self.store.evidence(h)
+        if saved is not None:
+            validate_metadata_manifest(saved[0])
+            if (saved[0]["torrent"].get("added_on") != torrent.get("added_on")
+                    or str(saved[0]["torrent"].get("hash", "")).lower() != h
+                    or torrent_app(saved[0]["torrent"], self.config) != torrent_app(torrent, self.config)):
+                raise ValueError("metadata torrent incarnation changed; preserving download")
+        else:
+            self.store.save_manifest(h, manifest)
+
+    def _reject(self, h: str, app: str, name: str, reason: str, torrent: dict, kind: str = "reject"):
         if h in self.filesystem_retries:
             return  # An unresolved access failure overrides filename-based rejection.
         if h not in self.logged_dry:
@@ -808,7 +892,7 @@ class Guard:
                 LOG.warning("DRY RUN: would stop, Arr-blocklist and delete torrent + tracked files: %s", self.log_context.get(h, download_context(torrent)))
             self.logged_dry.add(h)
         else:
-            self.store.add(h, app, name, reason, kind="reject")
+            self.store.add(h, app, name, reason, kind=kind)
 
     def _defer_filesystem(self, h: str, reason: str, now: float):
         """Retain the torrent and schedule 30/60/120/240/300-second retries."""
@@ -882,7 +966,7 @@ class Guard:
         )
         return confirmed
 
-    def _request_deletion(self, h: str, torrent: dict, now: float):
+    def _request_deletion(self, h: str, torrent: dict, now: float, metadata_only: bool = False):
         """Persist all tracked file evidence before requesting API deletion."""
         current = self.qbit.torrents()
         if not isinstance(current, list):
@@ -893,7 +977,10 @@ class Guard:
             raise ValueError("torrent moved or changed before deletion; retrying inspection")
         evidence = self.store.evidence(h)
         files = self.qbit.files(h)
-        if evidence is None:
+        if metadata_only:
+            self._metadata_removal_ready(h, fresh, files)
+            manifest = self.store.evidence(h)[0]
+        elif evidence is None:
             manifest = self.verifier.snapshot(torrent, files)
             self.store.save_manifest(h, manifest)
         else:
@@ -928,8 +1015,9 @@ class Guard:
     def _ownership_paths(self, cache: dict) -> set[tuple[str, str]]:
         """Share failed ownership checks per poll; refresh before each removal.
 
-        Empty file metadata for any client torrent remains inconclusive. Report
-        that torrent explicitly rather than blaming the leftover's manifest.
+        Zero-data queued or metadata downloads may lack file metadata. Known
+        content paths still reserve their scope, even when the file list is empty.
+        All other missing file lists remain inconclusive.
         """
         if "error" in cache:
             error_type, message = cache["error"]
@@ -938,9 +1026,21 @@ class Guard:
         if not isinstance(live, list):
             raise ApiError("Cannot establish active torrent ownership")
         paths = set()
+        queued_content = []
         for torrent in live:
             try:
-                files = self.qbit.files(str(torrent.get("hash") or ""))
+                torrent_hash = str(torrent.get("hash") or "").lower()
+                files = self.qbit.files(torrent_hash)
+                if files == [] and is_unstarted_download(torrent) and torrent_hash not in self.filesystem_retries:
+                    # An unstarted magnet may not have a content path yet. Do
+                    # not infer one from its title or require a directory to exist.
+                    if torrent.get("content_path"):
+                        content = PurePosixPath(str(torrent["content_path"]))
+                        if not content.is_absolute() or ".." in content.parts:
+                            raise ValueError("unsafe queued content path")
+                        queued_content.append(content)
+                    LOG.debug("WAIT queued %s; no data downloaded or file metadata yet", download_context(torrent))
+                    continue
                 paths.update((item["root"], item["path"]) for item in self.verifier.paths(torrent, files))
             except (ApiError, ValueError, OSError) as exc:
                 # Retain the underlying I/O error type for filesystem holds.
@@ -949,6 +1049,7 @@ class Guard:
                 cache["error"] = (error_type, message)
                 raise error_type(message) from exc
         cache["hashes"] = {str(t.get("hash", "")).lower() for t in live}
+        cache["queued_content"] = queued_content
         return paths
 
     def _verify_deletion(self, h: str, app: str, kind: str, now: float, ownership_cache: dict | None = None):
@@ -957,6 +1058,15 @@ class Guard:
         if evidence is None or evidence[1] is None:
             raise ValueError("no saved pre-deletion file evidence; manual review required")
         manifest, requested_at = evidence
+        if kind == "metadata":
+            validate_metadata_manifest(manifest)
+            if str(manifest["torrent"].get("hash", "")).lower() != h:
+                raise ValueError("metadata audit hash mismatch; manual review required")
+            self.store.finish(h, now)
+            self.cleanup_retries.pop(h, None)
+            self.cleanup_messages.pop(h, None)
+            LOG.info("CLEANED [%s] %s zero-payload metadata torrent absent; no filesystem targets were inferred", app, self.log_context.get(h))
+            return True
         remaining = self.verifier.remaining(manifest)
         if remaining and now - requested_at >= self.config.delete_settle_seconds and self.config.cleanup_leftovers:
             # Refresh remote state before local cleanup, including unrelated torrents.
@@ -974,6 +1084,11 @@ class Guard:
                 if not yes:
                     raise ValueError("local removal lacks current import evidence: " + reason)
             wanted = {(item["root"], item["path"]) for item in manifest["items"]}
+            for root, relative in wanted:
+                target = PurePosixPath(root) / relative
+                if any(target.is_relative_to(content) or content.is_relative_to(target)
+                       for content in ownership_cache["queued_content"]):
+                    raise ValueError(f"metadata/queued torrent reserves recorded download path {str(target)!r}")
             if owned_paths & wanted:
                 overlap = sorted(owned_paths & wanted)
                 raise ValueError(f"another torrent owns recorded download path {str(PurePosixPath(*overlap[0]))!r}")
@@ -1020,7 +1135,7 @@ class Guard:
                 evidence = self.store.evidence(h)
                 if evidence:
                     self.log_context[h] = download_context({**evidence[0].get("torrent", {}), "name": name}, manifest=evidence[0])
-                if kind not in {"reject", "imported"} or phase not in {"match", "arr", "delete", "verify"}:
+                if kind not in {"reject", "imported", "metadata"} or phase not in {"match", "arr", "delete", "verify"}:
                     LOG.error("PENDING invalid journal kind/phase; manual review required %s", self.log_context[h])
                     continue
                 torrent = by_hash.get(h)
@@ -1032,7 +1147,11 @@ class Guard:
                 if torrent is not None:
                     # Check access before stop/blocklist/API deletion, including
                     # metadata-only rejection of incomplete torrents.
-                    self.validator.check_filesystem(torrent, self.qbit.files(h))
+                    current_files = self.qbit.files(h)
+                    if kind == "metadata":
+                        self._metadata_removal_ready(h, torrent, current_files)
+                    else:
+                        self.validator.check_filesystem(torrent, current_files)
                 if kind == "imported":
                     if torrent is not None:
                         if not self._import_cleanup_ready(torrent, h, app, now, history_cache):
@@ -1077,14 +1196,14 @@ class Guard:
                         else:
                             self._cleanup_status(h, "torrent missing before saved delete request; manual review required", now)
                         continue
-                    if kind == "reject":
+                    if kind in {"reject", "metadata"}:
                         self.qbit.stop(h)
-                    self._request_deletion(h, torrent, now)
+                    self._request_deletion(h, torrent, now, metadata_only=kind == "metadata")
                     LOG.warning("DELETE requested [%s] kind=%s %s deleteFiles=true", app, kind, self.log_context[h])
                     continue
                 if phase == "verify":
                     if torrent is not None:
-                        self._request_deletion(h, torrent, now)
+                        self._request_deletion(h, torrent, now, metadata_only=kind == "metadata")
                         self._defer_cleanup(h, f"qBittorrent entry still visible [{app}]; deleteFiles=true requested again", now)
                         continue
                     self._verify_deletion(h, app, kind, now, ownership_cache)
@@ -1110,15 +1229,15 @@ class ConsoleFormatter(logging.Formatter):
             return rendered
         message = record.getMessage()
         if record.levelno >= logging.ERROR or message.startswith("REJECT"):
-            code = "31"  # Red: errors and rejected releases.
+            code = "91"  # Bright red: errors and rejected releases.
         elif message.startswith("DRY RUN"):
-            code = "35"  # Purple: report-only actions.
+            code = "95"  # Bright magenta: report-only actions.
         elif record.levelno >= logging.WARNING or message.startswith(("WAIT", "DEFER", "PENDING")):
-            code = "33"  # Yellow: warnings, waiting, and retained downloads.
+            code = "93"  # Bright yellow: warnings, waiting, and retained downloads.
         elif message.startswith(("ACCEPT", "CLEANED")):
-            code = "32"  # Green: accepted media and confirmed cleanup.
+            code = "92"  # Bright green: accepted media and confirmed cleanup.
         else:
-            code = "34"  # Blue: normal activity and processing heartbeat.
+            code = "96"  # Bright cyan: normal activity and processing heartbeat.
         return "\n".join(f"\033[{code}m{line}\033[0m" for line in rendered.split("\n"))
 
 

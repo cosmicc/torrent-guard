@@ -6,7 +6,7 @@ This is the root-level coding-agent guide for Codex and maintainers. Read alongs
 
 Torrent Guard is a long-running Python 3.12 daemon deployed via Docker Compose on a media-management host running qBittorrent, Sonarr and Radarr. Sonarr/Radarr select torrent releases; qBittorrent downloads them. The guard discovers fake releases with dangerous file extensions, confirms finished torrents contain actual video, asks the responsible Arr instance to blocklist bad releases, and removes bad downloads with qBittorrent's deleteFiles=true. Valid completed torrents should be removed with data only after Sonarr/Radarr has demonstrably imported every video file and the import grace interval has elapsed.
 
-The highest priority is preventing deletion of useful, unimported media. Missing metadata, API outages, ambiguous ownership, missing/moving files and incomplete import history must not be treated as proof of a bad torrent or a completed import.
+The highest priority is preventing deletion of useful, unimported media. API outages, ambiguous ownership, missing/moving files and incomplete import history must not be treated as proof of a bad torrent or a completed import. Missing metadata alone is inconclusive; v1.0 adds the explicit observed one-hour zero-payload timeout described below.
 
 There is no web service, exposed port, qBittorrent completion hook, Docker socket access or external database server. Standard Compose uses a read-only download mount. An explicit cleanup override can additionally mount only the completed-download directory writable. Library mounts must never be writable or targeted. The app polls qBittorrent and Arr APIs and records cleanup operations in a local SQLite journal.
 
@@ -24,7 +24,7 @@ There is no web service, exposed port, qBittorrent completion hook, Docker socke
   - PendingStore: persistent SQLite pending operations and phase updates.
   - Guard.poll, Guard._reject, Guard._process_pending: orchestration and retries.
   - setup_logging, main: rotating logs, continuous polling and error recovery.
-  - ConsoleFormatter: safe classic ANSI console palette; plain rotating audit files.
+  - ConsoleFormatter: safe bright ANSI console palette; plain rotating audit files.
   - write_heartbeat, healthcheck: atomic completed-poll marker and read-only Docker check.
 - tests/test_guard.py — metadata classification, API, queue, journal and deletion failures.
 - tests/test_v02.py — completed-media validation and import-history cleanup.
@@ -43,8 +43,11 @@ There is no web service, exposed port, qBittorrent completion hook, Docker socke
 - CHANGELOG.md, VERSION — version history/version; update together for application releases. Do not maintain RELEASE_NOTES.md or a separate user changelog.
 - scripts/release_notes.py — validate version consistency and extract the current changelog entry for release automation.
 - tests/test_cleanup_safety.py, tests/test_release.py — cleanup retry authorization and release metadata regression tests.
+- scripts/watch_logs.py — read-only SSH event blocks, width-aware wrapping, bright dark-shell palette, file rotation and partial-write handling; shipped as /app/watch_logs.py.
+- tests/test_watch_logs.py — viewer rendering, control escaping and actual-file follow/rotation checks.
+- tests/test_metadata_timeout.py — persisted observation deadlines, Arr-first zero-payload rejection, dry-run/restart safety and metadata-recovery races.
 - tests/test_monitoring.py — palette isolation, terminal-control escaping and completed-poll health checks.
-- docs/log-palette.svg — approved classic log palette with light/dark reference samples. Green success, blue activity, yellow waiting/warnings, red errors/rejections, purple dry run; exact ANSI shades follow the terminal theme.
+- docs/log-palette.svg — approved bright log palette with light/dark reference samples. Green success, bright cyan activity, yellow waiting/warnings, red errors/rejections, purple dry run; exact ANSI shades follow the terminal theme.
 - docs/deletion-verification.md — required reading before modifying file verification, cleanup permissions, journal manifests, quarantine recovery or deletion safety. Contains v0.6 deployment and validation details. Verified leftovers are permanently unlinked; quarantine is only a temporary identity-check step unless safety checks fail.
 - docs/filesystem-retries.md — required reading for v0.7 unresolved filesystem errors, NFS ESTALE handling, ffprobe I/O interpretation, retry persistence and recovery.
 - .github/workflows/test.yml — Python unit tests and syntax checks on push/PR.
@@ -61,6 +64,27 @@ There is no web service, exposed port, qBittorrent completion hook, Docker socke
 6. Valid video remains in qBittorrent awaiting matching Arr history. GET /api/v3/history paginated with page/pageSize/sortKey=date/sortDirection=descending. Match downloadFolderImported (string or numeric 3, never numeric 5) and downloadId to the same torrent infohash, require import occurred after added_on, and require the import age >= IMPORT_GRACE_MINUTES (minimum 10; current operator log showed 30). Check history immediately after media validation and repeat at IMPORT_CHECK_SECONDS; the cleanup grace does not delay history checking. Report missing/partial/mismatched evidence and confirmed-import grace separately at INFO when the reason changes. Grace deadlines are UTC. Multiple selected video files require import evidence for all of them. An absent queue item or a completed qBittorrent download alone is NEVER proof of successful Arr import.
 7. Once all import and retention criteria hold, delete the qBittorrent torrent plus its tracked data without blocklisting the successfully imported release. The Arr-managed main movie/TV library must remain intact; imported hardlinked or copied files should not be removed.
 8. Log ACCEPT metadata/completed, REJECT candidate, DEFER validation, WAIT import, DRY RUN, PENDING, CLEANUP, DELETE, CLEANED, warnings and errors. Pending journal phases must be restart-safe and idempotent.
+
+### Metadata timeout (v1.0)
+
+Track owned `metaDL`/`forcedMetaDL` torrents independently of `MAX_AGE_HOURS` in
+`metadata_wait(hash, added_on, app, first_seen)`. Fail only after more than 3600
+seconds since first observation, preserving time across restarts/API outages;
+reset on observed state exit/absence, ownership/incarnation change or clock
+rollback. Switching between metadata states keeps the same timer. Dry-run
+updates only the in-memory copy and must not mutate timer rows during polling.
+
+Pending `kind=metadata` uses rejection phases (match/arr/delete/verify), never
+import cleanup. Empty-file removal requires explicit zero-payload counters and
+no filesystem hold. Save validated v2 `metadata_only` evidence before stopping;
+recheck empty files, zero counters, state and incarnation on pending retries and
+before deletion. Stopped states allow recovery after Guard stops a failed magnet.
+Arr must confirm blocklisting before qBittorrent deletion. Recovered metadata,
+prior payload, missing counters/API failures retain the torrent for review.
+A v2 zero-payload audit has no filesystem targets and is never accepted by the
+ordinary file verifier or local unlink path. Its CLEANED label reports client
+absence only, explicitly without claiming filesystem absence. Preserve existing
+v1 file evidence, journals and audits. See INSTALL.md and the deletion guide.
 
 ### Cleanup authorization and retries (v0.4)
 
@@ -166,10 +190,19 @@ guess deletion targets from titles. When another torrent's metadata blocks
 cleanup, include its name/location as well as the cleanup target. HTTP error
 endpoints omit query strings. See the deletion guide for retry troubleshooting.
 
+An empty file list from a zero-data `queuedDL`, `metaDL` or `forcedMetaDL` torrent is an expected wait:
+require explicit numeric zero `progress`, `downloaded` and `completed`, and a
+nonpositive `completion_on`. Do not require its directories to exist. During
+ownership scans only this narrow case can skip unavailable metadata, and never
+while that torrent has an unresolved filesystem hold. Keep its reported content
+path reserved against overlapping cleanup, and always check a known file list.
+Missing counters, malformed/API failures and previously downloaded data remain
+inconclusive. Refresh state each scan; starting or resuming ends this exception.
+
 `LOG_COLOR=always` is the default for live Docker logs; `auto` requires a TTY
 and `never` disables colors. Keep the persistent audit file plain text, escape
 external terminal control characters in both outputs, and preserve readable
-decision labels without color. Use the approved palette linked above.
+decision labels without color. Use the approved palette linked above: bright ANSI 92/96/93/91/95 for success/activity/waiting/errors/dry runs. The SSH viewer colors headings only, sanitizes external controls and preserves details without API or journal access. Keep it standard-library-only and read-only; document host and container commands in INSTALL.md.
 
 The daemon writes `/tmp/torrent-guard-heartbeat` atomically using monotonic time
 only after `Guard.poll()` returns, including idle and dry-run polls. Clear the
@@ -205,7 +238,7 @@ Treat docker compose config output as possibly containing secrets; sanitize befo
 - Preserve dry-run guarantees, cross-Arr category/tag isolation, defer-vs-reject distinction and explicit deletion with data through the qBittorrent API.
 - Test fail-closed behavior on unreachable Arr APIs, incomplete/late move, malformed paths, unknown file types, repeated HTTP errors, journal restarts, and multi-episode partial imports. Assert the ORDER and ABSENCE of destructive calls as well as expected calls.
 - Run: python3 -m unittest discover -s tests -v
-- Run: python3 -m py_compile guard.py deletion.py scripts/release_notes.py
+- Run: python3 -m py_compile guard.py deletion.py scripts/release_notes.py scripts/watch_logs.py
 - Run: python3 scripts/release_notes.py (validates version consistency and changelog structure without publishing).
 - Run: docker compose config using safe dummy .env values when appropriate; NEVER commit secrets.
 - Update README, INSTALL.md and .env.example as appropriate when operator-facing flags or behavior change. Document state migrations and safety impact.
