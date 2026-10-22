@@ -57,6 +57,18 @@ class DeletionTests(unittest.TestCase):
         self.qbit.delete_with_data.assert_called_once_with("abc123")
         self.qbit.torrents.return_value = []
 
+    def test_legacy_rejected_leftovers_without_bad_payload_are_retained(self):
+        self.request()
+        # Simulate old rejection evidence for readable ordinary video. The
+        # saved decision and identity manifest alone cannot authorize unlink.
+        with self.guard.store.db:
+            self.guard.store.db.execute("UPDATE pending SET kind='reject' WHERE hash='abc123'")
+        self.guard.poll(now=self.now + 121)
+        self.assertTrue(self.path.is_file())
+        self.assertTrue(self.sidecar.is_file())
+        self.assertTrue(self.guard.store.entries())
+        self.assertEqual(self.guard.store.db.execute("SELECT count(*) FROM deletion_audit").fetchone()[0], 0)
+
     def test_manifest_committed_before_api_call_and_all_files_verified(self):
         def delete(_hash):
             evidence = self.guard.store.evidence("abc123")

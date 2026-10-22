@@ -126,3 +126,18 @@ class HealthcheckTests(unittest.TestCase):
                     heartbeat.assert_called_once_with()
                 else:
                     heartbeat.assert_not_called()
+                self.assertEqual(guard.log_status.call_count, 1 if error is None else 0)
+
+    def test_status_and_debug_heartbeat_run_every_sixty_seconds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            guard = Mock()
+            guard.store.hashes.return_value = set()
+            config = Mock(poll_seconds=5, dry_run=True, import_grace_minutes=10,
+                          delete_settle_seconds=120)
+            with patch("sys.argv", ["guard.py"]), patch("guard.HEARTBEAT_FILE", Path(directory) / "marker"), patch("guard.setup_logging"), patch("guard.Config.from_env", return_value=config), patch("guard.Guard", return_value=guard), patch("guard.write_heartbeat"), patch("guard.time.monotonic", side_effect=[0, 30, 61, 61]), patch("guard.time.sleep", side_effect=[None, None, KeyboardInterrupt]), self.assertLogs("torrent-guard", level="DEBUG") as logs:
+                with self.assertRaises(KeyboardInterrupt):
+                    main()
+            self.assertEqual(guard.log_status.call_count, 2)
+            heartbeat = [record for record in logs.records if record.getMessage().startswith("HEARTBEAT")]
+            self.assertEqual(len(heartbeat), 2)
+            self.assertTrue(all(record.levelno == logging.DEBUG for record in heartbeat))

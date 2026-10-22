@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v0.8** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
+**v1.1** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
 
 Torrent Guard is a background service that examines new and completed movie/TV torrents and cleans up imported releases. It uses **qBittorrent's Web API** and **Sonarr/Radarr's v3 APIs**; no qBittorrent “Run external program on torrent completion” hook is required.
 
@@ -104,6 +104,12 @@ If automatic leftover cleanup is enabled, retain its override when upgrading:
 ```bash
 docker compose -f compose.yaml -f compose.cleanup.yaml up -d --build --force-recreate
 ```
+
+v1.1 requires no schema migration or new settings. It revalidates bad-release
+evidence on pending retries and immediately before deletion; stale rejection
+records with missing or inconclusive evidence remain pending for review. Import
+evidence is also refreshed for the exact file list saved before API deletion.
+Rebuild and recreate the container, preserving `/state` and any cleanup override.
 
 v1.0 adds `metadata_wait` automatically and preserves existing pending work,
 file evidence, audits and retry records. Back up `/state` before upgrading;
@@ -272,8 +278,17 @@ Persistent `/state/torrent-guard.log` and rotated backups remain plain text;
 no second colorized file is created. External control characters are escaped
 before console or file output.
 
-A `HEARTBEAT polling active` message appears after the first completed poll
-and at most once every 60 seconds afterward. The poll loop atomically writes
+An INFO `STATUS` line appears after the first completed poll and at most once
+every 60 seconds afterward. It contains only numeric counters:
+`pending_deletion`, `verifying_deletion`, `waiting_for_import`, `import_grace`,
+`metadata_waits`, `filesystem_holds`, and `cleanup_retries`. Pending deletion
+includes every journal phase; verification and retry counts can overlap it.
+Waiting for import excludes confirmed imports within grace and scheduled cleanup;
+import counts reflect the latest observed evidence, including during API outages.
+Metadata waits exclude already-pending timeout removals. Dry-run reports observed
+waits and existing journal work without scheduling hypothetical deletions.
+
+`HEARTBEAT polling active` uses DEBUG (`LOG_LEVEL=DEBUG`) at the same interval. The poll loop atomically writes
 a private monotonic-time marker in `/tmp` only after a whole poll returns.
 It clears a previous marker on startup. The healthcheck reads this marker
 without API calls, credentials, database writes, or extra network exposure.

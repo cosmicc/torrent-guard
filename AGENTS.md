@@ -207,8 +207,12 @@ decision labels without color. Use the approved palette linked above: bright ANS
 The daemon writes `/tmp/torrent-guard-heartbeat` atomically using monotonic time
 only after `Guard.poll()` returns, including idle and dry-run polls. Clear the
 marker at startup. Never refresh it from a background timer or healthcheck:
-that would conceal stalled processing. Log progress at INFO at most once per
-60 seconds after completed polls. The Dockerfile invokes
+that would conceal stalled processing. Log HEARTBEAT at DEBUG at most once per
+60 seconds after completed polls. At the same interval, log INFO STATUS with only
+numeric pending_deletion, verifying_deletion, waiting_for_import, import_grace,
+metadata_waits, filesystem_holds and cleanup_retries counters. Import counters
+reflect the last observed evidence; retry/verification counts overlap pending
+work. Status reporting is read-only and must not make extra API calls. The Dockerfile invokes
 `python /app/guard.py --healthcheck` every 30 seconds (5-second timeout,
 60-second startup grace, 3 retries). The CLI must bypass credentials and logging
 initialization and remain read-only. Freshness defaults to 300 seconds via
@@ -263,3 +267,17 @@ probe permits rejection only when access remains readable and the result does
 not report an I/O problem. Check all tracked paths before destructive calls,
 including incomplete metadata-based rejections and pending retries. See the
 filesystem recovery guide for testing and operational limitations.
+
+### v1.1 deletion authorization
+
+Revalidate current rejection rules before pending stop/blocklist/delete actions,
+and again against freshly fetched files immediately before API deletion. A saved
+rejection reason alone is not authorization. Dangerous extensions, configured
+no-video classification, or settled completed media with a conclusive invalid
+probe remain rejection evidence. Unknown, recovered, incomplete or unreadable
+media is retained. Check current import history against the exact snapshot file
+list immediately before imported deletion. Include category/tags in the final
+torrent-change check. Local rejected leftovers also require bad-release evidence
+from their identity-protected saved files; inconclusive legacy records stay pending.
+Verified zero-payload metadata timeout removal remains unchanged and never
+authorizes filesystem deletion.
