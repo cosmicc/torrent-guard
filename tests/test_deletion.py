@@ -1,6 +1,7 @@
 """Real temporary-file tests for deletion evidence and bounded leftover cleanup."""
 from dataclasses import replace
 from datetime import datetime, timezone
+import errno
 import json
 import os
 from pathlib import Path
@@ -441,6 +442,46 @@ class DeletionTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
         self.assertFalse(self.guard.store.entries())
 
+    def test_nfs_unsupported_rename_uses_guarded_fallback_and_finishes(self):
+        self.request()
+        with patch("deletion.rename_exclusive", side_effect=OSError(errno.EINVAL, "Invalid argument")), self.assertLogs("torrent-guard", level="WARNING") as logs:
+            self.guard.poll(now=self.now + 120)
+        self.assertFalse(self.path.exists())
+        self.assertFalse(self.sidecar.exists())
+        self.assertFalse(self.guard.store.entries())
+        self.assertTrue(any("CLEANUP NFS compatibility" in line for line in logs.output))
+
+    def test_nfs_fallback_interrupted_unlink_resumes_from_saved_quarantine(self):
+        self.request()
+        with patch("deletion.rename_exclusive", side_effect=OSError(errno.EINVAL, "unsupported flag")), patch("deletion.os.unlink", side_effect=OSError(errno.EIO, "interrupted unlink")):
+            self.guard.poll(now=self.now + 120)
+        manifest = self.guard.store.evidence("abc123")[0]
+        moved = next(item for item in manifest["items"] if item.get("quarantine"))
+        self.assertTrue((self.completed / moved["quarantine"] / "payload").is_file())
+        self.guard.store.db.close()
+        self.guard = Guard(self.cfg, self.qbit, {"RADARR": self.arr})
+        with patch("deletion.rename_exclusive", side_effect=OSError(errno.EINVAL, "unsupported flag")):
+            self.guard.poll(now=self.now + 150)
+        self.assertFalse(self.guard.store.entries())
+        self.assertFalse(self.path.exists())
+
+    def test_nfs_fallback_captures_replaced_source_without_unlinking_it(self):
+        self.request()
+        rename = os.rename
+
+        def replace_before_rename(source, target, **kwargs):
+            replacement = self.completed / "replacement"
+            replacement.write_bytes(b"changed during NFS rename")
+            os.replace(replacement, self.path)
+            rename(source, target, **kwargs)
+
+        with patch("deletion.rename_exclusive", side_effect=OSError(errno.EINVAL, "unsupported flag")), patch("deletion.os.rename", side_effect=replace_before_rename):
+            self.guard.poll(now=self.now + 120)
+        manifest = self.guard.store.evidence("abc123")[0]
+        moved = next(item for item in manifest["items"] if item.get("quarantine"))
+        self.assertEqual((self.completed / moved["quarantine"] / "payload").read_bytes(), b"changed during NFS rename")
+        self.assertTrue(self.guard.store.entries())
+
     def test_crash_after_quarantine_resumes_without_losing_data(self):
         self.request()
         with patch("deletion.os.unlink", side_effect=OSError("simulated interrupted unlink")):
@@ -556,3 +597,68 @@ class DeletionTests(unittest.TestCase):
         self.addCleanup(store.db.close)
         self.assertEqual(store.entries()[0][0], "old")
         self.assertIsNone(store.evidence("old"))
+
+
+class QuarantineRenameTests(unittest.TestCase):
+    """Exercise compatibility boundaries using real private directories/files."""
+
+    def setUp(self):
+        from deletion import rename_to_quarantine
+        self.rename = rename_to_quarantine
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.source = self.root / 'original'
+        self.source.write_bytes(b'keep payload')
+        self.quarantine = self.root / '.torrent-guard-test'
+        self.quarantine.mkdir(mode=0o700)
+        self.source_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        self.target_fd = os.open(self.quarantine, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, self.source_fd)
+        self.addCleanup(os.close, self.target_fd)
+
+    def test_supported_rename_keeps_atomic_no_replace(self):
+        self.assertFalse(self.rename(self.source_fd, 'original', self.target_fd))
+        self.assertFalse(self.source.exists())
+        self.assertEqual((self.quarantine / 'payload').read_bytes(), b'keep payload')
+
+    def test_unsupported_operation_codes_use_private_rename(self):
+        for code in (errno.EINVAL, errno.EOPNOTSUPP, errno.ENOSYS):
+            with self.subTest(code=code), patch('deletion.rename_exclusive', side_effect=OSError(code, 'unsupported')):
+                self.assertTrue(self.rename(self.source_fd, 'original', self.target_fd))
+                os.rename(self.quarantine / 'payload', self.source)
+
+    def test_operational_errors_never_fall_back(self):
+        for code in (errno.EACCES, errno.EPERM, errno.ESTALE, errno.EIO, errno.EXDEV, errno.EEXIST):
+            with self.subTest(code=code), patch('deletion.rename_exclusive', side_effect=OSError(code, 'failure')), patch('deletion.os.rename') as rename:
+                with self.assertRaises(OSError):
+                    self.rename(self.source_fd, 'original', self.target_fd)
+                rename.assert_not_called()
+                self.assertTrue(self.source.exists())
+
+    def test_existing_payload_or_symlink_is_never_overwritten(self):
+        payload = self.quarantine / 'payload'
+        for symlink in (False, True):
+            with self.subTest(symlink=symlink):
+                if symlink:
+                    payload.symlink_to(self.root / 'missing-target')
+                else:
+                    payload.write_bytes(b'existing quarantine data')
+                with patch('deletion.rename_exclusive', side_effect=OSError(errno.EINVAL, 'unsupported')), patch('deletion.os.rename') as rename:
+                    with self.assertRaises(FileExistsError):
+                        self.rename(self.source_fd, 'original', self.target_fd)
+                    rename.assert_not_called()
+                self.assertTrue(self.source.exists())
+                payload.unlink()
+
+    def test_wrong_owner_or_shared_quarantine_is_retained(self):
+        with patch('deletion.rename_exclusive', side_effect=OSError(errno.EINVAL, 'unsupported')), patch('deletion.os.geteuid', return_value=os.geteuid() + 1), patch('deletion.os.rename') as rename:
+            with self.assertRaises(ValueError):
+                self.rename(self.source_fd, 'original', self.target_fd)
+            rename.assert_not_called()
+        self.quarantine.chmod(0o750)
+        with patch('deletion.rename_exclusive', side_effect=OSError(errno.EINVAL, 'unsupported')), patch('deletion.os.rename') as rename:
+            with self.assertRaises(ValueError):
+                self.rename(self.source_fd, 'original', self.target_fd)
+            rename.assert_not_called()
+        self.assertTrue(self.source.exists())

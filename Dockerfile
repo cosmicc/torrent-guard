@@ -1,9 +1,10 @@
 FROM python:3.12-alpine
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    TZ=America/New_York
 # ffprobe validates actual decodable video stream metadata, not merely extensions.
-RUN apk add --no-cache ffmpeg
+RUN apk add --no-cache ffmpeg tzdata
 WORKDIR /app
 RUN mkdir -p /state && chown 1000:1000 /state
 COPY --chown=1000:1000 guard.py /app/guard.py

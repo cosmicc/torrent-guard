@@ -132,8 +132,8 @@ before the move. Guard verifies the captured object's identity before unlinking
 it permanently, then independently checks absence again. This happens immediately
 after the final identity check; there is no recycle bin or normal file-retention
 period inside quarantine. A changed object captured during a
-race is preserved in quarantine and reported for manual recovery. If renameat2
-is unavailable or unsupported by the filesystem, local cleanup fails closed.
+race is preserved in quarantine and reported for manual recovery. Starting with v1.3, unsupported-operation errors can use the guarded private
+quarantine fallback described below. Other errors still retain files.
 
 Quarantine progress survives restarts. Empty quarantine directories are retained;
 Guard does not recursively delete directories. A source path reappearing alongside
@@ -180,7 +180,7 @@ measures completed polling, not whether all cleanups succeed.
 
 Cleanup API failures and safety-check exceptions retry after 60, 120, 240, 480,
 then at most 900 seconds. Repeated API deletion requests for a still-visible
-torrent use the same backoff. `retry_in`, `attempt`, and UTC `retry_at` explain
+torrent use the same backoff. `retry_in`, `attempt`, and Eastern `retry_at` (EST/EDT with numeric offset) explain
 when the next attempt will run. No sleeping occurs inside the poll loop; other
 downloads continue processing. The additive SQLite `cleanup_retry` table keeps
 deadlines across restarts and is cleared when deletion verification succeeds.
@@ -239,3 +239,35 @@ or unreadable payloads remain pending. Local rejected leftovers require
 bad-release evidence from the saved, identity-protected payload; inconclusive
 legacy evidence is retained for review. Zero-payload timeout removal still has
 no filesystem targets. No schema migration or new setting is needed.
+
+## NFS rename compatibility (v1.3)
+
+Some NFS implementations return `EINVAL` for `renameat2(RENAME_NOREPLACE)`.
+This is distinct from an access-denied error. Guard first attempts the protected
+rename. Only `EINVAL`, `EOPNOTSUPP` or unavailable-operation `ENOSYS` permit an
+ordinary atomic rename into the already-journaled private quarantine directory.
+Before fallback, the directory must be owned by the runtime user, have no group
+or other access, and be empty (including no dangling symlink at `payload`).
+Guard checks directory identity/attachment and verifies the captured file before
+unlinking. A changed captured file is retained for manual recovery. This is not
+a direct-unlink or copy/delete fallback against the original download name.
+
+The fallback assumes no other process with the same UID or root modifies Guard's
+private quarantine during cleanup. Mode 0700 excludes other users but cannot
+exclude those processes. Keep that operational requirement in place. The
+`CLEANUP NFS compatibility` warning identifies use of this fallback. Permission,
+I/O, stale-handle, cross-device and destination-exists errors never trigger it.
+
+No journal migration or reset is needed. A failed rename may already have saved
+an empty quarantine directory; v1.3 resumes from it after checking identity and
+permissions. Interrupted unlink resumes against the same captured payload.
+Upgrade with the existing completed-directory cleanup override. Tests inject
+unsupported-flag failures against real temporary files; they do not reproduce
+your NFS server or establish that every reported EINVAL has this cause.
+
+Filesystem deferrals now report Eastern `retry_at` (EST/EDT with numeric offset). Filesystem backoff is
+30/60/120/240/300 seconds; cleanup backoff is 60/120/240/480/900 seconds. The
+later of the two active deadlines governs eligibility, followed by the next
+poll. Existing deadlines survive restart. `pending_deletion` counts downloads,
+not files; `verifying_deletion`, filesystem holds and cleanup retries overlap
+that work rather than being additional downloads.

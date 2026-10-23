@@ -12,6 +12,13 @@ from scripts.watch_logs import LogFollower, color_code, main, render_line
 class RenderingTests(unittest.TestCase):
     """Retain diagnostic content and prevent log text controlling terminals."""
 
+    def test_eastern_zone_and_offset_remain_in_event_headers(self):
+        for zone in ("EST-0500", "EDT-0400"):
+            with self.subTest(zone=zone):
+                rendered = render_line(f"2026-11-01 01:30:00 {zone} WARNING torrent-guard DEFER validation name='Movie' retry_in=60s", 100, False)
+                self.assertIn(f"2026-11-01 01:30:00 {zone}  WARNING  DEFER validation", rendered)
+                self.assertIn("Download: 'Movie'", rendered)
+
     def test_event_block_wraps_long_names_paths_and_retains_details(self):
         path = "/downloads/complete/" + "long-directory/" * 12 + "movie.mkv"
         line = ("2026-10-21 14:32:08,123 WARNING torrent-guard "

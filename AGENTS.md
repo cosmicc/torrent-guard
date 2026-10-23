@@ -61,7 +61,7 @@ There is no web service, exposed port, qBittorrent completion hook, Docker socke
 3. Fresh torrents (MAX_AGE_HOURS defaults to 24) are inspected using GET /api/v2/torrents/files?hash=HASH. Wait when metadata is unavailable. Only selected files (priority not zero) are considered. Flag dangerous extensions (.exe, .msi, .ps1, .bat, .scr, etc.) even if video is also present. REJECT_NO_VIDEO optionally blocks releases containing no recognized video extension. Filenames alone do not prove a valid movie.
 4. For bad releases, create a durable rejection in PendingStore. Processing must first stop qBittorrent, obtain a matching Arr queue item by infohash, call Arr rejection/blocklisting while keeping the torrent in qBittorrent, then explicitly ask qBittorrent POST /api/v2/torrents/delete with hashes=HASH and deleteFiles=true. Verify the torrent record disappears. Keep the download if its Arr blocklist outcome cannot be confirmed; never let Arr remove the torrent first.
 5. For completed torrents, respect progress, amount_left, completion_on, moving/checking states and the completed settle delay. Only inspect files after they are in the configured final completed directory. Confirm all selected video files using ffprobe readable video stream metadata. If paths are moving, absent, unreadable, or unsafe, DEFER rather than reject. A completed release with no video or an actual invalid ffprobe result can be rejected.
-6. Valid video remains in qBittorrent awaiting matching Arr history. GET /api/v3/history paginated with page/pageSize/sortKey=date/sortDirection=descending. Match downloadFolderImported (string or numeric 3, never numeric 5) and downloadId to the same torrent infohash, require import occurred after added_on, and require the import age >= IMPORT_GRACE_MINUTES (minimum 10; current operator log showed 30). Check history immediately after media validation and repeat at IMPORT_CHECK_SECONDS; the cleanup grace does not delay history checking. Report missing/partial/mismatched evidence and confirmed-import grace separately at INFO when the reason changes. Grace deadlines are UTC. Multiple selected video files require import evidence for all of them. An absent queue item or a completed qBittorrent download alone is NEVER proof of successful Arr import.
+6. Valid video remains in qBittorrent awaiting matching Arr history. GET /api/v3/history paginated with page/pageSize/sortKey=date/sortDirection=descending. Match downloadFolderImported (string or numeric 3, never numeric 5) and downloadId to the same torrent infohash, require import occurred after added_on, and require the import age >= IMPORT_GRACE_MINUTES (minimum 10; current operator log showed 30). Check history immediately after media validation and repeat at IMPORT_CHECK_SECONDS; the cleanup grace does not delay history checking. Report missing/partial/mismatched evidence and confirmed-import grace separately at INFO when the reason changes. Displayed grace deadlines use Eastern Time (America/New_York), with EST/EDT and numeric UTC offset. Multiple selected video files require import evidence for all of them. An absent queue item or a completed qBittorrent download alone is NEVER proof of successful Arr import.
 7. Once all import and retention criteria hold, delete the qBittorrent torrent plus its tracked data without blocklisting the successfully imported release. The Arr-managed main movie/TV library must remain intact; imported hardlinked or copied files should not be removed.
 8. Log ACCEPT metadata/completed, REJECT candidate, DEFER validation, WAIT import, DRY RUN, PENDING, CLEANUP, DELETE, CLEANED, warnings and errors. Pending journal phases must be restart-safe and idempotent.
 
@@ -130,7 +130,7 @@ QBIT_URL, SONARR_URL and RADARR_URL must be addresses reachable FROM THE GUARD C
 
 Qbit login sends POST /api/v2/auth/login and maintains a cookie jar. Older qBittorrent releases respond HTTP 200 with Ok.; qBittorrent 5.2+ can respond HTTP 204 with an empty body. The v0.3.1 implementation accepts both, verifies the authenticated session with GET /api/v2/app/version, and uses the cookie jar for SID/QBT_SID_* cookies. Never treat HTTP 200 with arbitrary empty content as authentication success. Do not print passwords or API keys.
 
-Sonarr/Radarr use X-Api-Key header with /api/v3 paths. History pagination parameters are valid for Radarr and Sonarr. Use UTC timestamps; do not assume API history is complete if pages fail or are truncated. A missing, ambiguous or unmatchable history record means preserve the torrent.
+Sonarr/Radarr use X-Api-Key header with /api/v3 paths. History pagination parameters are valid for Radarr and Sonarr. Keep API timestamps and internal comparisons in UTC/epoch time; render operator-facing times in Eastern Time. Do not assume API history is complete if pages fail or are truncated. A missing, ambiguous or unmatchable history record means preserve the torrent.
 
 ### Observed issue: HTTP 400 Invalid Hostname from Radarr history
 
@@ -290,3 +290,30 @@ torrent-change check. Local rejected leftovers also require bad-release evidence
 from their identity-protected saved files; inconclusive legacy records stay pending.
 Verified zero-payload metadata timeout removal remains unchanged and never
 authorizes filesystem deletion.
+
+### v1.3 NFS quarantine compatibility
+
+Read docs/deletion-verification.md, including NFS rename compatibility, before
+changing fallback behavior. Try renameat2(RENAME_NOREPLACE) first. Only EINVAL,
+EOPNOTSUPP and ENOSYS permit standard atomic rename into the journaled quarantine,
+after verifying it is empty, owner-only and owned by the runtime user. Preserve
+root/directory identity and attachment checks, import/rejection authorization,
+post-capture file identity checks and interrupted-unlink recovery. Never use a
+direct unlink of the original download name, or fallback on access, I/O, ESTALE,
+EXDEV or EEXIST errors. The operational threat boundary excludes concurrent
+quarantine changes by other processes with Guard's UID or root; document this
+explicitly. Tests must cover unsupported flags, changed captured objects, occupied
+or shared destinations, operational errors and persisted-quarantine recovery.
+Filesystem DEFER logs include the effective Eastern retry_at after both independent
+hold deadlines; this is reporting only and must not bypass or rewrite holds.
+
+### Eastern Time presentation (v1.3)
+
+All new console/audit headers and operator-facing deadlines use display_time()
+with ZoneInfo("America/New_York"). Show EST-0500 or EDT-0400 for the actual
+instant, including repeated hours. Never use a fixed EST offset or change
+internal epoch/monotonic values, UTC API parsing, retry storage or grace math.
+The image installs OS tzdata and sets TZ=America/New_York. The SSH viewer
+preserves the explicit zone/offset and still reads historical unzoned log lines;
+never guess or rewrite historical timestamps. Keep daylight-saving boundary
+and grace-duration tests when changing time presentation.

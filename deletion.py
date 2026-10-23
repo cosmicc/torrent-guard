@@ -6,10 +6,14 @@ quarantine, and checks identity after the atomic move before unlinking data.
 """
 from contextlib import contextmanager
 import ctypes
+import errno
+import logging
 import os
 from pathlib import Path, PurePosixPath
 import stat
 import uuid
+
+LOG = logging.getLogger("torrent-guard")
 
 
 def identity(info: os.stat_result) -> list[int]:
@@ -70,12 +74,38 @@ def rename_exclusive(source_fd: int, source: str, target_fd: int, target: str) -
     library = ctypes.CDLL(None, use_errno=True)
     rename = getattr(library, "renameat2", None)
     if rename is None:
-        raise OSError("renameat2 is unavailable; automatic cleanup deferred")
+        raise OSError(errno.ENOSYS, "renameat2 is unavailable")
     rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
     rename.restype = ctypes.c_int
     if rename(source_fd, os.fsencode(source), target_fd, os.fsencode(target), 1) != 0:
         code = ctypes.get_errno()
         raise OSError(code, os.strerror(code))
+
+
+def rename_to_quarantine(source_fd: int, source: str, target_fd: int) -> bool:
+    """Atomically capture into a validated private quarantine; report fallback.
+
+    The caller validates directory identity, attachment and quarantine location.
+    Some NFS implementations reject RENAME_NOREPLACE. Only unsupported-operation
+    errors permit ordinary rename into an empty, owner-only directory. As with
+    the surrounding cleanup checks, another process with the same UID or root
+    must not modify quarantine during this operation. There is no check/unlink
+    fallback against the original download name.
+    """
+    try:
+        rename_exclusive(source_fd, source, target_fd, "payload")
+        return False
+    except OSError as exc:
+        if exc.errno not in {errno.EINVAL, errno.EOPNOTSUPP, errno.ENOSYS}:
+            raise
+    info = os.fstat(target_fd)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) & 0o077):
+        raise ValueError("NFS rename fallback requires an owner-only quarantine owned by the runtime user")
+    if os.listdir(target_fd):
+        raise FileExistsError(errno.EEXIST, "NFS rename fallback requires an empty private quarantine")
+    os.rename(source, "payload", src_dir_fd=source_fd, dst_dir_fd=target_fd)
+    return True
 
 
 class FileVerifier:
@@ -253,7 +283,10 @@ class FileVerifier:
                     if original != item["identity"]:
                         raise ValueError("leftover changed before quarantine; preserving it")
                     self.attached(parent, expected)
-                    rename_exclusive(parent, name, quarantine_fd, "payload")
+                    fallback = rename_to_quarantine(parent, name, quarantine_fd)
+                    if fallback:
+                        LOG.warning("CLEANUP NFS compatibility: protected rename flag unsupported; "
+                                    "used atomic rename into private quarantine for download=%r", item["path"])
                     quarantined = identity(os.stat("payload", dir_fd=quarantine_fd, follow_symlinks=False))
                 elif quarantined is not None and original is not None:
                     raise ValueError("source reappeared after quarantine; preserving both objects")

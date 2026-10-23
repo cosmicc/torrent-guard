@@ -22,6 +22,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,12 +30,18 @@ import urllib.request
 from deletion import FileVerifier, metadata_manifest, validate_metadata_manifest, zero_payload
 
 LOG = logging.getLogger("torrent-guard")
-VERSION = "1.2"
+DISPLAY_TIMEZONE = ZoneInfo("America/New_York")
+VERSION = "1.3"
 METADATA_TIMEOUT_SECONDS = 3600
 METADATA_STATES = frozenset({"metaDL", "forcedMetaDL"})
 HEARTBEAT_FILE = Path("/tmp/torrent-guard-heartbeat")
 DEFAULT_VIDEO = frozenset({".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".webm", ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".divx", ".flv"})
 DEFAULT_RISKY = frozenset({".exe", ".scr", ".com", ".bat", ".cmd", ".msi", ".msp", ".msix", ".ps1", ".psm1", ".vbs", ".vbe", ".vb", ".js", ".jse", ".wsf", ".wsh", ".hta", ".lnk", ".pif", ".cpl", ".jar", ".apk", ".appx", ".reg", ".scf", ".sh", ".py"})
+
+
+def display_time(epoch: float) -> str:
+    """Render an instant in Eastern Time with its DST-aware name and UTC offset."""
+    return datetime.fromtimestamp(epoch, DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S %Z%z")
 
 
 def required(name: str) -> str:
@@ -554,7 +561,7 @@ def import_confirmed(torrent: dict, files: list[dict], events: list[dict], now: 
         return False, f"only {len(imported_at)}/{len(wanted)} video files confirmed imported"
     cleanup_after = max(imported_at) + grace_minutes * 60
     if now < cleanup_after:
-        eligible = datetime.fromtimestamp(cleanup_after, timezone.utc).isoformat()
+        eligible = display_time(cleanup_after)
         return False, f"import confirmed for all {len(wanted)} video file(s); cleanup grace until {eligible}"
     return True, f"verified import history for all {len(wanted)} video files"
 
@@ -947,7 +954,13 @@ class Guard:
         self.completed_passed.discard(h)
         if not self.config.dry_run:
             self.store.set_filesystem_retry(h, attempt, now + delay, reason)
-        LOG.warning("DEFER validation %s reason=%s; retry_in=%ds attempt=%d", self.log_context.get(h, "download metadata unavailable"), reason, delay, attempt)
+        # Both independent holds must expire. Report the effective eligibility
+        # time, not an earlier filesystem deadline hidden by cleanup backoff.
+        next_at = max(now + delay, self.cleanup_retries.get(h, (0, 0, ""))[1])
+        retry_at = display_time(next_at)
+        LOG.warning("DEFER validation %s reason=%s; retry_in=%ds attempt=%d retry_at=%s",
+                    self.log_context.get(h, "download metadata unavailable"), reason,
+                    math.ceil(next_at - now), attempt, retry_at)
 
     def _clear_filesystem(self, h: str):
         """Clear retry state after recovery without changing dry-run journals."""
@@ -1063,7 +1076,7 @@ class Guard:
         delay = min(900, 60 * 2 ** min(attempt - 1, 4))
         self.store.set_cleanup_retry(h, attempt, now + delay, message)
         self.cleanup_retries[h] = (attempt, now + delay, message)
-        deadline = datetime.fromtimestamp(now + delay, timezone.utc).isoformat()
+        deadline = display_time(now + delay)
         self._cleanup_status(h, f"{message}; retry_in={delay}s attempt={attempt} retry_at={deadline}", now, logging.WARNING)
 
     def _ownership_paths(self, cache: dict) -> set[tuple[str, str]]:
@@ -1154,7 +1167,7 @@ class Guard:
                 try:
                     self.verifier.remove(manifest, item, lambda updated: self.store.save_manifest(h, updated))
                 except OSError as exc:
-                    raise OSError(exc.errno, str(exc), target) from exc
+                    raise OSError(exc.errno, exc.strerror or str(exc), target) from exc
                 except ValueError as exc:
                     raise ValueError(f"leftover removal failed download={target!r}: {exc}") from exc
                 LOG.warning("LEFTOVER cleanup attempted %s download=%r", self.log_context.get(h), str(PurePosixPath(item["root"]) / item["path"]))
@@ -1164,7 +1177,7 @@ class Guard:
             if not self.config.cleanup_leftovers:
                 blocker = "automatic leftover cleanup disabled (CLEANUP_LEFTOVERS=false); enable compose.cleanup.yaml with the completed-directory write bind"
             elif now - requested_at < self.config.delete_settle_seconds:
-                deadline = datetime.fromtimestamp(requested_at + self.config.delete_settle_seconds, timezone.utc).isoformat()
+                deadline = display_time(requested_at + self.config.delete_settle_seconds)
                 blocker = f"waiting for qBittorrent deletion settle period until {deadline}"
             else:
                 blocker = "automatic cleanup ran but the filesystem still reports saved paths; review LEFTOVER messages and filesystem errors"
@@ -1279,6 +1292,10 @@ class ConsoleFormatter(logging.Formatter):
     def __init__(self, color: bool):
         super().__init__("%(asctime)s %(levelname)s %(name)s %(message)s")
         self.color = color
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        """Keep console and audit timestamps Eastern regardless of the host zone."""
+        return display_time(record.created)
 
     def format(self, record: logging.LogRecord) -> str:
         """Keep labels readable without color and sanitize external control codes."""

@@ -156,3 +156,16 @@ class FilesystemRetentionTests(unittest.TestCase):
         self.assertIn("abc123", self.guard.filesystem_retries)
         self.assertFalse(self.guard.store.filesystem_retries())
         self.assert_retained()
+
+    def test_filesystem_warning_reports_later_cleanup_retry_deadline(self):
+        deadline = self.now + 900
+        self.guard.cleanup_retries["abc123"] = (5, deadline, "pending cleanup")
+        with self.assertLogs("torrent-guard", level="WARNING") as logs:
+            self.guard._defer_filesystem("abc123", "filesystem error", self.now)
+        from guard import display_time
+        expected = display_time(deadline)
+        self.assertIn("retry_in=900s", logs.output[0])
+        self.assertIn("retry_at=" + expected, logs.output[0])
+        # Reporting the effective deadline does not rewrite either hold.
+        self.assertEqual(self.guard.filesystem_retries["abc123"][1], self.now + 30)
+        self.assertEqual(self.guard.cleanup_retries["abc123"][1], deadline)

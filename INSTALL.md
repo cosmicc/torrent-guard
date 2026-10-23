@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v1.2** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
+**v1.3** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
 
 Torrent Guard is a background service that examines new and completed movie/TV torrents and cleans up imported releases. It uses **qBittorrent's Web API** and **Sonarr/Radarr's v3 APIs**; no qBittorrent “Run external program on torrent completion” hook is required.
 
@@ -108,6 +108,15 @@ If automatic leftover cleanup is enabled, retain its override when upgrading:
 ```bash
 docker compose -f compose.yaml -f compose.cleanup.yaml up -d --build --force-recreate
 ```
+
+v1.3 adds guarded NFS quarantine rename compatibility for unsupported
+`RENAME_NOREPLACE` errors (such as EINVAL). It checks that the destination is
+empty, owner-only and owned by Guard before a standard atomic rename, then
+checks the captured file identity before unlink. Other processes running as
+Guard's UID or root must not modify its private quarantine during cleanup.
+No settings or schema migration are needed; retain the existing state journal
+and cleanup override when rebuilding/recreating. See the
+[cleanup guide](docs/deletion-verification.md#nfs-rename-compatibility-v13).
 
 v1.1 requires no schema migration or new settings. It revalidates bad-release
 evidence on pending retries and immediately before deletion; stale rejection
@@ -236,7 +245,8 @@ every `IMPORT_CHECK_SECONDS` while eligible downloads remain. This interval is
 separate from `IMPORT_GRACE_MINUTES`, which delays deletion after the actual
 import time. `WAIT import` reports whether import evidence is missing or partial,
 filenames do not match, or import is confirmed but cleanup grace is still running.
-The grace message gives the earliest cleanup time in UTC. `CHECK import` reports
+The grace message gives the earliest cleanup time in Eastern Time, with EST/EDT
+and its numeric UTC offset. `CHECK import` reports
 the number of completed candidates and hashes with import history on each
 successful scheduled history check. Matching history still needs filename,
 timestamp, and grace validation before cleanup. `ACCEPT completed` only reports
@@ -320,6 +330,15 @@ docker inspect --format '{{json .State.Health}}' torrent-guard
 # Manual read-only check; exit code 0 means fresh, 1 means missing/stale/invalid.
 docker compose exec torrent-guard python /app/guard.py --healthcheck
 ```
+
+New application log headers and all displayed deadlines use `America/New_York`:
+EST (`-0500`) in winter and EDT (`-0400`) during daylight-saving time, for example
+`2026-10-22 23:03:05 EDT-0400`. The daemon formats these explicitly, independently
+of the host timezone; the image also includes `tzdata` and sets `TZ` accordingly.
+The SSH viewer preserves the timezone label and offset. Historical lines keep
+their original timestamps. Internal API/epoch times and elapsed retry/grace
+intervals are unchanged; no journal migration is needed. Rebuild and recreate
+to install timezone data and use the updated viewer.
 
 The bright palette is green for `ACCEPT`/`CLEANED`, bright cyan for routine activity
 and `HEARTBEAT`, yellow for waiting/warnings, red for errors/rejections, and

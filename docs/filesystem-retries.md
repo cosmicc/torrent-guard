@@ -32,7 +32,7 @@ allowing a later metadata decision to bypass the filesystem problem.
 The first unresolved check schedules a retry after 30 seconds. Repeated failures
 use 60, 120, 240, then at most 300 seconds. The daemon continues polling other
 torrents and does not sleep inside a torrent's validation path. The warning
-contains `retry_in` and the attempt number and is emitted only on an attempted
+contains `retry_in`, the attempt number and (since v1.3) Eastern `retry_at` (EST/EDT with numeric offset) and is emitted only on an attempted
 retry, rather than every five-second poll.
 
 SQLite's additive `filesystem_retry` table records the hash, attempt count,
@@ -68,3 +68,10 @@ not itself prove deletion failure or automatically restart the container.
 Tests use temporary files plus injected ESTALE/I/O failures. They verify
 deferral, suppressed destructive calls, restart persistence, backoff deadlines,
 recovery and dry-run behavior. They do not simulate an actual NFS server outage.
+
+The v1.3 retry timestamp reflects the later active filesystem/cleanup deadline;
+both holds must expire before processing resumes. NFS EINVAL during protected
+quarantine rename may indicate an unsupported flag rather than unavailable
+files. See [NFS rename compatibility](deletion-verification.md#nfs-rename-compatibility-v13)
+for the guarded fallback and its concurrency requirements. Other filesystem
+errors continue to retain files.

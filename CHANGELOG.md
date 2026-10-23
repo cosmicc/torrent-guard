@@ -3,6 +3,34 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 1.3 - 10.23.2026
+
+### Added
+
+- Eastern Time log headers and deadlines with automatic EST/EDT changes and
+  explicit UTC offsets, including SSH event viewer support.
+- Guarded NFS-compatible quarantine rename when the filesystem rejects the
+  no-replace rename flag. Require an empty, runtime-user-owned private directory;
+  retain file identity, import/rejection authorization and post-move checks.
+- Eastern `retry_at` in filesystem deferrals, including a later cleanup backoff
+  deadline when one is active.
+
+### Changed
+
+- Install OS timezone data and set the container timezone to America/New_York.
+  Internal epoch timestamps, UTC API parsing and elapsed intervals are unchanged.
+- Keep atomic no-replace rename where supported. Only unsupported-operation
+  errors allow the private-directory fallback; permission and I/O errors retain
+  files. No new settings or database migration; existing journals resume.
+- NFS fallback requires that no other process with the same UID or root modifies
+  Guard's private quarantine while cleanup runs.
+
+### Fixed
+
+- Allow authorized leftover cleanup on NFS implementations returning EINVAL for
+  RENAME_NOREPLACE instead of indefinitely repeating Invalid argument errors.
+- Avoid duplicated errno text when reporting the exact failed cleanup target.
+
 ## 1.2 - 10.22.2026
 
 ### Added
