@@ -3,6 +3,26 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 1.2 - 10.22.2026
+
+### Added
+
+- Compose `GUARD_UID` and `GUARD_GID` settings to match host download ownership.
+- State ownership migration and parent-directory permission troubleshooting.
+
+### Changed
+
+- Run the image and Compose service as UID/GID 1000:1000 by default instead of
+  65534:65534. Custom non-root IDs are supported through Compose `user:`.
+- Existing installations must stop Guard, back up state, update state ownership,
+  then rebuild/recreate with the existing cleanup override. No schema migration.
+
+### Fixed
+
+- Default local cleanup identity now matches downloads owned by UID/GID 1000,
+  allowing access where parent-directory permissions grant that owner deletion.
+  Read-only mounts, cleanup authorization, and library protections are preserved.
+
 ## 1.1 - 10.22.2026
 
 ### Added

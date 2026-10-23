@@ -90,12 +90,16 @@ After validating decisions and permissions with disposable downloads, set
 request deletion, capture/update operation evidence, quarantine, or remove files
 while polling. Schema initialization remains part of application startup.
 
-UID/GID 65534 must have the directory permissions needed to rename a recorded
+The configured `GUARD_UID`/`GUARD_GID` (default `1000:1000` since v1.2) must have the directory permissions needed to rename a recorded
 file, create a private quarantine directory beside it, and unlink the quarantined
 file. Grant access only to intended download directories using appropriate group
 permissions or ACLs. Do not use root, a Docker socket, extra capabilities, a
 writable root filesystem, or world-writable download permissions as a shortcut.
-Permission failures are reported and remain pending.
+Permission failures are reported and remain pending. See the
+[container identity and state migration](../INSTALL.md#container-user-and-permissions)
+before changing users. Parent-directory write/execute access is required even
+when files are owned by that UID. qBittorrent API deletions use qBittorrent's own
+identity and mount permissions.
 
 ## Local cleanup rules
 

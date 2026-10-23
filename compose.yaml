@@ -3,7 +3,9 @@ services:
   torrent-guard:
     build:
       context: .
-    image: torrent-guard:1.1
+    image: torrent-guard:1.2
+    # Match the host download owner's numeric IDs; remain non-root.
+    user: "${GUARD_UID:-1000}:${GUARD_GID:-1000}"
     container_name: torrent-guard
     restart: unless-stopped
     init: true
@@ -14,7 +16,8 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       # Persistent SQLite cleanup journal and rotating logs on the Docker host.
-      # Before first startup: sudo install -d -o 65534 -g 65534 -m 750 /config/torrent-guard
+      # Before first startup: sudo install -d -o 1000 -g 1000 -m 750 /config/torrent-guard
+      # Use GUARD_UID/GUARD_GID instead if customized; see INSTALL.md for migration.
       - /config/torrent-guard:/state
       # Read-only, for ffprobe video verification. No deletion via this mount.
       # Mount PARENT containing both complete/ and incomplete/.
