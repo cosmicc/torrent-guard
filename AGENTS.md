@@ -33,7 +33,7 @@ There is no web service, exposed port, qBittorrent completion hook, Docker socke
 - deletion.py — saved file manifests, independent absence checks, and guarded completed-download quarantine/unlink operations.
 - tests/test_deletion.py — actual temporary-file and SQLite tests for verification, leftover removal, library protection and restart/race handling.
 - tests/test_nfs.py — stale-handle deferral, bounded backoff, persistent access holds and completion-independent retention.
-- Dockerfile — Alpine Python 3.12, ffmpeg/ffprobe, non-root UID/GID 65534.
+- Dockerfile — Alpine Python 3.12, ffmpeg/ffprobe, non-root UID/GID 1000:1000.
 - compose.yaml — container with read-only root, no Linux capabilities, no new privileges, temporary /tmp, persistent /state and read-only /downloads.
 - compose.cleanup.yaml — explicit opt-in writable completed-download bind; never mount the download parent or library writable.
 - .env.example — nonsecret examples; real .env MUST stay untracked.
@@ -143,9 +143,12 @@ The current compose.yaml maps:
     /config/torrent-guard:/state
     host download root:/downloads:ro
 
-The host /config/torrent-guard tree stores the SQLite journal and rotating audit logs: /state/torrent-guard.sqlite3, /state/torrent-guard.log and rotated backups. The container is UID/GID 65534:65534; its /state directory must permit file creation, renaming and writing. Example host setup:
+The host /config/torrent-guard tree stores the SQLite journal and rotating audit logs: /state/torrent-guard.sqlite3, /state/torrent-guard.log and rotated backups. The image defaults to UID/GID 1000:1000; Compose uses `GUARD_UID`/`GUARD_GID`
+(default 1000 each) via `user:`. Use non-root numeric IDs matching download
+ownership. Python does not switch users or perform privileged ownership changes.
+Its /state directory must permit file creation, renaming and writing. Example host setup:
 
-    sudo install -d -o 65534 -g 65534 -m 750 /config/torrent-guard
+    sudo install -d -o 1000 -g 1000 -m 750 /config/torrent-guard
 
 Permissions on individual log files alone are insufficient: log rotation and SQLite need write permission on the directory. Check ownership, ACLs, volume RW flag, NFS UID mapping, SELinux and filesystem mount options before reducing security. Never use world-writable state directories as the normal fix.
 
@@ -163,6 +166,12 @@ pending. Preserve deletion_evidence/deletion_audit tables during upgrades.
 Keep .env (qBittorrent password, Arr keys), state DB and logs outside version control. Logs contain download titles and paths; do not copy API keys into AGENTS, tests or issue templates. Retain restricted container privileges. Do not require Docker socket or root. Do not delete /state, use docker compose down -v, or auto-reinitialize existing journals during upgrades. When migrating a named Docker volume to a bind mount, data is not copied automatically.
 
 ## Configuration and operational controls
+
+Compose-only identity controls: `GUARD_UID`, `GUARD_GID` (default `1000`).
+Changing these requires container recreation and host state ownership migration
+while stopped; see INSTALL.md. Keep the image non-root, mounts restricted and
+existing journals intact. qBittorrent API deletion uses qBittorrent's own process
+identity, not Guard's identity.
 
 Key variables: QBIT_URL/USERNAME/PASSWORD, SONARR_URL/API_KEY/CATEGORY/TAG, RADARR_URL/API_KEY/CATEGORY/TAG, DOWNLOADS_HOST_PATH, QBIT_DOWNLOAD_ROOT, GUARD_DOWNLOAD_ROOT, QBIT_COMPLETE_DIR, QBIT_INCOMPLETE_DIR, VERIFY_VIDEO_CONTENT, COMPLETED_SETTLE_SECONDS, FFPROBE_TIMEOUT_SECONDS, POLL_SECONDS, MAX_AGE_HOURS, REJECT_NO_VIDEO, IMPORT_GRACE_MINUTES, IMPORT_CHECK_SECONDS, HISTORY_LOOKBACK_DAYS, DRY_RUN, STATE_DB, LOG_FILE, LOG_LEVEL, LOG_MAX_BYTES, LOG_BACKUP_COUNT, LOG_COLOR and HEALTHCHECK_MAX_AGE_SECONDS.
 

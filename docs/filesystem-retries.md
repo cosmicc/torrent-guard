@@ -53,7 +53,8 @@ startup, consistent with the existing journal initialization workflow.
 ## Operator checks
 
 Inspect `DEFER validation` and the associated download name, paths and reason. Check the NFS server,
-mount availability, host/container mappings, and UID 65534 access. Diagnose the
+mount availability, host/container mappings, and access for the configured
+runtime UID (default 1000). Diagnose the
 storage failure instead of making downloads writable or bypassing import checks.
 When access returns, the next scheduled retry logs recovery and resumes ordinary
 classification/import verification. Normal import grace and ownership rules

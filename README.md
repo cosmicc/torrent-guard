@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v1.1** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v1.2** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -23,6 +23,11 @@ grace interval has elapsed (10 minutes by default).
   operation changes during polling.
 
 ## Getting started
+
+Guard defaults to UID/GID `1000:1000` to match host download ownership. Set
+`GUARD_UID`/`GUARD_GID` in `.env` for other non-root IDs. Upgrading from 1.1
+requires migrating existing state ownership while stopped; see
+[permissions and migration](INSTALL.md#container-user-and-permissions).
 
 1. Follow [installation and configuration](INSTALL.md) to create `.env`, prepare
    the persistent state directory, and map both download directories read-only.

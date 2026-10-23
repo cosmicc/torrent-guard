@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v1.1** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
+**v1.2** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
 
 Torrent Guard is a background service that examines new and completed movie/TV torrents and cleans up imported releases. It uses **qBittorrent's Web API** and **Sonarr/Radarr's v3 APIs**; no qBittorrent “Run external program on torrent completion” hook is required.
 
@@ -54,7 +54,7 @@ Set the qBittorrent host/credentials and each *Arr API URL/key/category. Common 
 | `QBIT_DOWNLOAD_ROOT` | `/downloads` | The **same** root as seen **inside qBittorrent** (or on host if not containerized) |
 | `GUARD_DOWNLOAD_ROOT` | `/downloads` | Path **inside Torrent Guard**, provided by the Compose mount |
 
-If qBittorrent sees `/data/torrents` while the host sees `/srv/media/downloads`, use `QBIT_DOWNLOAD_ROOT=/data/torrents` and `DOWNLOADS_HOST_PATH=/srv/media/downloads`. The file paths are mapped relatively; e.g. qBittorrent save path `/data/torrents/complete/movies` with file `Film.mkv` maps to Guard `/downloads/complete/movies/Film.mkv`. Set `QBIT_COMPLETE_DIR=/data/torrents/complete` and `QBIT_INCOMPLETE_DIR=/data/torrents/incomplete` when the qBittorrent root differs. The container runs as UID/GID 65534; this user must be able to traverse directories and **read** the video files. **No write permission** is necessary.
+If qBittorrent sees `/data/torrents` while the host sees `/srv/media/downloads`, use `QBIT_DOWNLOAD_ROOT=/data/torrents` and `DOWNLOADS_HOST_PATH=/srv/media/downloads`. The file paths are mapped relatively; e.g. qBittorrent save path `/data/torrents/complete/movies` with file `Film.mkv` maps to Guard `/downloads/complete/movies/Film.mkv`. Set `QBIT_COMPLETE_DIR=/data/torrents/complete` and `QBIT_INCOMPLETE_DIR=/data/torrents/incomplete` when the qBittorrent root differs. The container defaults to UID/GID `1000:1000`, configurable with `GUARD_UID` and `GUARD_GID`. This user must be able to traverse directories and **read** the video files. Local write permission is needed only for the explicit completed-download cleanup override.
 
 By default Compose **requires** `DOWNLOADS_HOST_PATH`: if omitted, it refuses deployment rather than running incomplete verification. Read-only bind mounting the location does not grant Torrent Guard the ability to delete local media; deletion is carried out by the qBittorrent API.
 
@@ -63,8 +63,12 @@ writable for SQLite and log rotation; changing log-file permissions alone is
 insufficient:
 
 ```bash
-sudo install -d -o 65534 -g 65534 -m 750 /config/torrent-guard
+sudo install -d -o 1000 -g 1000 -m 750 /config/torrent-guard
 ```
+
+Use your configured numeric IDs in this command if different. Existing
+installations must follow the [ownership migration](#container-user-and-permissions)
+before starting with the new runtime user.
 
 Start in report-only mode:
 
@@ -138,14 +142,63 @@ Compose uses the host bind mount `/config/torrent-guard:/state`. If upgrading
 from an older `torrent-guard-state` named volume, stop the guard first, back up
 the volume, and copy its entire contents (including SQLite sidecar files and
 logs) into the host directory while the guard is stopped. Set ownership to
-65534:65534 and verify the journal is present before starting again. Changing
+1000:1000 and verify the journal is present before starting again. Changing
 the mount does **not** copy existing data automatically. Do **not** run
 `docker compose down -v` or erase `/state`: it contains the retry journal and audit log.
+
+## Container user and permissions
+
+v1.2 changes the image and Compose default from UID/GID `65534:65534` to
+`1000:1000`. Compose reads `GUARD_UID` and `GUARD_GID` from the project `.env`;
+these are Docker runtime settings, not Python settings. Set both to the host
+numeric owner/group (`stat -c '%u:%g %a %n' /mnt/downloads/complete`). Use non-root
+IDs. No automatic chown, privilege escalation or download permission changes occur.
+
+Before upgrading an existing installation, stop Guard, back up its state, and
+change ownership of the state directory and its existing contents. For `1000:1000`:
+
+```bash
+docker compose stop torrent-guard
+sudo cp -a /config/torrent-guard "/config/torrent-guard.backup-$(date +%Y%m%d-%H%M%S)"
+sudo chown -R 1000:1000 /config/torrent-guard
+sudo chmod 750 /config/torrent-guard
+```
+
+Merge these into the existing `.env`, keeping credentials and other settings:
+
+```dotenv
+GUARD_UID=1000
+GUARD_GID=1000
+```
+
+Rebuild and recreate, retaining the cleanup override if already enabled:
+
+```bash
+docker compose -f compose.yaml -f compose.cleanup.yaml up -d --build --force-recreate
+docker compose exec torrent-guard id
+```
+
+For installations using read-only verification only, omit `-f compose.yaml -f
+compose.cleanup.yaml`. For custom IDs, substitute them in the ownership commands.
+To temporarily retain the pre-v1.2 identity, set both IDs to `65534` and keep the
+state ownership consistent. Never delete the journal to resolve permissions.
+
+Local deletion requires write and execute access to the **parent directories**,
+not just ownership of a file. It also requires the explicit writable completed-root
+bind in `compose.cleanup.yaml`; `/downloads` remains read-only. Check directory
+ownership/modes, ACLs, NFS identity mapping and SELinux if access is still denied.
+Do not recursively change download/library ownership or use world-writable modes.
+
+Deletes performed through the qBittorrent API run under qBittorrent's own user.
+Changing Guard's UID cannot fix qBittorrent's permission errors; its service user
+and writable download mount must also permit deleting the tracked downloads.
+Guard retains failed operations and retries from its existing journal.
 
 ## Configuration
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `GUARD_UID`, `GUARD_GID` | `1000`, `1000` | Compose-only numeric non-root runtime IDs; match download ownership and migrate state permissions before changing |
 | `QBIT_URL`, `QBIT_USERNAME`, `QBIT_PASSWORD` | required | qBittorrent WebUI API endpoint and login |
 | `SONARR_URL`, `SONARR_API_KEY`, `SONARR_CATEGORY` | optional group | Sonarr connection and exact qBittorrent category |
 | `RADARR_URL`, `RADARR_API_KEY`, `RADARR_CATEGORY` | optional group | Radarr connection and exact qBittorrent category |
@@ -345,7 +398,7 @@ change or daemon restart does not permit deletion while access is unresolved.
 See [filesystem recovery](docs/filesystem-retries.md). No new settings are needed.
 
 - **State/log permission errors:** verify ownership and directory write permission
-  for UID/GID 65534, the bind mount's writable flag, ACLs, SELinux, and NFS UID
+  for the configured UID/GID (default 1000:1000), the bind mount's writable flag, ACLs, SELinux, and NFS UID
   mapping. Do not use a world-writable state directory as the fix.
 - **Arr HTTP 400 “Invalid Hostname”:** check that the URL, port, URL base, and
   hostname reach the actual Arr service from inside the guard container. Check

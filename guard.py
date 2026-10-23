@@ -29,7 +29,7 @@ import urllib.request
 from deletion import FileVerifier, metadata_manifest, validate_metadata_manifest, zero_payload
 
 LOG = logging.getLogger("torrent-guard")
-VERSION = "1.1"
+VERSION = "1.2"
 METADATA_TIMEOUT_SECONDS = 3600
 METADATA_STATES = frozenset({"metaDL", "forcedMetaDL"})
 HEARTBEAT_FILE = Path("/tmp/torrent-guard-heartbeat")
