@@ -5,9 +5,41 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 
-from guard import ConsoleFormatter, LOG, healthcheck, main, setup_logging, write_heartbeat
+from guard import ConsoleFormatter, LOG, display_time, healthcheck, import_confirmed, main, setup_logging, write_heartbeat
+
+
+class EasternTimeTests(unittest.TestCase):
+    """Display Eastern offsets accurately without changing elapsed-time safety."""
+
+    def test_standard_daylight_and_repeated_fall_hour(self):
+        cases = [
+            ("2026-01-15T12:00:00+00:00", "2026-01-15 07:00:00 EST-0500"),
+            ("2026-07-15T12:00:00+00:00", "2026-07-15 08:00:00 EDT-0400"),
+            ("2026-11-01T05:30:00+00:00", "2026-11-01 01:30:00 EDT-0400"),
+            ("2026-11-01T06:30:00+00:00", "2026-11-01 01:30:00 EST-0500"),
+            ("2026-03-08T06:59:59+00:00", "2026-03-08 01:59:59 EST-0500"),
+            ("2026-03-08T07:00:00+00:00", "2026-03-08 03:00:00 EDT-0400"),
+        ]
+        for stamp, expected in cases:
+            with self.subTest(stamp=stamp):
+                epoch = datetime.fromisoformat(stamp).timestamp()
+                self.assertEqual(display_time(epoch), expected)
+                record = logging.LogRecord("torrent-guard", logging.INFO, "", 0, "STATUS pending_deletion=0", (), None)
+                record.created = epoch
+                self.assertTrue(ConsoleFormatter(False).format(record).startswith(expected + " INFO"))
+
+    def test_import_grace_spans_dst_without_early_authorization(self):
+        imported = datetime(2026, 11, 1, 5, 55, tzinfo=timezone.utc).timestamp()
+        torrent = {"added_on": imported - 3600}
+        files = [{"name": "Movie.mkv"}]
+        events = [{"date": "2026-11-01T05:55:00Z", "data": {}}]
+        confirmed, reason = import_confirmed(torrent, files, events, imported + 599, 10)
+        self.assertFalse(confirmed)
+        self.assertIn("2026-11-01 01:05:00 EST-0500", reason)
+        self.assertTrue(import_confirmed(torrent, files, events, imported + 600, 10)[0])
 
 
 class ColorLoggingTests(unittest.TestCase):

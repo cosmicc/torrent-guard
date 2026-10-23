@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v1.2** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v1.3** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -90,6 +90,10 @@ evidence or a confirmed import still within its cleanup grace period.
 
 Download logs identify names and paths. Cleanup failures retry automatically
 with increasing delays up to 15 minutes, preserved across restarts. Ownership
+Log timestamps and deadlines use Eastern Time with automatic EST/EDT changes
+and explicit offsets. Filesystem warnings include Eastern `retry_at`; cleanup and filesystem holds must
+both expire before retrying. NFS cleanup supports a guarded private-quarantine
+rename when the filesystem rejects the no-replace flag. Ownership
 warnings identify the live torrent whose missing metadata blocks removal;
 see [cleanup troubleshooting](docs/deletion-verification.md#cleanup-retries-and-missing-metadata).
 Zero-data queued or metadata downloads can wait without directories or file

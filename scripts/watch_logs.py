@@ -13,7 +13,7 @@ import time
 import unicodedata
 
 RECORD = re.compile(
-    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:,\d+)? "
+    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?: (?:EST|EDT)[+-]\d{4})?)(?:,\d+)? "
     r"(DEBUG|INFO|WARNING|ERROR|CRITICAL) torrent-guard (.*)$"
 )
 # Only quoted repr strings emitted by download_context are extracted. Never eval logs.
