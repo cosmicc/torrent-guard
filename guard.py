@@ -31,7 +31,7 @@ from deletion import FileVerifier, metadata_manifest, validate_metadata_manifest
 
 LOG = logging.getLogger("torrent-guard")
 DISPLAY_TIMEZONE = ZoneInfo("America/New_York")
-VERSION = "1.3"
+VERSION = "1.4"
 METADATA_TIMEOUT_SECONDS = 3600
 METADATA_STATES = frozenset({"metaDL", "forcedMetaDL"})
 HEARTBEAT_FILE = Path("/tmp/torrent-guard-heartbeat")
@@ -98,7 +98,7 @@ class Config:
     guard_download_root: str = "/downloads"
     qbit_complete_dir: str = ""  # blank only for legacy/test configurations
     qbit_incomplete_dir: str = ""  # API may show a temporary content_path here
-    import_grace_minutes: int = 10
+    import_grace_minutes: int = 15
     import_check_seconds: int = 60
     history_lookback_days: int = 30
     completed_settle_seconds: int = 60
@@ -128,7 +128,7 @@ class Config:
             raise ValueError("Configure Sonarr and/or Radarr")
         poll = int(os.getenv("POLL_SECONDS", "5"))
         age = float(os.getenv("MAX_AGE_HOURS", "24"))
-        grace = int(os.getenv("IMPORT_GRACE_MINUTES", "10"))
+        grace = int(os.getenv("IMPORT_GRACE_MINUTES", "15"))
         check = int(os.getenv("IMPORT_CHECK_SECONDS", "60"))
         history = int(os.getenv("HISTORY_LOOKBACK_DAYS", "30"))
         settle = int(os.getenv("COMPLETED_SETTLE_SECONDS", "60"))
@@ -1135,7 +1135,10 @@ class Guard:
             LOG.info("CLEANED [%s] %s zero-payload metadata torrent absent; no filesystem targets were inferred", app, self.log_context.get(h))
             return True
         remaining = self.verifier.remaining(manifest)
-        if remaining and now - requested_at >= self.config.delete_settle_seconds and self.config.cleanup_leftovers:
+        # Read-only incomplete leftovers must stay pending, but must not prevent
+        # authorized completed files in the same manifest from being cleaned.
+        removable = [item for item in remaining if item["root"] == self.config.qbit_complete_dir]
+        if removable and now - requested_at >= self.config.delete_settle_seconds and self.config.cleanup_leftovers:
             # Refresh remote state before local cleanup, including unrelated torrents.
             ownership_cache = {} if ownership_cache is None else ownership_cache
             owned_paths = self._ownership_paths(ownership_cache)
@@ -1162,7 +1165,7 @@ class Guard:
             if owned_paths & wanted:
                 overlap = sorted(owned_paths & wanted)
                 raise ValueError(f"another torrent owns recorded download path {str(PurePosixPath(*overlap[0]))!r}")
-            for item in remaining:
+            for item in removable:
                 target = str(PurePosixPath(item["root"]) / item["path"])
                 try:
                     self.verifier.remove(manifest, item, lambda updated: self.store.save_manifest(h, updated))
@@ -1179,6 +1182,10 @@ class Guard:
             elif now - requested_at < self.config.delete_settle_seconds:
                 deadline = display_time(requested_at + self.config.delete_settle_seconds)
                 blocker = f"waiting for qBittorrent deletion settle period until {deadline}"
+            elif all(item["root"] != self.config.qbit_complete_dir for item in remaining):
+                blocker = ("manual recovery required: remaining files are outside the writable completed-download root; "
+                           "check qBittorrent deletion permissions and remove only the recorded rejected/imported "
+                           "download paths after verifying ownership; Guard will verify absence automatically")
             else:
                 blocker = "automatic cleanup ran but the filesystem still reports saved paths; review LEFTOVER messages and filesystem errors"
             self._cleanup_status(h, f"{len(remaining)} recorded file(s) remain: {paths}; {blocker}", now)

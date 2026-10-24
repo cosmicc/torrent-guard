@@ -102,6 +102,19 @@ class DeletionTests(unittest.TestCase):
         self.assertFalse(self.guard.store.entries())
         self.arr.blocklist_and_remove.assert_not_called()
 
+    def test_local_leftovers_require_full_grace_from_current_import_history(self):
+        """A saved delete request cannot bypass refreshed import grace."""
+        self.request()
+        self.event["date"] = datetime.fromtimestamp(self.now, timezone.utc).isoformat()
+        with self.assertRaisesRegex(ValueError, "cleanup grace"):
+            self.guard._verify_deletion("abc123", "RADARR", "imported", self.now + 899)
+        self.assertTrue(self.path.is_file())
+        self.assertTrue(self.sidecar.is_file())
+        self.guard._verify_deletion("abc123", "RADARR", "imported", self.now + 900)
+        self.assertFalse(self.path.exists())
+        self.assertFalse(self.sidecar.exists())
+        self.arr.blocklist_and_remove.assert_not_called()
+
     def test_imported_copy_and_hardlink_survive_local_cleanup(self):
         hardlink = self.library / "Movie.mkv"
         hardlink.hardlink_to(self.path)
@@ -112,6 +125,75 @@ class DeletionTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
         self.assertEqual(hardlink.read_bytes(), b"real test payload")
         self.assertEqual(copied.read_bytes(), b"real test payload")
+
+    def test_incomplete_leftover_does_not_block_authorized_completed_cleanup(self):
+        self.torrent["download_path"] = "/downloads/incomplete"
+        leftover = self.incomplete / "Movie.mkv.!qB"
+        leftover.write_bytes(b"recorded incomplete payload")
+        self.request()
+        with self.assertLogs("torrent-guard", level="WARNING") as logs:
+            self.guard.poll(now=self.now + 120)
+        self.assertFalse(self.path.exists())
+        self.assertFalse(self.sidecar.exists())
+        self.assertEqual(leftover.read_bytes(), b"recorded incomplete payload")
+        self.assertTrue(self.guard.store.entries())
+        self.assertFalse(self.guard.cleanup_retries)
+        self.assertTrue(any("manual recovery required" in line for line in logs.output))
+        self.assertEqual(self.guard.store.db.execute("SELECT count(*) FROM deletion_audit").fetchone()[0], 0)
+        self.arr.imported_history.reset_mock()
+        with patch.object(self.guard.verifier, "remove") as remove:
+            self.guard.poll(now=self.now + 180)
+        remove.assert_not_called()
+        self.arr.imported_history.assert_not_called()
+        leftover.unlink()  # Simulate the operator resolving the recorded path.
+        self.guard.poll(now=self.now + 185)
+        self.assertFalse(self.guard.store.entries())
+
+    def test_old_nfs_failure_retries_from_saved_quarantine_after_restart(self):
+        """An old EINVAL hold resumes safely with the current NFS fallback."""
+        self.request()
+        with patch("deletion.rename_to_quarantine", side_effect=OSError(errno.EINVAL, "Invalid argument")):
+            self.guard.poll(now=self.now + 120)
+        manifest = self.guard.store.evidence("abc123")[0]
+        captured = next(item for item in manifest["items"] if item.get("quarantine"))
+        self.assertTrue((self.completed / captured["quarantine"]).is_dir())
+        self.assertTrue(self.path.exists())
+        self.guard.store.db.close()
+        self.guard = Guard(self.cfg, self.qbit, {"RADARR": self.arr})
+        with patch("deletion.rename_exclusive", side_effect=OSError(errno.EINVAL, "unsupported flag")):
+            self.guard.poll(now=self.now + 149)
+            self.assertTrue(self.path.exists())
+            self.guard.poll(now=self.now + 150)
+        self.assertFalse(self.path.exists())
+        self.assertFalse(self.sidecar.exists())
+        self.assertFalse(self.guard.store.entries())
+
+    def test_rejected_incomplete_leftovers_wait_for_manual_recovery(self):
+        """Keep bad-release rejection, without attempting a read-only unlink."""
+        leftover = self.incomplete / "Fake.exe.!qB"
+        leftover.write_bytes(b"bad download")
+        self.files[:] = [{"name": "Fake.exe", "size": 12, "priority": 1}]
+        self.torrent.update(save_path="/downloads/incomplete",
+                            content_path="/downloads/incomplete/Fake.exe",
+                            completion_on=0, progress=0.5, amount_left=12, state="downloading")
+        self.arr.queue_by_hash.return_value = {"abc123": 42}
+        self.request()
+        self.arr.blocklist_and_remove.assert_called_once_with(42)
+        self.arr.reset_mock()
+        self.qbit.reset_mock()
+        with patch.object(self.guard.verifier, "remove") as remove, self.assertLogs("torrent-guard", level="WARNING") as logs:
+            self.guard.poll(now=self.now + 120)
+        remove.assert_not_called()
+        self.arr.imported_history.assert_not_called()
+        self.arr.blocklist_and_remove.assert_not_called()
+        self.qbit.delete_with_data.assert_not_called()
+        self.assertTrue(any("manual recovery required" in line for line in logs.output))
+        self.assertFalse(self.guard.cleanup_retries)
+        self.assertTrue(self.guard.store.entries())
+        self.assertEqual(leftover.read_bytes(), b"bad download")
+        leftover.unlink()
+        self.guard.poll(now=self.now + 125)
+        self.assertFalse(self.guard.store.entries())
 
     def test_disabled_local_cleanup_keeps_evidence_and_files(self):
         self.guard.config = replace(self.cfg, cleanup_leftovers=False)

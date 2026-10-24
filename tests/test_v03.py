@@ -156,6 +156,7 @@ class EnvPathTests(unittest.TestCase):
             c = Config.from_env()
         self.assertEqual(c.qbit_complete_dir, "/downloads/complete")
         self.assertEqual(c.qbit_incomplete_dir, "/downloads/incomplete")
+        self.assertEqual(c.import_grace_minutes, 15)
 
     def test_custom_qbit_root_and_dirs(self):
         vars = {**self.valid_env(), "QBIT_DOWNLOAD_ROOT": "/data", "QBIT_COMPLETE_DIR": "/data/finished", "QBIT_INCOMPLETE_DIR": "/data/partial"}

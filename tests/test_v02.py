@@ -55,7 +55,7 @@ class CompletionTests(unittest.TestCase):
         self.assertIsNone(torrent_app({**self.torrent, "category": "tv-sonarr"}, cfg))
         self.assertIsNone(torrent_app({**self.torrent, "tags": "movies,tv"}, cfg))
 
-    def test_successfully_imported_after_ten_minutes_is_cleaned(self):
+    def test_successfully_imported_after_fifteen_minutes_is_cleaned(self):
         self.guard.poll(now=NOW)
         self.arr.blocklist_and_remove.assert_not_called()
         self.qbit.delete_with_data.assert_called_once_with("abcde1")
@@ -65,8 +65,8 @@ class CompletionTests(unittest.TestCase):
         self.guard.poll(now=NOW + 5)
         self.assertEqual(self.guard.store.entries(), [])
 
-    def test_import_age_below_ten_min_does_not_cleanup(self):
-        self.event["date"] = when(NOW-599)
+    def test_import_age_below_fifteen_min_does_not_cleanup(self):
+        self.event["date"] = when(NOW-899)
         self.guard.poll(now=NOW)
         self.qbit.delete_with_data.assert_not_called()
         self.assertEqual(self.guard.store.entries(), [])
@@ -77,7 +77,7 @@ class CompletionTests(unittest.TestCase):
             self.guard.poll(now=NOW)
         self.assertTrue(any("import confirmed" in line and "cleanup grace until" in line for line in logs.output))
         self.qbit.delete_with_data.assert_not_called()
-        self.guard.poll(now=NOW + 500)
+        self.guard.poll(now=NOW + 800)
         self.qbit.delete_with_data.assert_called_once_with("abcde1")
 
     def test_numeric_import_history_authorizes_cleanup_end_to_end(self):
