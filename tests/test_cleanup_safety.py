@@ -91,6 +91,26 @@ class CleanupSafetyTests(unittest.TestCase):
         self.guard.poll(now=self.now)
         self.assert_preserved()
 
+    def test_pending_imports_wait_full_fifteen_minutes_in_every_phase(self):
+        """Neither a legacy phase nor an owning Arr choice bypasses grace."""
+        for app in ("RADARR", "SONARR"):
+            for phase in ("match", "arr", "delete", "verify"):
+                with self.subTest(app=app, phase=phase):
+                    self.guard.config = replace(self.config, categories={"radarr": app})
+                    self.guard.arr_clients = {app: self.arr}
+                    self.guard.store.add("abc123", app, "Movie", "import confirmed", kind="imported")
+                    self.guard.store.set_phase("abc123", phase, 42)
+                    self.event["date"] = datetime.fromtimestamp(self.now - 899, timezone.utc).isoformat()
+                    self.qbit.reset_mock()
+                    self.arr.reset_mock()
+                    self.guard._process_pending({"abc123": self.torrent}, self.now)
+                    self.assert_preserved()
+                    self.guard._process_pending({"abc123": self.torrent}, self.now + 1)
+                    self.qbit.delete_with_data.assert_called_once_with("abc123")
+                    self.arr.blocklist_and_remove.assert_not_called()
+                    self.guard.store.remove("abc123")
+                    self.guard.cleanup_retries.clear()
+
     def test_retry_history_outage_preserves_data(self):
         self.schedule()
         self.arr.imported_history.side_effect = ApiError("unavailable", 503)
@@ -228,7 +248,7 @@ class CleanupSafetyTests(unittest.TestCase):
         self.arr.imported_history.return_value = {"abc123": [self.event]}
         self.guard.poll(now=self.now + 60)
         self.assertEqual(self.guard.import_grace_waits, {"abc123"})
-        self.guard.poll(now=self.now + 700)
+        self.guard.poll(now=self.now + 900)
         self.assertFalse(self.guard.import_candidates)
         self.assertFalse(self.guard.import_grace_waits)
         self.qbit.delete_with_data.assert_called_once_with("abc123")

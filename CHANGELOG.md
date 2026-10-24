@@ -3,6 +3,30 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 1.4 - 10.23.2026
+
+### Added
+
+- Fifteen-minute boundary coverage for Sonarr/Radarr pending deletion phases
+  and real-file leftover removal using refreshed import history.
+
+### Changed
+
+- Default successful-import retention to 15 minutes after every selected video
+  has confirmed Arr import history. Existing explicit environment values remain
+  effective; set `IMPORT_GRACE_MINUTES=15` and recreate to adopt this interval.
+- Keep bad-release blocklisting/removal separate from successful-import cleanup.
+
+### Fixed
+
+- Align example configuration and operator instructions with the requested
+  15-minute post-import delay. No journal migration is required.
+- Clean eligible completed files even when the same record contains incomplete
+  leftovers. Keep restricted leftovers pending with actionable manual recovery
+  instead of repeatedly attempting forbidden local removal.
+- Verify restart recovery from an older NFS EINVAL failure and saved quarantine
+  using the existing v1.3 compatibility fallback and persisted retry holds.
+
 ## 1.3 - 10.23.2026
 
 ### Added

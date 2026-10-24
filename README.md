@@ -2,13 +2,13 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v1.3** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v1.4** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
 checks completed videos with ffprobe, and cleans up tracked download files
 after Arr confirms that every selected video was imported and the import
-grace interval has elapsed (10 minutes by default).
+grace interval has elapsed (15 minutes by default).
 
 - Bad releases are stopped and blocklisted through their owning Arr instance
   before qBittorrent is asked to delete their tracked data.
@@ -98,6 +98,8 @@ warnings identify the live torrent whose missing metadata blocks removal;
 see [cleanup troubleshooting](docs/deletion-verification.md#cleanup-retries-and-missing-metadata).
 Zero-data queued or metadata downloads can wait without directories or file
 metadata and do not block unrelated cleanup; known overlapping paths stay protected.
+Incomplete-directory leftovers remain pending for manual recovery while eligible
+completed files can be cleaned. See [recovery steps](INSTALL.md#leftovers-in-the-incomplete-directory).
 
 The Docker healthcheck reports unhealthy when no poll has finished for 300
 seconds, with startup grace and retries. Increase `HEALTHCHECK_MAX_AGE_SECONDS`

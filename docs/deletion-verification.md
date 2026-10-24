@@ -111,7 +111,8 @@ reset on polling or restart.
 After this delay, local removal requires all of the following:
 
 - Explicit opt-in and a matching writable completed-root bind.
-- Current matching Arr import evidence and elapsed grace for imported cleanup;
+- Current matching Arr import evidence and elapsed grace for imported cleanup
+  (15 minutes by default, measured from the last selected video import);
   successful imports are never blocklisted. Rejections must already have passed
   the existing Arr blocklist phase.
 - A fresh qBittorrent inventory with no same-hash reappearance and no other
@@ -125,6 +126,14 @@ Automatic removal is limited to the completed root. Incomplete leftovers are
 verified and reported but require qBittorrent or manual remediation; the app is
 not given writable incomplete-directory access. Newly appearing files, replaced
 files, and changed payloads are retained for review.
+
+When both roots contain leftovers, eligible completed files are cleaned while
+incomplete files remain pending. Read-only leftovers do not abort the completed
+cleanup or trigger repeated forbidden local-removal attempts. Their diagnostic
+states `manual recovery required`; it is not proof of a transient API failure.
+Guard keeps the saved evidence and verifies all paths again on later polls.
+After the operator resolves the incomplete files, ordinary absence verification
+can finish the record without deleting journal rows.
 
 The file is moved with Linux `renameat2(RENAME_NOREPLACE)` into a private
 `.torrent-guard-<random>` directory beside it. The destination is checkpointed

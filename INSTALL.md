@@ -10,7 +10,7 @@ Torrent Guard is a background service that examines new and completed movie/TV t
 
 1. **On metadata arrival:** Inspect every selected file in fresh torrents. Reject dangerous extensions (`.exe`, `.scr`, `.bat`, `.ps1`, `.js`, `.lnk`, etc.), even when another file looks like a video; reject releases that lack a video file (configurable). A rejected torrent is stopped, its release is blocklisted using the matching Arr queue item, then qBittorrent is instructed to **delete the torrent and all qBittorrent-tracked payloads** with `deleteFiles=true`.
 2. **When complete:** Reinspect eligible movie/TV torrents **regardless of their initial age**. Validate downloaded videos using `ffprobe` against the actual media files via a read-only Docker bind mount. Invalid videos are handled as bad releases (stop, blocklist, remove and delete torrent data). Valid releases are left alone until Arr confirms import.
-3. **After successful Arr import + 10 minutes:** Require a matching Sonarr/Radarr `downloadFolderImported` history event for the **same infohash**, dated after this torrent was added and at least 10 minutes ago. For multi-video downloads, require a matching import record for every selected video file. Then instruct qBittorrent to delete the torrent and its tracked downloaded files (but **never** blocklist a successful release).
+3. **After successful Arr import + 15 minutes:** Require a matching Sonarr/Radarr `downloadFolderImported` history event for the **same infohash**, dated after this torrent was added and at least 15 minutes ago by default. For multi-video downloads, require a matching import record for every selected video file. Then instruct qBittorrent to delete the torrent and its tracked downloaded files (but **never** blocklist a successful release).
 4. **Audit every decision:** Timestamped accepted/rejected/cleanup messages, warnings and errors go to both Docker logs and `/state/torrent-guard.log` with rotation. A SQLite journal survives restarts and retries unfinished deletes.
 
 ## Incomplete and completed directories (v0.3)
@@ -224,7 +224,7 @@ Guard retains failed operations and retries from its existing journal.
 | `POLL_SECONDS` | `5` | qBittorrent scan interval (min 2 s) |
 | `MAX_AGE_HOURS` | `24` | New torrent early filename inspection age (completed downloads are always eligible) |
 | `REJECT_NO_VIDEO` | `true` | Reject a selected file list without recognized video extensions |
-| `IMPORT_GRACE_MINUTES` | `10` | Minimum age **of confirmed Arr import**, never just torrent completion; minimum allowed 10 |
+| `IMPORT_GRACE_MINUTES` | `15` | Minimum age **of confirmed Arr import**, never just torrent completion; minimum allowed 10 |
 | `IMPORT_CHECK_SECONDS` | `60` | Arr history poll interval while completed valid downloads are present |
 | `HISTORY_LOOKBACK_DAYS` | `30` | Arr history lookup horizon. Older downloads are retained for review |
 | `STATE_DB` | `/state/torrent-guard.sqlite3` | Restart-safe pending deletions |
@@ -380,10 +380,10 @@ unhealthy; health status is available for monitoring and alerts.
 ## Important safety behavior
 
 - **Failed downloads:** Arr queue matching is required to blocklist a bad release. If Arr cannot find that queue item or is offline, the torrent stays stopped/pending and **is not deleted** until the blocklist path succeeds. HTTP 404 after a known match also preserves the torrent: absence does not confirm blocklisting. Review Arr's blocklist and the journal manually; do not bypass this check by repeatedly deleting downloads.
-- **Successfully imported downloads:** Only matching Arr **history** authorizes cleanup. A finished torrent alone, disappearance from Arr's queue, a newly added torrent carrying an old reused hash, or a partial Sonarr season-pack import does **not** authorize deletion. The import event must be at least 10 minutes old. Every deletion attempt, including pending retries, rechecks completion, selected media, and history. The imported path never queries or changes the Arr queue and never blocklists a successful import.
+- **Successfully imported downloads:** Only matching Arr **history** authorizes cleanup. A finished torrent alone, disappearance from Arr's queue, a newly added torrent carrying an old reused hash, or a partial Sonarr season-pack import does **not** authorize deletion. The import event must be at least 15 minutes old by default. Every deletion attempt, including pending retries, rechecks completion, selected media, and history. The imported path never queries or changes the Arr queue and never blocklists a successful import.
 - **Deletion:** qBittorrent receives `deleteFiles=true`. Guard saves all tracked filenames before the request and verifies their absence on disk before clearing the journal. Remaining files, unknown state, changed roots and permission failures retain pending work. Optional completed-download cleanup permanently removes verified leftovers using saved identities and narrowly scoped write access. Read [deletion verification and deployment](docs/deletion-verification.md), including the `/mnt/downloads/complete` mapping and existing-orphan limitations. Libraries and untracked files are never cleanup targets.
 - **Media validity:** `ffprobe` checks for readable video stream metadata; it does **not** decode or checksum every frame, certify all audio/subtitle tracks, or guarantee that a file is malware-free. Failure to access a mounted media file **defers** processing rather than falsely classifying the download as malware. A readable but unexpected media codec may still be rejected if ffprobe cannot identify it.
-- **Seeding:** Deleting imported torrents after 10 minutes can interrupt seeding or violate tracker requirements. This is the behavior requested; consider increasing the grace period or maintaining seeding separately for private trackers.
+- **Seeding:** Deleting imported torrents after 15 minutes can interrupt seeding or violate tracker requirements. This is the behavior requested; consider increasing the grace period or maintaining seeding separately for private trackers.
 - **Arr history:** On API outages, missing download IDs, mismatched source paths, too-old history, or ambiguous multi-video matches, the program preserves the torrent. It cannot guarantee that *Arr always associates every imported episode with its torrent hash. Check DEBUG logs if valid releases do not clean up.
 - **Pending state:** A past v0.1 pending rejection will still be retried after upgrade. Start in dry-run mode only if you want to suspend further pending cleanup while validating settings.
 
@@ -445,3 +445,58 @@ For release history and version-specific upgrade details, see [CHANGELOG.md](CHA
 ## Login compatibility (v0.3.1)
 
 qBittorrent 5.2+ returns HTTP `204 No Content` after a successful login instead of the legacy `200 Ok.` response. Torrent Guard accepts either success form **only after** checking `/api/v2/app/version` with the authenticated session. This fixes the repeating `qBittorrent refused login: ''` error on qBittorrent 5.2+ while still rejecting failed credentials and malformed responses. The built-in cookie jar accepts the new `QBT_SID_<port>` cookie name automatically. No password or qBittorrent settings changes are necessary.
+
+### Set the post-import wait to 15 minutes
+
+Existing `.env` values override the default. Set `IMPORT_GRACE_MINUTES=15`
+in the existing host `.env` and recreate the container to apply it. Keep the
+existing Compose cleanup override if enabled:
+
+```bash
+docker compose -f compose.yaml -f compose.cleanup.yaml up -d --build --force-recreate
+```
+
+For installations without the cleanup override, use
+`docker compose up -d --build --force-recreate`. Confirm `import_grace=15m` in
+the startup log. Keep the state directory and journal intact. The wait starts
+from the Arr import timestamp for the last selected video, including pending
+retries and local leftover cleanup. Bad-release rejection still requires Arr
+blocklisting rather than successful import. No database migration is needed.
+
+### Leftovers in the incomplete directory
+
+`manual recovery required` means the torrent is gone but saved paths remain
+outside Guard's writable completed root. Guard cannot remove those files through
+qBittorrent once the client has forgotten the torrent, and its incomplete mount
+remains read-only. Eligible completed files in the same operation can still be
+cleaned. The operation stays pending until every recorded path is absent.
+
+- Use the exact paths in `PENDING disk verification`, mapped to the host download
+  root. Do not select files by torrent title or use a recursive directory sweep.
+- Check qBittorrent's own download-mount permissions and logs: its process is
+  responsible for the original `deleteFiles=true` request, independently of Guard.
+- Before manual removal, verify that no live torrent owns those paths. For video
+  downloads, verify every selected video was imported and the 15-minute grace
+  elapsed; for rejected downloads, verify the saved bad payload and Arr rejection.
+  If a file was replaced or its ownership is uncertain, preserve it for review.
+- Remove only the confirmed leftover download files through the server's normal
+  file-management tools. Guard rechecks absence on subsequent eligible polls.
+  Keep the journal, filesystem retry rows and any quarantine evidence intact.
+
+### Older NFS errors and unavailable torrent metadata
+
+The attached-error pattern `Invalid argument` during quarantine rename may be
+an unsupported NFS rename flag. Version 1.3 includes a guarded compatibility
+fallback. Check the `Starting v...` log after rebuilding and recreating the
+container; older unzoned timestamps and missing filesystem `retry_at` suggest
+older code, but do not identify the deployed version conclusively. Existing
+failed operations and saved quarantine directories resume after their persisted
+retry deadlines. A remaining EINVAL on current code requires investigating the
+actual filesystem operation; do not treat all EINVAL errors as safe to bypass.
+
+An ownership warning naming another torrent means Guard cannot prove files are
+unclaimed. Explicitly zero-data queued or metadata torrents can already wait
+without blocking unrelated cleanup; missing counters, resumed payload, an API
+failure or a filesystem hold keeps that protection. Resolve the named client's
+metadata/download issue and let Guard retry. A torrent still under the incomplete
+directory must finish its final move before completed-media validation resumes.
