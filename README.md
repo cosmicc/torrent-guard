@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v1.4** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v1.5** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -17,8 +17,10 @@ grace interval has elapsed (15 minutes by default).
 - Runs without exposed ports, root privileges, Docker socket access, or a
   writable media mount. Persistent SQLite state and rotating logs support retries.
 - Color-coded live logs and a Docker healthcheck show ongoing polling activity.
-- Metadata downloads observed for more than one hour are failed through Arr
-  blocklisting before removal; timers survive restarts and reset on state exit.
+- Timeout rules require a `movies` or `tv` tag: metadata waits over 10 minutes,
+  zero-byte stalls for an hour, or stalls below 25% with zero swarm seeders for
+  seven days. Arr blocklisting requests a replacement before deletion.
+  See [timeout rules](INSTALL.md#stalled-download-timeouts) for timer and safety details.
 - Starts with `DRY_RUN=true`: no torrent stop, blocklist, deletion, or pending
   operation changes during polling.
 
