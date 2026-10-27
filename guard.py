@@ -31,8 +31,9 @@ from deletion import FileVerifier, metadata_manifest, validate_metadata_manifest
 
 LOG = logging.getLogger("torrent-guard")
 DISPLAY_TIMEZONE = ZoneInfo("America/New_York")
-VERSION = "1.4"
-METADATA_TIMEOUT_SECONDS = 3600
+VERSION = "1.5"
+METADATA_TIMEOUT_SECONDS = 600
+STALL_TIMEOUTS = {"empty": 3600, "seedless": 7 * 86400}
 METADATA_STATES = frozenset({"metaDL", "forcedMetaDL"})
 HEARTBEAT_FILE = Path("/tmp/torrent-guard-heartbeat")
 DEFAULT_VIDEO = frozenset({".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".webm", ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".divx", ".flv"})
@@ -385,6 +386,44 @@ def torrent_app(torrent: dict, config: Config) -> str | None:
     return cat or (next(iter(tagged)) if tagged else None)
 
 
+def timeout_tagged(torrent: dict) -> bool:
+    """Limit timeout rules to explicit media tags, independently of categories."""
+    tags = {tag.strip().casefold() for tag in str(torrent.get("tags") or "").split(",")}
+    return bool(tags & {"movies", "tv"})
+
+
+def finite_number(value) -> bool:
+    """Exclude missing, boolean and non-finite API counters from authorization."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def stall_rule(torrent: dict, stopped: bool = False) -> str | None:
+    """Classify only explicit inactive incomplete downloads; unknown means retain.
+
+    Stopped states are allowed solely for an operation Guard has already stopped.
+    Swarm seeds (num_complete) and connected seeds (num_seeds) must both be zero
+    for the weekly rule; an unknown swarm count must never be inferred as zero.
+    """
+    states = {"stalledDL", "stoppedDL", "pausedDL"} if stopped else {"stalledDL"}
+    if not timeout_tagged(torrent) or torrent.get("state") not in states:
+        return None
+    fields = ("progress", "downloaded", "completed", "completion_on", "dlspeed")
+    if not all(finite_number(torrent.get(key)) for key in fields):
+        return None
+    if (torrent["dlspeed"] != 0 or torrent["completion_on"] > 0
+            or torrent["downloaded"] < 0 or torrent["completed"] < 0):
+        return None
+    if zero_payload(torrent):
+        return "empty"
+    size = torrent.get("total_size")
+    if (finite_number(size) and size > 0 and 0 <= torrent["progress"] < 0.25
+            and torrent["completed"] < size * 0.25
+            and finite_number(torrent.get("num_complete")) and torrent["num_complete"] == 0
+            and finite_number(torrent.get("num_seeds")) and torrent["num_seeds"] == 0):
+        return "seedless"
+    return None
+
+
 def is_unstarted_download(torrent: dict) -> bool:
     """Recognize explicit zero-data queues and metadata-download waits.
 
@@ -620,7 +659,22 @@ class PendingStore:
             hash TEXT PRIMARY KEY, added_on REAL NOT NULL,
             app TEXT NOT NULL, first_seen REAL NOT NULL
         )""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS stalled_wait (
+            hash TEXT PRIMARY KEY, observation TEXT NOT NULL
+        )""")
         self.db.commit()
+
+    def stalled_waits(self) -> dict:
+        """Restore stalled observation evidence, including Guard stop ownership."""
+        return {row[0]: json.loads(row[1]) for row in self.db.execute(
+            "SELECT hash,observation FROM stalled_wait")}
+
+    def save_stalled_waits(self, waits: dict) -> None:
+        """Reconcile additive timer state without changing deletion journals."""
+        with self.db:
+            self.db.execute("DELETE FROM stalled_wait")
+            self.db.executemany("INSERT INTO stalled_wait VALUES (?,?)",
+                                [(h, json.dumps(entry)) for h, entry in waits.items()])
 
     def metadata_waits(self) -> dict:
         """Restore observed metadata-wait timers without inferring torrent age."""
@@ -635,7 +689,7 @@ class PendingStore:
                                 [(h, *entry) for h, entry in waits.items()])
 
     def add(self, torrent_hash: str, app: str, name: str, reason: str, kind: str = "reject"):
-        if kind not in {"reject", "imported", "metadata"}:
+        if kind not in {"reject", "imported", "metadata", "stalled"}:
             raise ValueError("invalid journal kind")
         self.db.execute("INSERT OR IGNORE INTO pending (hash,app,name,reason,queue_id,phase,kind) VALUES (?,?,?,?,NULL,?,?)", (torrent_hash, app, name, reason, "delete" if kind == "imported" else "match", kind))
         self.db.commit()
@@ -720,6 +774,7 @@ class Guard:
         self.cleanup_retries = self.store.cleanup_retries()
         self.filesystem_retries = self.store.filesystem_retries()
         self.metadata_waits = self.store.metadata_waits()
+        self.stalled_waits = self.store.stalled_waits()
         self.metadata_passed: set[str] = set()
         self.completed_passed: set[str] = set()
         self.logged_dry: set[str] = set()
@@ -738,6 +793,7 @@ class Guard:
             raise ApiError("Unexpected qBittorrent torrent-list response")
         by_hash = {str(t.get("hash", "")).lower(): t for t in torrents if t.get("hash")}
         self._track_metadata_waits(by_hash, now)
+        self._track_stalled_waits(by_hash, now)
         pending = self.store.hashes()
         self.log_context = {h: context for h, context in self.log_context.items() if h in by_hash or h in pending}
         self.log_context.update({h: download_context(t) for h, t in by_hash.items()})
@@ -761,12 +817,18 @@ class Guard:
                     files = self.qbit.files(h)
                     if files != [] or not zero_payload(torrent):
                         raise ValueError("metadata timeout has payload or inconclusive file metadata; preserving download")
-                    self._reject(h, app, name, "metadata download exceeded one hour of observed waiting", torrent, kind="metadata")
+                    self._reject(h, app, name, "metadata download exceeded 10 minutes of observed waiting", torrent, kind="metadata")
                 except (ApiError, ValueError, OSError) as exc:
                     message = str(exc)
                     if self.warned_defer.get(h) != message:
                         LOG.warning("WAIT metadata timeout %s: %s", self.log_context[h], message)
                         self.warned_defer[h] = message
+                continue
+            stalled = self.stalled_waits.get(h)
+            if stalled and now - stalled["first_seen"] >= STALL_TIMEOUTS[stalled["rule"]]:
+                reason = ("stalled with zero downloaded bytes for one hour" if stalled["rule"] == "empty"
+                          else "stalled below 25% with zero swarm seeders for seven days")
+                self._reject(h, app, name, reason, torrent, kind="stalled")
                 continue
             age = now - int(torrent.get("added_on") or 0)
             fresh = 0 <= age <= self.config.max_age_hours * 3600
@@ -905,22 +967,98 @@ class Guard:
         for h, torrent in by_hash.items():
             app = torrent_app(torrent, self.config)
             added = torrent.get("added_on")
-            if (not app or torrent.get("state") not in METADATA_STATES
+            if (not app or not timeout_tagged(torrent) or torrent.get("state") not in METADATA_STATES
                     or isinstance(added, bool) or not isinstance(added, (int, float))
                     or not 0 < added <= now):
                 continue
             previous = self.metadata_waits.get(h)
             if previous is None or previous[:2] != (added, app) or now < previous[2]:
                 waits[h] = (added, app, now)
-                LOG.info("WAIT metadata [%s] %s; one-hour timeout starts now", app, download_context(torrent))
+                LOG.info("WAIT metadata [%s] %s; 10-minute timeout starts now", app, download_context(torrent))
             else:
                 waits[h] = previous
         if waits != self.metadata_waits and not self.config.dry_run:
             self.store.save_metadata_waits(waits)
         self.metadata_waits = waits
 
+    @staticmethod
+    def _stall_signature(torrent: dict, app: str, rule: str) -> dict:
+        """Reset observation on payload, selection, path or ownership changes."""
+        fields = ("added_on", "downloaded", "completed", "progress", "total_size", "size",
+                  "category", "tags", "save_path", "download_path", "content_path")
+        return {"app": app, "rule": rule, **{key: torrent.get(key) for key in fields}}
+
+    def _track_stalled_waits(self, by_hash: dict, now: float) -> None:
+        """Persist continuous observed stalls; dry-run updates only memory.
+
+        API outages cannot establish recovery. A Guard-owned stop preserves the
+        existing expired authorization, but an operator pause before it resets it.
+        """
+        waits = {}
+        pending = self.store.hashes()
+        for h, torrent in by_hash.items():
+            app = torrent_app(torrent, self.config)
+            previous = self.stalled_waits.get(h, {})
+            stopped = previous.get("stopped_by_guard", False) and h in pending
+            rule = stall_rule(torrent, stopped=stopped)
+            added = torrent.get("added_on")
+            if not app or not rule or not finite_number(added) or not 0 < added <= now:
+                continue
+            signature = self._stall_signature(torrent, app, rule)
+            if previous.get("signature") != signature or now < previous.get("first_seen", now):
+                waits[h] = {"signature": signature, "first_seen": now, "rule": rule,
+                            "stopped_by_guard": False}
+                LOG.info("WAIT stalled [%s] %s rule=%s timeout=%ds starts now",
+                         app, download_context(torrent), rule, STALL_TIMEOUTS[rule])
+            else:
+                waits[h] = previous
+        if waits != self.stalled_waits and not self.config.dry_run:
+            self.store.save_stalled_waits(waits)
+        self.stalled_waits = waits
+
+    def _stalled_removal_ready(self, h: str, torrent: dict, now: float) -> None:
+        """Require unchanged, expired live evidence at every destructive boundary."""
+        wait = self.stalled_waits.get(h)
+        app = torrent_app(torrent, self.config)
+        rule = stall_rule(torrent, stopped=bool(wait and wait["stopped_by_guard"]))
+        if (not wait or not app or rule != wait["rule"]
+                or self._stall_signature(torrent, app, rule) != wait["signature"]
+                or not STALL_TIMEOUTS[rule] <= now - wait["first_seen"]):
+            raise ValueError("stalled timeout evidence changed or is incomplete; preserving download")
+
+    def _refresh_stalled(self, h: str, now: float) -> dict:
+        """Refresh client state and readable tracked files before stop/blocklist."""
+        live = self.qbit.torrents()
+        if not isinstance(live, list):
+            raise ApiError("Cannot refresh stalled download")
+        torrent = next((t for t in live if str(t.get("hash", "")).lower() == h), None)
+        if torrent is None:
+            raise ValueError("stalled download disappeared before action")
+        self._stalled_removal_ready(h, torrent, now)
+        self.validator.check_filesystem(torrent, self.qbit.files(h))
+        return torrent
+
+    def _stop_stalled(self, h: str, now: float) -> None:
+        """Checkpoint an authorized Guard stop so retries distinguish operator pauses."""
+        self._refresh_stalled(h, now)
+        self.stalled_waits[h]["stopped_by_guard"] = True
+        self.store.save_stalled_waits(self.stalled_waits)
+        self.qbit.stop(h)
+
+    def _refresh_metadata(self, h: str) -> None:
+        """Recheck timeout tags, ownership and zero payload before a remote action."""
+        live = self.qbit.torrents()
+        if not isinstance(live, list):
+            raise ApiError("Cannot refresh metadata download")
+        torrent = next((t for t in live if str(t.get("hash", "")).lower() == h), None)
+        if torrent is None:
+            raise ValueError("metadata download disappeared before action")
+        self._metadata_removal_ready(h, torrent, self.qbit.files(h))
+
     def _metadata_removal_ready(self, h: str, torrent: dict, files: list) -> None:
         """Persist empty-payload evidence before stopping/blocklisting a magnet."""
+        if not timeout_tagged(torrent):
+            raise ValueError("metadata timeout requires a movies or tv tag")
         if files != []:
             raise ValueError("metadata recovered or file list unavailable; preserving download for review")
         manifest = metadata_manifest(torrent)
@@ -1040,6 +1178,9 @@ class Guard:
             app = torrent_app(fresh, self.config)
             if not app or not self._import_cleanup_ready(fresh, h, app, now, {}, files=files):
                 raise ValueError("current payload lacks verified import evidence; preserving download")
+        if kind == "stalled":
+            self._stalled_removal_ready(h, fresh, now)
+            self.validator.check_filesystem(fresh, files)
         if not metadata_only and kind == "reject":
             self.validator.check_filesystem(fresh, files)
             if not self._rejection_ready(h, fresh, files, now):
@@ -1049,6 +1190,10 @@ class Guard:
             manifest = self.store.evidence(h)[0]
         elif evidence is None:
             manifest = self.verifier.snapshot(torrent, files)
+            if kind == "stalled":
+                # Keep the observation proof in the durable deletion audit even
+                # after the live timer is cleared when the client disappears.
+                manifest["timeout"] = self.stalled_waits[h]
             self.store.save_manifest(h, manifest)
         else:
             manifest = evidence[0]
@@ -1138,6 +1283,9 @@ class Guard:
         # Read-only incomplete leftovers must stay pending, but must not prevent
         # authorized completed files in the same manifest from being cleaned.
         removable = [item for item in remaining if item["root"] == self.config.qbit_complete_dir]
+        # A historical stall cannot authorize local unlink after client removal.
+        if kind == "stalled":
+            removable = []
         if removable and now - requested_at >= self.config.delete_settle_seconds and self.config.cleanup_leftovers:
             # Refresh remote state before local cleanup, including unrelated torrents.
             ownership_cache = {} if ownership_cache is None else ownership_cache
@@ -1182,10 +1330,10 @@ class Guard:
             elif now - requested_at < self.config.delete_settle_seconds:
                 deadline = display_time(requested_at + self.config.delete_settle_seconds)
                 blocker = f"waiting for qBittorrent deletion settle period until {deadline}"
-            elif all(item["root"] != self.config.qbit_complete_dir for item in remaining):
-                blocker = ("manual recovery required: remaining files are outside the writable completed-download root; "
+            elif kind == "stalled" or all(item["root"] != self.config.qbit_complete_dir for item in remaining):
+                blocker = ("manual recovery required: remaining files lack local cleanup authorization; "
                            "check qBittorrent deletion permissions and remove only the recorded rejected/imported "
-                           "download paths after verifying ownership; Guard will verify absence automatically")
+                           "or stalled download paths after verifying ownership; Guard will verify absence automatically")
             else:
                 blocker = "automatic cleanup ran but the filesystem still reports saved paths; review LEFTOVER messages and filesystem errors"
             self._cleanup_status(h, f"{len(remaining)} recorded file(s) remain: {paths}; {blocker}", now)
@@ -1212,7 +1360,7 @@ class Guard:
                 evidence = self.store.evidence(h)
                 if evidence:
                     self.log_context[h] = download_context({**evidence[0].get("torrent", {}), "name": name}, manifest=evidence[0])
-                if kind not in {"reject", "imported", "metadata"} or phase not in {"match", "arr", "delete", "verify"}:
+                if kind not in {"reject", "imported", "metadata", "stalled"} or phase not in {"match", "arr", "delete", "verify"}:
                     LOG.error("PENDING invalid journal kind/phase; manual review required %s", self.log_context[h])
                     continue
                 torrent = by_hash.get(h)
@@ -1228,6 +1376,8 @@ class Guard:
                     if kind == "metadata":
                         self._metadata_removal_ready(h, torrent, current_files)
                     else:
+                        if kind == "stalled":
+                            self._stalled_removal_ready(h, torrent, now)
                         self.validator.check_filesystem(torrent, current_files)
                         if kind == "reject" and not self._rejection_ready(h, torrent, current_files, now):
                             self._cleanup_status(h, "current payload is not verified as a bad release; preserving download", now)
@@ -1245,7 +1395,12 @@ class Guard:
                     if torrent is None:
                         LOG.error("PENDING disappeared before cleanup; cannot prove files were deleted: %s", self.log_context[h])
                         continue
-                    self.qbit.stop(h)
+                    if kind == "stalled":
+                        self._stop_stalled(h, now)
+                    else:
+                        if kind == "metadata":
+                            self._refresh_metadata(h)
+                        self.qbit.stop(h)
                     if app not in queue_cache:
                         queue_cache[app] = self.arr_clients[app].queue_by_hash()
                     queue_id = queue_cache[app].get(h)
@@ -1259,6 +1414,10 @@ class Guard:
                 if phase == "arr":
                     # Never let Arr remove the torrent first; we explicitly request data deletion.
                     try:
+                        if kind == "stalled":
+                            self._refresh_stalled(h, now)
+                        elif kind == "metadata":
+                            self._refresh_metadata(h)
                         self.arr_clients[app].blocklist_and_remove(queue_id)
                     except ApiError as exc:
                         if exc.status != 404:
@@ -1276,7 +1435,11 @@ class Guard:
                         else:
                             self._cleanup_status(h, "torrent missing before saved delete request; manual review required", now)
                         continue
-                    if kind in {"reject", "metadata"}:
+                    if kind == "stalled":
+                        self._stop_stalled(h, now)
+                    elif kind in {"reject", "metadata"}:
+                        if kind == "metadata":
+                            self._refresh_metadata(h)
                         self.qbit.stop(h)
                     self._request_deletion(h, torrent, now, metadata_only=kind == "metadata", kind=kind)
                     LOG.warning("DELETE requested [%s] kind=%s %s deleteFiles=true", app, kind, self.log_context[h])

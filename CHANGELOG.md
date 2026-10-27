@@ -3,6 +3,33 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 1.5 - 10.27.2026
+
+### Added
+
+- Persistent timeout rules for downloads stalled with zero downloaded bytes for
+  one hour, or stalled below 25% complete with zero reported swarm seeders and
+  no progress for seven days. Timers survive restarts and reset on recovery.
+- Arr-first failed-download blocklisting and replacement requests for stalled
+  downloads, followed by explicit qBittorrent deletion with tracked files.
+- Boundary, restart, tag-scope, recovery-race and real-file verification tests.
+
+### Changed
+
+- Shorten the observed metadata timeout from one hour to more than ten minutes.
+- Require an explicit `movies` or `tv` tag for all three timeout rules, alongside
+  existing unambiguous Arr ownership. Paused, stopped and queued downloads do
+  not start timers; other existing screening/import rules keep their scope.
+- Add `stalled_wait` automatically while preserving existing state and metadata
+  timers. Existing eligible metadata waits may time out on the first v1.5 poll.
+
+### Fixed
+
+- Retain downloads when stall evidence recovers, swarm seed counts are unknown,
+  tags change, API calls fail or filesystem checks are inconclusive.
+- Keep stalled leftovers pending until independent absence verification; a past
+  stall never authorizes local unlink or writable incomplete/library mounts.
+
 ## 1.4 - 10.23.2026
 
 ### Added

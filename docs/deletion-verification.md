@@ -35,7 +35,8 @@ removed. Logs count original/incomplete path variants, not just video files.
 
 ## Metadata-only failure evidence (v1.0)
 
-A magnet continuously observed in `metaDL`/`forcedMetaDL` for more than one hour
+A magnet tagged `movies` or `tv` continuously observed in `metaDL`/`forcedMetaDL`
+for more than ten minutes (since v1.5; one hour in v1.0–v1.4)
 can fail without a file list. The new `metadata_wait` table stores observation
 times; it does not replace existing journal tables. Pending `kind=metadata`
 follows the same stop, matching Arr blocklist, explicit qBittorrent deletion and
@@ -280,3 +281,23 @@ later of the two active deadlines governs eligibility, followed by the next
 poll. Existing deadlines survive restart. `pending_deletion` counts downloads,
 not files; `verifying_deletion`, filesystem holds and cleanup retries overlap
 that work rather than being additional downloads.
+
+## Stalled download failures (v1.5)
+
+See [timeout conditions and timers](../INSTALL.md#stalled-download-timeouts).
+Only explicitly media-tagged, unambiguously owned downloads qualify. The additive
+`stalled_wait` table persists observed conditions and Guard-owned stop intent;
+`kind=stalled` follows rejection phases without treating stalled video as malware.
+Fresh state/counters/swarm evidence must still authorize each stop, blocklist
+and API deletion. File API/filesystem uncertainty retains the download. Arr
+replacement searching is requested through `skipRedownload=false`; Guard keeps
+client deletion under its own control with `removeFromClient=false`.
+
+Payload-bearing stalled downloads require a normal version-1 manifest before
+qBittorrent deletion and independent recorded-file absence afterward. A saved
+stall is never authorization for local unlink after the client disappears,
+even for completed-root leftovers. These stay pending for manual recovery,
+without broadening writable mounts. Metadata-only manifests remain unchanged
+and never authorize filesystem deletion. Keep `/state`; no journal reset is
+required. Tests mock APIs with real temporary files/SQLite and do not verify
+production qBittorrent deletion or actual Arr replacement availability.

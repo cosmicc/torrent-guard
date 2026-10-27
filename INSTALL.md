@@ -124,6 +124,15 @@ records with missing or inconclusive evidence remain pending for review. Import
 evidence is also refreshed for the exact file list saved before API deletion.
 Rebuild and recreate the container, preserving `/state` and any cleanup override.
 
+v1.5 adds `stalled_wait` automatically and preserves all existing journal,
+file evidence, audit and retry tables. Retain `/state` and back it up before
+upgrading. No new environment variables or writable mounts are needed.
+Existing metadata observation timers are retained: an eligible tagged magnet
+already observed for more than 10 minutes can fail on the first v1.5 poll.
+Stalled-download timers start when v1.5 first observes the qualifying condition;
+torrent age alone never causes removal. Rebuild and recreate using your existing
+Compose files, including the cleanup override if already enabled.
+
 v1.0 adds `metadata_wait` automatically and preserves existing pending work,
 file evidence, audits and retry records. Back up `/state` before upgrading;
 do not replace the database. No new environment variables are required. Existing
@@ -252,20 +261,39 @@ successful scheduled history check. Matching history still needs filename,
 timestamp, and grace validation before cleanup. `ACCEPT completed` only reports
 video validation; it does not mean import is still pending.
 
-## Stalled metadata downloads
+## Stalled download timeouts
 
-Guard fails owned torrents that remain in qBittorrent's `metaDL` or
-`forcedMetaDL` state for **more than one hour**, measured from Guard's first
-observation. Normal `queuedDL` waits are excluded. Timers survive daemon restarts;
-switching between the two metadata states does not reset them. Leaving metadata,
-disappearing from the client, changing owner or re-adding the torrent starts a
-new observation period. An API outage cannot prove a state exit: elapsed time
-continues across it and restarts. Clock rollback restarts the affected timer.
+These three rules require an explicit **`movies` or `tv` qBittorrent tag**
+(case-insensitive, comma-separated tags supported), plus unambiguous ownership
+under the existing configured categories/tags. A matching category alone is not
+enough. This tag requirement applies to timeout rules; filename screening and
+successful-import cleanup keep their existing scope.
+
+| Condition continuously observed by Guard | Timeout |
+| --- | --- |
+| `metaDL` or `forcedMetaDL`, with explicit zero payload and no file metadata | More than 10 minutes |
+| `stalledDL`, with zero lifetime downloaded bytes, zero completed bytes and zero progress | One hour |
+| `stalledDL`, strictly below 25% complete, no progress, and zero seeders reported in the swarm | Seven days |
+
+The weekly rule uses qBittorrent's `num_complete` swarm count, not just connected
+seeders. Unknown/missing/negative swarm counts preserve the download. A connected
+seeder also prevents this rule from firing. Total size, progress, byte counters
+and zero download speed must be explicit and valid. Swarm information is what
+qBittorrent reports; Guard cannot independently prove that no seed exists.
+
+Intentionally stopped, paused, queued, checking, moving and actively downloading
+torrents do not start timeout timers. Timers begin with Guard's first observation
+of the qualifying condition, survive daemon restarts/API outages, and reset on
+observed recovery, disappearance, tag removal, ownership/incarnation change or
+clock rollback. Switching between metadata states keeps the same timer. Stalled
+timers also reset when downloaded/completed bytes, progress, size, paths or tags
+change. Returning swarm seeders reset the weekly timer. No historical stalled
+time is inferred from the torrent's age.
 
 Failure uses the owning Sonarr/Radarr queue and blocklist, with replacement
 search permitted. Guard stops the torrent, confirms Arr blocklisting, then
 requests qBittorrent deletion. Missing queue matches, Arr errors (including 404),
-prior filesystem holds or recovered metadata preserve pending work. The Arr
+prior filesystem holds, recovered metadata or a recovered stall preserve pending work. The Arr
 blocklist controls future release selection; it is not a global ban across every
 indexer or manually added download.
 
@@ -276,7 +304,19 @@ audit record without guessed paths; it never sweeps directories or claims to
 verify filesystem absence from this record. If files appear before removal,
 Guard retains the torrent for review. Dry-run timers are memory-only and no
 stop, blocklist, deletion or polling journal mutation occurs. Timer/rejection
-messages are visible in the SSH viewer and normal logs. Imported downloads
+messages are visible in the SSH viewer and normal logs. Stalled removals require
+a complete tracked-file list and readable mapped roots. Guard rechecks the live
+condition before stopping, blocklisting and deleting. A persisted Guard-owned
+stop can resume after restart; an operator pause before authorization cannot
+start a timeout. Payload-bearing stalled removals save normal file manifests
+and require independent file-absence checks. If qBittorrent leaves files behind,
+they remain pending for manual recovery: a past stall does not authorize local
+unlink. Guard never gains writable incomplete-directory or library access.
+
+Replacement searches use the existing Arr queue request with
+`blocklist=true`, `skipRedownload=false` and `removeFromClient=false`. Arr chooses
+any available eligible replacement according to its settings and indexers; a
+replacement is not guaranteed. Imported downloads
 retain their existing history and grace requirements.
 
 ## Live monitoring and Docker health

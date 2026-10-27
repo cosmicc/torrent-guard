@@ -6,7 +6,7 @@ This is the root-level coding-agent guide for Codex and maintainers. Read alongs
 
 Torrent Guard is a long-running Python 3.12 daemon deployed via Docker Compose on a media-management host running qBittorrent, Sonarr and Radarr. Sonarr/Radarr select torrent releases; qBittorrent downloads them. The guard discovers fake releases with dangerous file extensions, confirms finished torrents contain actual video, asks the responsible Arr instance to blocklist bad releases, and removes bad downloads with qBittorrent's deleteFiles=true. Valid completed torrents should be removed with data only after Sonarr/Radarr has demonstrably imported every video file and the import grace interval has elapsed.
 
-The highest priority is preventing deletion of useful, unimported media. API outages, ambiguous ownership, missing/moving files and incomplete import history must not be treated as proof of a bad torrent or a completed import. Missing metadata alone is inconclusive; v1.0 adds the explicit observed one-hour zero-payload timeout described below.
+The highest priority is preventing deletion of useful, unimported media. API outages, ambiguous ownership, missing/moving files and incomplete import history must not be treated as proof of a bad torrent or a completed import. Missing metadata alone is inconclusive; v1.5 applies explicit observed timeouts only to torrents tagged movies or tv, as described below.
 
 There is no web service, exposed port, qBittorrent completion hook, Docker socket access or external database server. Standard Compose uses a read-only download mount. An explicit cleanup override can additionally mount only the completed-download directory writable. Library mounts must never be writable or targeted. The app polls qBittorrent and Arr APIs and records cleanup operations in a local SQLite journal.
 
@@ -45,6 +45,7 @@ There is no web service, exposed port, qBittorrent completion hook, Docker socke
 - tests/test_cleanup_safety.py, tests/test_release.py — cleanup retry authorization and release metadata regression tests.
 - scripts/watch_logs.py — read-only SSH event blocks, width-aware wrapping, bright dark-shell palette, file rotation and partial-write handling; shipped as /app/watch_logs.py.
 - tests/test_watch_logs.py — viewer rendering, control escaping and actual-file follow/rotation checks.
+- tests/test_stalled_timeout.py — persistent zero-byte/seedless stall timers, tag scope, recovery races and real-file verification.
 - tests/test_metadata_timeout.py — persisted observation deadlines, Arr-first zero-payload rejection, dry-run/restart safety and metadata-recovery races.
 - tests/test_monitoring.py — palette isolation, terminal-control escaping and completed-poll health checks.
 - docs/log-palette.svg — approved bright log palette with light/dark reference samples. Green success, bright cyan activity, yellow waiting/warnings, red errors/rejections, purple dry run; exact ANSI shades follow the terminal theme.
@@ -65,10 +66,10 @@ There is no web service, exposed port, qBittorrent completion hook, Docker socke
 7. Once all import and retention criteria hold, delete the qBittorrent torrent plus its tracked data without blocklisting the successfully imported release. The Arr-managed main movie/TV library must remain intact; imported hardlinked or copied files should not be removed.
 8. Log ACCEPT metadata/completed, REJECT candidate, DEFER validation, WAIT import, DRY RUN, PENDING, CLEANUP, DELETE, CLEANED, warnings and errors. Pending journal phases must be restart-safe and idempotent.
 
-### Metadata timeout (v1.0)
+### Metadata timeout (v1.5; introduced in v1.0)
 
 Track owned `metaDL`/`forcedMetaDL` torrents independently of `MAX_AGE_HOURS` in
-`metadata_wait(hash, added_on, app, first_seen)`. Fail only after more than 3600
+`metadata_wait(hash, added_on, app, first_seen)`. Require an explicit `movies` or `tv` tag and fail only after more than 600
 seconds since first observation, preserving time across restarts/API outages;
 reset on observed state exit/absence, ownership/incarnation change or clock
 rollback. Switching between metadata states keeps the same timer. Dry-run
@@ -85,6 +86,31 @@ A v2 zero-payload audit has no filesystem targets and is never accepted by the
 ordinary file verifier or local unlink path. Its CLEANED label reports client
 absence only, explicitly without claiming filesystem absence. Preserve existing
 v1 file evidence, journals and audits. See INSTALL.md and the deletion guide.
+
+### Stalled download timeouts (v1.5)
+
+`stalled_wait(hash, observation)` is additive JSON timer/authorization state.
+Only owned torrents with an explicit case-insensitive `movies` or `tv` tag qualify;
+category matches alone never authorize any timeout. Other existing rules keep
+their existing scope. Observe `stalledDL` with explicit zero speed for one hour
+at zero lifetime downloaded/completed bytes and progress, or seven days below
+25% complete with no progress and `num_complete == 0` swarm seeders (also require
+zero connected seeders). Missing/negative/non-finite counters are inconclusive.
+Never infer swarm counts from connected seeders or infer elapsed stalls from age.
+
+Reset on condition exit, progress/byte/size/path/tag/owner/incarnation changes,
+disappearance or clock rollback. Persist across restarts/outages; dry-run only
+updates memory. `kind=stalled` uses match/arr/delete/verify with fresh live
+condition and filesystem checks before stop, blocklist and deletion. Checkpoint
+`stopped_by_guard` only at an authorized stop so recovery can accept Guard-stopped
+states; manually paused/stopped/queued torrents cannot start timers.
+Blocklist with `skipRedownload=false`, `removeFromClient=false`, then explicitly
+request qBittorrent `deleteFiles=true`. Missing Arr matches/errors retain work.
+Save normal file evidence and independently verify absence after client removal.
+A historical stall NEVER authorizes local leftover unlink, including completed
+files; retain leftovers for manual recovery. No new writable mounts/settings.
+Preserve all existing journals/evidence/audits and metadata timers on upgrade;
+eligible old metadata timers now use the shorter ten-minute threshold.
 
 ### Cleanup authorization and retries (v0.4)
 
