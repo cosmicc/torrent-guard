@@ -3,6 +3,31 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 1.6 - 11.02.2026
+
+### Added
+
+- Host-invoked `--status` command with colored, terminal-width-aware output:
+  live qBittorrent/Sonarr/Radarr authentication, polling heartbeat, managed
+  torrent states, drive readability/free space and temporary-file write tests.
+- Persistent rolling 6/12/24-hour cleanup, rejection-candidate, warning and error
+  counts, recent issues, daemon start time and last completed-poll counters.
+
+### Changed
+
+- Store monitoring history separately beside the configured journal, retaining
+  seven days of events and twenty recent issues per severity across log rotation
+  and restarts. Collection starts on upgrade; partial windows are labeled.
+- Document the Docker-host command, exit codes, write-probe boundaries and
+  upgrade procedure. Existing cleanup authorization and journal data are preserved.
+
+### Fixed
+
+- Keep independent status results visible when a dependency fails; missing
+  databases are reported without creating or migrating them during diagnostics.
+- Escape terminal controls and redact configured credentials in status details;
+  reject mismatched cleanup aliases and symlinked drive paths before write tests.
+
 ## 1.5 - 10.27.2026
 
 ### Added

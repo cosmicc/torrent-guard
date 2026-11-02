@@ -9,7 +9,9 @@ WORKDIR /app
 RUN mkdir -p /state && chown 1000:1000 /state
 COPY --chown=1000:1000 guard.py /app/guard.py
 COPY --chown=1000:1000 deletion.py /app/deletion.py
+COPY --chown=1000:1000 status_report.py /app/status_report.py
 COPY --chown=1000:1000 scripts/watch_logs.py /app/watch_logs.py
+COPY --chown=1000:1000 scripts/watch_logs.py /app/scripts/watch_logs.py
 USER 1000:1000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD ["python", "/app/guard.py", "--healthcheck"]

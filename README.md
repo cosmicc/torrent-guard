@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v1.5** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v1.6** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -63,6 +63,18 @@ failures preserve downloads and retry with backoff. See
 
 ## Monitor
 
+Run a one-shot status report on the Docker host (works from any directory):
+
+```bash
+docker exec -it torrent-guard python /app/guard.py --status
+```
+
+Shows live API connections, polling health, drive access/free space, pending
+work, 6/12/24-hour event statistics and recent warnings/errors. Write tests use
+temporary files in state and the verified completed-cleanup mount when enabled.
+Statistics begin with v1.6 and survive log rotation. See
+[status details](INSTALL.md#command-line-status) for options and limits.
+
 For readable, colored event blocks in a PuTTY/SSH terminal, run from the project
 checkout on the Docker host (requires Python 3):
 
@@ -113,7 +125,7 @@ Docker does not automatically restart unhealthy containers.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile guard.py deletion.py scripts/release_notes.py scripts/watch_logs.py
+python3 -m py_compile guard.py deletion.py status_report.py scripts/release_notes.py scripts/watch_logs.py
 python3 scripts/release_notes.py
 ```
 
