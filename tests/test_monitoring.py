@@ -150,7 +150,7 @@ class HealthcheckTests(unittest.TestCase):
                 guard.poll.side_effect = error
                 guard.store.hashes.return_value = set()
                 config = Mock(poll_seconds=5, dry_run=True)
-                with patch("sys.argv", ["guard.py"]), patch("guard.HEARTBEAT_FILE", marker), patch("guard.setup_logging"), patch("guard.Config.from_env", return_value=config), patch("guard.Guard", return_value=guard), patch("guard.write_heartbeat") as heartbeat, patch("guard.time.sleep", side_effect=KeyboardInterrupt):
+                with patch("sys.argv", ["guard.py"]), patch("guard.HEARTBEAT_FILE", marker), patch("guard.setup_logging"), patch("status_report.enable_history"), patch("guard.Config.from_env", return_value=config), patch("guard.Guard", return_value=guard), patch("guard.write_heartbeat") as heartbeat, patch("guard.time.sleep", side_effect=KeyboardInterrupt):
                     with self.assertRaises(KeyboardInterrupt):
                         main()
                 self.assertFalse(marker.exists())
@@ -166,7 +166,7 @@ class HealthcheckTests(unittest.TestCase):
             guard.store.hashes.return_value = set()
             config = Mock(poll_seconds=5, dry_run=True, import_grace_minutes=10,
                           delete_settle_seconds=120)
-            with patch("sys.argv", ["guard.py"]), patch("guard.HEARTBEAT_FILE", Path(directory) / "marker"), patch("guard.setup_logging"), patch("guard.Config.from_env", return_value=config), patch("guard.Guard", return_value=guard), patch("guard.write_heartbeat"), patch("guard.time.monotonic", side_effect=[0, 30, 61, 61]), patch("guard.time.sleep", side_effect=[None, None, KeyboardInterrupt]), self.assertLogs("torrent-guard", level="DEBUG") as logs:
+            with patch("sys.argv", ["guard.py"]), patch("guard.HEARTBEAT_FILE", Path(directory) / "marker"), patch("guard.setup_logging"), patch("status_report.enable_history"), patch("guard.Config.from_env", return_value=config), patch("guard.Guard", return_value=guard), patch("guard.write_heartbeat"), patch("guard.time.monotonic", side_effect=[0, 30, 61, 61]), patch("guard.time.sleep", side_effect=[None, None, KeyboardInterrupt]), self.assertLogs("torrent-guard", level="DEBUG") as logs:
                 with self.assertRaises(KeyboardInterrupt):
                     main()
             self.assertEqual(guard.log_status.call_count, 2)

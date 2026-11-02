@@ -321,6 +321,78 @@ retain their existing history and grace requirements.
 
 ## Live monitoring and Docker health
 
+### Command-line status
+
+After upgrading to v1.6, run this on the Docker host from any directory:
+
+```bash
+docker exec -it torrent-guard python /app/guard.py --status
+# Plain output for scripts; no terminal required:
+docker exec torrent-guard python /app/guard.py --status --color never --width 100
+```
+
+From the checkout, `docker compose exec torrent-guard python /app/guard.py --status`
+also works. The container must be running. The report uses its existing
+configuration, credentials, network, mounted paths and non-root identity.
+No host Python, extra packages, exposed port or Docker socket inside Guard is needed.
+
+The report checks qBittorrent login and torrent inventory, Sonarr/Radarr
+authenticated system status, last completed poll, managed torrent states,
+readable download/complete/incomplete directories and free disk space. It also
+shows live/dry-run mode, cleanup setting, import grace, runtime UID/GID, persisted
+pending phases/retry holds/timers, daemon start time and the most recent poll
+counters (with their timestamp). Disabled Arr instances are marked unconfigured.
+An API status check does not certify that its queue/history endpoints work;
+directory access does not validate every media file, the host mount source or
+the main library. Read-only download access is expected.
+
+Write checks create a random mode-0600 `.torrent-guard-status-*` file in the
+state directory, write/fsync/read it, and remove it. If leftover cleanup is
+enabled, the command also tests its writable alias **after** verifying it is the
+same directory as the mapped completed root. Downloads and incomplete directories
+are never write-tested. No permissions or mounts change. These explicit probes
+run even in dry-run; they do not stop, blocklist or delete torrents, alter journal
+records, or refresh polling health. Each drive probe has a ten-second subprocess
+timeout. A killed/interrupted probe can leave its own test file; never sweep
+download files to resolve this. Kernel-level stalled NFS I/O can delay process
+termination beyond a userspace timeout.
+
+Rolling **6, 12 and 24 hour** totals count confirmed `CLEANED` events, rejection
+candidates, warnings and errors. These windows overlap. Counts are events, not
+unique torrents: rejection candidates include dry-run observations, may recur
+after restarts, and also count as warnings. Errors are separate from warnings.
+`CLEANED` includes zero-payload metadata removal, which verifies only client
+absence, and does not imply reclaimed disk space. Up to five latest warnings
+and five errors are shown, retained independently of log rotation.
+
+The daemon collects monitoring in `<STATE_DB>.status.sqlite3` (by default
+`/state/torrent-guard.sqlite3.status.sqlite3`). Keep this file with the state
+directory to preserve statistics across recreations. It retains seven days of
+events and twenty issues per severity. Collection starts on the v1.6 upgrade;
+short windows are marked **partial**, old logs are not backfilled, and daemon
+downtime cannot be observed. Collection continues in dry-run and at higher
+console log thresholds without changing pending/deletion state. Monitoring
+failures are logged without blocking polling; recovered recording failures are
+flagged as potentially incomplete history. The report reads databases without
+creating or migrating them. Missing history is reported as unavailable.
+
+Exit code **0** means all enabled checks succeeded; **1** means at least one
+failed or data was unavailable. Historical errors and pending work are shown
+without making a currently healthy connection fail. Each check continues after
+independent failures. Default colors use the approved bright palette; use
+`--color auto` for terminal detection or `--color never` to disable them.
+`--width` overrides terminal width (minimum 20). Times use Eastern EST/EDT offsets.
+
+Upgrade by pulling v1.6 and rebuilding/recreating. Preserve the existing `.env`
+and `/config/torrent-guard`; no deletion-journal migration or reset is required:
+
+```bash
+git pull
+docker compose up -d --build --force-recreate
+# If already using completed-download cleanup, use both files instead:
+# docker compose -f compose.yaml -f compose.cleanup.yaml up -d --build --force-recreate
+```
+
 ### SSH event viewer
 
 From the checkout on the Docker host:
@@ -431,7 +503,7 @@ unhealthy; health status is available for monitoring and alerts.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile guard.py deletion.py scripts/release_notes.py scripts/watch_logs.py
+python3 -m py_compile guard.py deletion.py status_report.py scripts/release_notes.py scripts/watch_logs.py
 python3 scripts/release_notes.py
 # If Docker is available and .env has correct paths:
 docker compose config

@@ -48,6 +48,7 @@ There is no web service, exposed port, qBittorrent completion hook, Docker socke
 - tests/test_stalled_timeout.py — persistent zero-byte/seedless stall timers, tag scope, recovery races and real-file verification.
 - tests/test_metadata_timeout.py — persisted observation deadlines, Arr-first zero-payload rejection, dry-run/restart safety and metadata-recovery races.
 - tests/test_monitoring.py — palette isolation, terminal-control escaping and completed-poll health checks.
+- status_report.py, tests/test_status.py — one-shot diagnostics and separate persistent monitoring history; see [status workflow](docs/status-command.md) before modifying these paths.
 - docs/log-palette.svg — approved bright log palette with light/dark reference samples. Green success, bright cyan activity, yellow waiting/warnings, red errors/rejections, purple dry run; exact ANSI shades follow the terminal theme.
 - docs/deletion-verification.md — required reading before modifying file verification, cleanup permissions, journal manifests, quarantine recovery or deletion safety. Contains v0.6 deployment and validation details. Verified leftovers are permanently unlinked; quarantine is only a temporary identity-check step unless safety checks fail.
 - docs/filesystem-retries.md — required reading for v0.7 unresolved filesystem errors, NFS ESTALE handling, ffprobe I/O interpretation, retry persistence and recovery.
@@ -203,6 +204,14 @@ Key variables: QBIT_URL/USERNAME/PASSWORD, SONARR_URL/API_KEY/CATEGORY/TAG, RADA
 
 ### Monitoring contract
 
+`--status` is a separate diagnostic path before logging initialization or
+heartbeat changes. Never construct Guard/PendingStore, mutate deletion evidence,
+or use monitoring statistics to authorize cleanup. Live checks authenticate and
+read APIs only. Explicitly requested temporary-file probes are restricted to
+state and an identity-matched completed cleanup alias. The daemon alone writes
+separate monitoring history, including in dry-run mode; the deletion journal's
+dry-run guarantees remain unchanged. Details: [status workflow](docs/status-command.md).
+
 Additional cleanup controls are `CLEANUP_LEFTOVERS` (default false),
 `DELETE_SETTLE_SECONDS` (default 120, minimum 30), and the Compose-only
 `CLEANUP_COMPLETE_HOST_PATH`. `compose.cleanup.yaml` explicitly enables fallback.
@@ -281,7 +290,7 @@ Treat docker compose config output as possibly containing secrets; sanitize befo
 - Preserve dry-run guarantees, cross-Arr category/tag isolation, defer-vs-reject distinction and explicit deletion with data through the qBittorrent API.
 - Test fail-closed behavior on unreachable Arr APIs, incomplete/late move, malformed paths, unknown file types, repeated HTTP errors, journal restarts, and multi-episode partial imports. Assert the ORDER and ABSENCE of destructive calls as well as expected calls.
 - Run: python3 -m unittest discover -s tests -v
-- Run: python3 -m py_compile guard.py deletion.py scripts/release_notes.py scripts/watch_logs.py
+- Run: python3 -m py_compile guard.py deletion.py status_report.py scripts/release_notes.py scripts/watch_logs.py
 - Run: python3 scripts/release_notes.py (validates version consistency and changelog structure without publishing).
 - Run: docker compose config using safe dummy .env values when appropriate; NEVER commit secrets.
 - Update README, INSTALL.md and .env.example as appropriate when operator-facing flags or behavior change. Document state migrations and safety impact.

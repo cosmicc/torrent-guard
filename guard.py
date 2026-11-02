@@ -31,7 +31,7 @@ from deletion import FileVerifier, metadata_manifest, validate_metadata_manifest
 
 LOG = logging.getLogger("torrent-guard")
 DISPLAY_TIMEZONE = ZoneInfo("America/New_York")
-VERSION = "1.5"
+VERSION = "1.6"
 METADATA_TIMEOUT_SECONDS = 600
 STALL_TIMEOUTS = {"empty": 3600, "seedless": 7 * 86400}
 METADATA_STATES = frozenset({"metaDL", "forcedMetaDL"})
@@ -1535,14 +1535,28 @@ def setup_logging():
 def main():
     """Run polling and advance liveness only when a complete poll returns."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--healthcheck", action="store_true", help="check recent completed polling and exit")
+    commands = parser.add_mutually_exclusive_group()
+    commands.add_argument("--healthcheck", action="store_true", help="check recent completed polling and exit")
+    commands.add_argument("--status", action="store_true", help="show live diagnostics and persistent statistics, then exit")
+    parser.add_argument("--color", choices=("always", "auto", "never"), default="always", help="status report colors (default: always)")
+    parser.add_argument("--width", type=int, help="status report terminal width (minimum 20)")
     arguments = parser.parse_args()
+    if arguments.width is not None and arguments.width < 20:
+        parser.error("--width must be at least 20")
     if arguments.healthcheck:
         return healthcheck()
+    if arguments.status:
+        from status_report import run_status
+        return run_status(arguments.color, arguments.width)
     # Never let a marker from an earlier process hide failed initialization.
     HEARTBEAT_FILE.unlink(missing_ok=True)
     setup_logging()
     config = Config.from_env()
+    from status_report import enable_history
+    try:
+        enable_history(config.state_db)
+    except (OSError, sqlite3.Error):
+        LOG.error("Status history unavailable; polling continues without monitoring history")
     LOG.info("Starting v%s categories=%r tags=%r poll=%ds dry_run=%s verify_media=%s import_grace=%dm complete_dir=%s incomplete_dir=%s incomplete_suffix=.!qB state=%s", VERSION, config.categories, config.tags, config.poll_seconds, config.dry_run, config.verify_video_content, config.import_grace_minutes, config.qbit_complete_dir, config.qbit_incomplete_dir, config.state_db)
     LOG.info("Cleanup settings automatic_leftovers=%s delete_settle_seconds=%d write_root=%s", config.cleanup_leftovers, config.delete_settle_seconds, config.cleanup_write_root)
     guard = None
