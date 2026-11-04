@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Torrent Guard · Status</title>
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="app.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <header class="header">
+        <div>
+          <h1>Torrent Guard</h1>
+          <p>Download protection &amp; cleanup status</p>
+        </div>
+        <div class="header-tools">
+          <span id="version">—</span><span id="updated">Connecting…</span
+          ><button id="refresh" type="button">↻ &nbsp;Refresh</button>
+        </div>
+      </header>
+      <div id="notice" role="status" hidden></div>
+      <section class="poll-strip" aria-label="Polling status">
+        <strong id="poll-health">Waiting for status</strong
+        ><span id="mode">Mode —</span><span id="last-poll">Last poll: —</span
+        ><span id="uptime">Uptime: —</span>
+      </section>
+      <section
+        id="services"
+        class="services"
+        aria-label="Service connections"
+      ></section>
+      <div class="main-grid">
+        <section class="panel activity-panel">
+          <div class="section-head">
+            <h2>Activity overview</h2>
+            <div class="ranges" role="group" aria-label="Statistics window">
+              <button type="button" data-hours="6">6 hours</button
+              ><button type="button" data-hours="12" aria-pressed="true">
+                12 hours</button
+              ><button type="button" data-hours="24">24 hours</button>
+            </div>
+          </div>
+          <div class="metrics" id="metrics"></div>
+          <p class="note" id="coverage">Waiting for recorded history.</p>
+          <div class="recent">
+            <h2>Recent downloads</h2>
+            <p class="note">
+              Latest recorded decisions · expand a download for details
+            </p>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Download</th>
+                    <th scope="col">Decision</th>
+                    <th scope="col">Updated</th>
+                  </tr>
+                </thead>
+                <tbody id="activity"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+        <section class="panel">
+          <h2>Pending work</h2>
+          <dl class="counters" id="counters"></dl>
+          <p class="note" id="snapshot-age">
+            Counts appear after a completed poll.
+          </p>
+          <div id="torrent-states" class="note"></div>
+        </section>
+      </div>
+      <div class="bottom-grid">
+        <section class="panel">
+          <h2>Warnings &amp; errors</h2>
+          <div id="issues"></div>
+        </section>
+        <section class="panel">
+          <h2>Drive access</h2>
+          <div id="drives"></div>
+          <p class="note">
+            Directory checks; download mounts are checked read-only. Temporary
+            write probes run only in state and the verified cleanup alias.
+          </p>
+        </section>
+      </div>
+      <section class="panel work-panel">
+        <div class="section-head">
+          <h2>Deletion &amp; retry details</h2>
+          <span class="note"
+            >Up to 50 pending downloads and 25 holds of each kind</span
+          >
+        </div>
+        <div id="work-details"></div>
+      </section>
+      <footer>
+        <span
+          >Auto-refresh every 10 seconds
+          <span class="separator">·</span> Diagnostics collected once per
+          minute</span
+        ><span>Timezone: Eastern Time</span>
+      </footer>
+      <p class="note settings" id="settings"></p>
+    </main>
+  </body>
+</html>

@@ -10,6 +10,8 @@ RUN mkdir -p /state && chown 1000:1000 /state
 COPY --chown=1000:1000 guard.py /app/guard.py
 COPY --chown=1000:1000 deletion.py /app/deletion.py
 COPY --chown=1000:1000 status_report.py /app/status_report.py
+COPY --chown=1000:1000 status_web.py /app/status_web.py
+COPY --chown=1000:1000 web /app/web
 COPY --chown=1000:1000 scripts/watch_logs.py /app/watch_logs.py
 COPY --chown=1000:1000 scripts/watch_logs.py /app/scripts/watch_logs.py
 USER 1000:1000

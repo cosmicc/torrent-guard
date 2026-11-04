@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v1.6** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v1.7** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -14,8 +14,8 @@ grace interval has elapsed (15 minutes by default).
   before qBittorrent is asked to delete their tracked data.
 - Successful imports are never blocklisted. Pending deletion attempts recheck
   completion, media, and import evidence; uncertainty preserves the download.
-- Runs without exposed ports, root privileges, Docker socket access, or a
-  writable media mount. Persistent SQLite state and rotating logs support retries.
+- Runs without root privileges, Docker socket access, or a writable media mount.
+  A read-only status page runs in the same container behind your authenticated Nginx proxy.
 - Color-coded live logs and a Docker healthcheck show ongoing polling activity.
 - Timeout rules require a `movies` or `tv` tag: metadata waits over 10 minutes,
   zero-byte stalls for an hour, or stalls below 25% with zero swarm seeders for
@@ -63,17 +63,12 @@ failures preserve downloads and retry with backoff. See
 
 ## Monitor
 
-Run a one-shot status report on the Docker host (works from any directory):
-
-```bash
-docker exec -it torrent-guard python /app/guard.py --status
-```
-
-Shows live API connections, polling health, drive access/free space, pending
-work, 6/12/24-hour event statistics and recent warnings/errors. Write tests use
-temporary files in state and the verified completed-cleanup mount when enabled.
-Statistics begin with v1.6 and survive log rotation. See
-[status details](INSTALL.md#command-line-status) for options and limits.
+Open your configured status hostname for an auto-refreshing overview of API
+connections, polling health, drive access, recent downloads, pending deletions,
+retry holds, 6/12/24-hour event statistics, warnings and errors. No separate web
+container is needed. Your Nginx server supplies TLS/authentication; only configured
+proxy IPs may reach the backend. See [web status setup](INSTALL.md#web-status-page).
+The v1.6 `--status` CLI is replaced by this page; existing history is preserved.
 
 For readable, colored event blocks in a PuTTY/SSH terminal, run from the project
 checkout on the Docker host (requires Python 3):
@@ -125,7 +120,7 @@ Docker does not automatically restart unhealthy containers.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile guard.py deletion.py status_report.py scripts/release_notes.py scripts/watch_logs.py
+python3 -m py_compile guard.py deletion.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
 python3 scripts/release_notes.py
 ```
 

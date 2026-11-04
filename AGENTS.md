@@ -8,7 +8,7 @@ Torrent Guard is a long-running Python 3.12 daemon deployed via Docker Compose o
 
 The highest priority is preventing deletion of useful, unimported media. API outages, ambiguous ownership, missing/moving files and incomplete import history must not be treated as proof of a bad torrent or a completed import. Missing metadata alone is inconclusive; v1.5 applies explicit observed timeouts only to torrents tagged movies or tv, as described below.
 
-There is no web service, exposed port, qBittorrent completion hook, Docker socket access or external database server. Standard Compose uses a read-only download mount. An explicit cleanup override can additionally mount only the completed-download directory writable. Library mounts must never be writable or targeted. The app polls qBittorrent and Arr APIs and records cleanup operations in a local SQLite journal.
+A bounded read-only HTTP status server runs inside the Guard container behind an authenticated Nginx proxy; its backend is restricted by connecting IP/CIDR. There is no qBittorrent completion hook, Docker socket access or external database server. Standard Compose uses a read-only download mount. An explicit cleanup override can additionally mount only the completed-download directory writable. Library mounts must never be writable or targeted. The app polls qBittorrent and Arr APIs and records cleanup operations in a local SQLite journal.
 
 ## Project structure
 
@@ -48,7 +48,8 @@ There is no web service, exposed port, qBittorrent completion hook, Docker socke
 - tests/test_stalled_timeout.py — persistent zero-byte/seedless stall timers, tag scope, recovery races and real-file verification.
 - tests/test_metadata_timeout.py — persisted observation deadlines, Arr-first zero-payload rejection, dry-run/restart safety and metadata-recovery races.
 - tests/test_monitoring.py — palette isolation, terminal-control escaping and completed-poll health checks.
-- status_report.py, tests/test_status.py — one-shot diagnostics and separate persistent monitoring history; see [status workflow](docs/status-command.md) before modifying these paths.
+- status_report.py, status_web.py, web/, tests/test_status.py — cached diagnostics, persistent monitoring history and the single-page HTTP status server; read [status workflow](docs/status-web.md) before modifying these paths.
+- docs/status-palette.svg, docs/status-concept.png — approved dark navy/slate and cyan palette and layout reference; example values are design fixtures, never production defaults.
 - docs/log-palette.svg — approved bright log palette with light/dark reference samples. Green success, bright cyan activity, yellow waiting/warnings, red errors/rejections, purple dry run; exact ANSI shades follow the terminal theme.
 - docs/deletion-verification.md — required reading before modifying file verification, cleanup permissions, journal manifests, quarantine recovery or deletion safety. Contains v0.6 deployment and validation details. Verified leftovers are permanently unlinked; quarantine is only a temporary identity-check step unless safety checks fail.
 - docs/filesystem-retries.md — required reading for v0.7 unresolved filesystem errors, NFS ESTALE handling, ffprobe I/O interpretation, retry persistence and recovery.
@@ -200,17 +201,17 @@ while stopped; see INSTALL.md. Keep the image non-root, mounts restricted and
 existing journals intact. qBittorrent API deletion uses qBittorrent's own process
 identity, not Guard's identity.
 
-Key variables: QBIT_URL/USERNAME/PASSWORD, SONARR_URL/API_KEY/CATEGORY/TAG, RADARR_URL/API_KEY/CATEGORY/TAG, DOWNLOADS_HOST_PATH, QBIT_DOWNLOAD_ROOT, GUARD_DOWNLOAD_ROOT, QBIT_COMPLETE_DIR, QBIT_INCOMPLETE_DIR, VERIFY_VIDEO_CONTENT, COMPLETED_SETTLE_SECONDS, FFPROBE_TIMEOUT_SECONDS, POLL_SECONDS, MAX_AGE_HOURS, REJECT_NO_VIDEO, IMPORT_GRACE_MINUTES, IMPORT_CHECK_SECONDS, HISTORY_LOOKBACK_DAYS, DRY_RUN, STATE_DB, LOG_FILE, LOG_LEVEL, LOG_MAX_BYTES, LOG_BACKUP_COUNT, LOG_COLOR and HEALTHCHECK_MAX_AGE_SECONDS.
+Key variables: QBIT_URL/USERNAME/PASSWORD, SONARR_URL/API_KEY/CATEGORY/TAG, RADARR_URL/API_KEY/CATEGORY/TAG, DOWNLOADS_HOST_PATH, QBIT_DOWNLOAD_ROOT, GUARD_DOWNLOAD_ROOT, QBIT_COMPLETE_DIR, QBIT_INCOMPLETE_DIR, VERIFY_VIDEO_CONTENT, COMPLETED_SETTLE_SECONDS, FFPROBE_TIMEOUT_SECONDS, POLL_SECONDS, MAX_AGE_HOURS, REJECT_NO_VIDEO, IMPORT_GRACE_MINUTES, IMPORT_CHECK_SECONDS, HISTORY_LOOKBACK_DAYS, DRY_RUN, STATE_DB, LOG_FILE, LOG_LEVEL, LOG_MAX_BYTES, LOG_BACKUP_COUNT, LOG_COLOR, HEALTHCHECK_MAX_AGE_SECONDS, STATUS_ENABLED, STATUS_PORT, STATUS_ALLOWED_CLIENTS, and Compose-only STATUS_BIND_ADDRESS/STATUS_HOST_PORT.
 
 ### Monitoring contract
 
-`--status` is a separate diagnostic path before logging initialization or
-heartbeat changes. Never construct Guard/PendingStore, mutate deletion evidence,
-or use monitoring statistics to authorize cleanup. Live checks authenticate and
-read APIs only. Explicitly requested temporary-file probes are restricted to
-state and an identity-matched completed cleanup alias. The daemon alone writes
-separate monitoring history, including in dry-run mode; the deletion journal's
-dry-run guarantees remain unchanged. Details: [status workflow](docs/status-command.md).
+The v1.7 web page replaces `--status`. Nginx supplies authentication and TLS;
+only explicit TCP peer IPs/CIDRs may access fixed GET/HEAD routes. Never trust
+forwarded headers for this allowlist. Browser requests read cached data and
+must not initiate probes, mutate journals or authorize cleanup. Diagnostics run
+in an isolated subprocess off the polling thread; only completed Guard polls
+advance liveness. Keep the deletion journal's dry-run guarantees and preserve
+v1.6 monitoring history. Read [status workflow](docs/status-web.md).
 
 Additional cleanup controls are `CLEANUP_LEFTOVERS` (default false),
 `DELETE_SETTLE_SECONDS` (default 120, minimum 30), and the Compose-only
@@ -260,10 +261,9 @@ that would conceal stalled processing. Log HEARTBEAT at DEBUG at most once per
 numeric pending_deletion, verifying_deletion, waiting_for_import, import_grace,
 metadata_waits, filesystem_holds and cleanup_retries counters. Import counters
 reflect the last observed evidence; retry/verification counts overlap pending
-work. Status reporting is read-only and must not make extra API calls. The Dockerfile invokes
+work. The periodic INFO STATUS log uses existing observations only; background web diagnostics perform independent read-only API checks. The Dockerfile invokes
 `python /app/guard.py --healthcheck` every 30 seconds (5-second timeout,
-60-second startup grace, 3 retries). The CLI must bypass credentials and logging
-initialization and remain read-only. Freshness defaults to 300 seconds via
+60-second startup grace, 3 retries). The healthcheck CLI must bypass credentials, logging and web initialization and remain read-only. Freshness defaults to 300 seconds via
 `HEALTHCHECK_MAX_AGE_SECONDS`; document tuning for long polls. Handled Arr or
 per-torrent failures may coexist with healthy polling; health is not dependency
 readiness or proof of deletion. Unhealthy status alone does not trigger a Docker
@@ -290,7 +290,7 @@ Treat docker compose config output as possibly containing secrets; sanitize befo
 - Preserve dry-run guarantees, cross-Arr category/tag isolation, defer-vs-reject distinction and explicit deletion with data through the qBittorrent API.
 - Test fail-closed behavior on unreachable Arr APIs, incomplete/late move, malformed paths, unknown file types, repeated HTTP errors, journal restarts, and multi-episode partial imports. Assert the ORDER and ABSENCE of destructive calls as well as expected calls.
 - Run: python3 -m unittest discover -s tests -v
-- Run: python3 -m py_compile guard.py deletion.py status_report.py scripts/release_notes.py scripts/watch_logs.py
+- Run: python3 -m py_compile guard.py deletion.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
 - Run: python3 scripts/release_notes.py (validates version consistency and changelog structure without publishing).
 - Run: docker compose config using safe dummy .env values when appropriate; NEVER commit secrets.
 - Update README, INSTALL.md and .env.example as appropriate when operator-facing flags or behavior change. Document state migrations and safety impact.
