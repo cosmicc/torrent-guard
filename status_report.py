@@ -1,4 +1,4 @@
-"""Host-invoked diagnostics and independent, bounded monitoring history.
+"""Cached web diagnostics and independent, bounded monitoring history.
 
 Monitoring never authorizes cleanup or changes the deletion journal. The daemon
 writes a separate SQLite file; the report opens both databases read-only.
@@ -12,19 +12,30 @@ import math
 import os
 from pathlib import Path, PurePosixPath
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
 import time
 import uuid
 
-from scripts.watch_logs import safe_text, wrap_text
+from scripts.watch_logs import safe_text
 
 RETENTION = 7 * 86400
 
 class DiagnosticError(Exception):
     """An intentionally public diagnostic without remote response content."""
+
+
+def public_error(exc: Exception) -> str:
+    """Expose diagnostic types and status codes, never raw API response bodies."""
+    if isinstance(exc, DiagnosticError):
+        return private_text(str(exc))
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "Check timed out; retrying automatically"
+    if isinstance(exc, OSError) and exc.errno:
+        return os.strerror(exc.errno)
+    status = getattr(exc, "status", None)
+    return f"HTTP {status}" if status is not None else type(exc).__name__ + "; check private audit logs"
 
 
 def private_text(message: str) -> str:
@@ -65,6 +76,7 @@ class StatusHistory(logging.Handler):
         self.database = sqlite3.connect(path, timeout=1)
         os.chmod(path, 0o600)
         self.database.executescript("""
+            CREATE TABLE IF NOT EXISTS activity (at REAL NOT NULL, decision TEXT NOT NULL, message TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS events (at REAL NOT NULL, metric TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS events_at ON events(at);
@@ -92,6 +104,15 @@ class StatusHistory(logging.Handler):
             elif record.levelno >= logging.WARNING:
                 metrics.append("warnings")
             with self.database:
+                decision = next((label for prefix, label in (
+                    ("ACCEPT completed ", "Validated"), ("CLEANED ", "Cleaned"),
+                    ("WAIT import ", "Waiting for import"), ("CLEANUP scheduled ", "Cleanup scheduled"),
+                    ("REJECT candidate ", "Rejection candidate"), ("DRY RUN:", "Dry run")
+                ) if message.startswith(prefix)), None)
+                if decision:
+                    self.database.execute("INSERT INTO activity VALUES (?, ?, ?)",
+                                          (record.created, decision, private_text(message)[:2000]))
+                    self.database.execute("DELETE FROM activity WHERE rowid NOT IN (SELECT rowid FROM activity ORDER BY rowid DESC LIMIT 50)")
                 self.database.executemany("INSERT INTO events VALUES (?, ?)",
                                           [(record.created, metric) for metric in metrics])
                 if record.levelno >= logging.WARNING:
@@ -153,7 +174,7 @@ def directory_fd(path: Path):
         os.close(descriptor)
 
 
-def probe_drive(path: Path, write: bool = False, match: Path | None = None) -> str:
+def probe_drive(path: Path, write: bool = False, match: Path | None = None) -> dict:
     """Exercise listing/statvfs and optionally a unique create/read/remove test.
 
     Only our exclusively created test file is removed. Completed write probes also
@@ -190,198 +211,153 @@ def probe_drive(path: Path, write: bool = False, match: Path | None = None) -> s
                 finally:
                     os.close(descriptor)
             writable = "create/write/fsync/read/remove OK"
-        return f"read/list OK; free {free / 2**30:.1f} GiB / {total / 2**30:.1f} GiB; write: {writable}"
+        return {"readable": True, "write_tested": write, "free_bytes": free,
+                "total_bytes": total, "detail": "Read/list OK; write: " + writable}
 
 
-def check_drive(path: Path, write: bool = False, match: Path | None = None) -> str:
+def check_drive(path: Path, write: bool = False, match: Path | None = None) -> dict:
     """Isolate slow filesystem probes from the report, with a 10-second limit."""
     result = subprocess.run([sys.executable, str(Path(__file__).absolute()),
-                             json.dumps([str(path), write, str(match) if match else None])],
+                             "--drive", json.dumps([str(path), write, str(match) if match else None])],
                             capture_output=True, text=True, timeout=10, check=False)
     if result.returncode:
         # Child output contains only our fixed diagnostic/OS error descriptions.
         raise DiagnosticError(result.stdout.strip() or "drive probe failed")
-    return result.stdout.strip()
+    return json.loads(result.stdout)
 
 
-class Report:
-    """Render compact wrapped terminal output with sanitized external text."""
-
-    def __init__(self, color: bool, width: int):
-        self.color = color
-        self.width = width
-        self.failed = False
-
-    def line(self, text: str, code: str = "96") -> None:
-        """Wrap before coloring so external terminal controls remain inert."""
-        for paragraph in text.split("\n"):
-            for row in wrap_text(private_text(paragraph), self.width, ""):
-                print(f"\033[{code}m{row}\033[0m" if self.color else row)
-
-    def check(self, label: str, operation) -> None:
-        """Keep independent checks running after errors; omit raw API errors."""
-        try:
-            detail = operation()
-            self.line(f"OK    {label}: {detail}", "92")
-        except Exception as exc:
-            # Diagnostic boundary: one unavailable service must not hide others.
-            # Raw HTTP exceptions can contain URLs, response bodies and secrets.
-            self.failed = True
-            status = getattr(exc, "status", None)
-            if isinstance(exc, DiagnosticError):
-                detail = str(exc)
-            elif isinstance(exc, subprocess.TimeoutExpired):
-                detail = "drive check timed out after 10s"
-            elif isinstance(exc, OSError) and exc.errno is not None:
-                detail = os.strerror(exc.errno)
-            else:
-                detail = f"HTTP {status}" if status is not None else type(exc).__name__
-            self.line(f"FAIL  {label}: {detail}; inspect private audit logs/configuration", "91")
-
-
-def show_history(report: Report, path: Path, now: float) -> None:
-    """Report exact rolling event windows and explicit partial coverage."""
-    from guard import display_time
+def history_data(path: Path, now: float) -> dict:
+    """Read exact rolling windows and retained events in a consistent snapshot."""
+    from scripts.watch_logs import NAME
 
     with read_database(path) as database:
-        since_row = database.execute("SELECT value FROM metadata WHERE key='since'").fetchone()
-        since = float(since_row[0])
+        database.execute("BEGIN")
+        metadata = dict(database.execute("SELECT key, value FROM metadata"))
+        since = float(metadata["since"])
         if not math.isfinite(since) or since > now:
-            raise ValueError("invalid history start")
-        report.line("\nEvent statistics (overlapping rolling windows)")
-        report.line("Window       Cleaned   Reject candidates   Warnings   Errors")
+            raise DiagnosticError("History start is invalid; counts unavailable")
+        windows = {}
         for hours in (6, 12, 24):
             counts = dict(database.execute("SELECT metric, count(*) FROM events WHERE at >= ? AND at <= ? GROUP BY metric",
                                            (now - hours * 3600, now)))
-            partial = " partial" if since > now - hours * 3600 else ""
-            code = "91" if counts.get("errors") else "93" if counts.get("warnings") else "96"
-            report.line(f"{hours:>2}h{partial:<9} {counts.get('cleaned', 0):>6} {counts.get('rejected', 0):>19}"
-                        f" {counts.get('warnings', 0):>10} {counts.get('errors', 0):>8}", code)
-        report.line("Recorded since " + display_time(since) + "; daemon downtime is not observed. Counts are events, not unique torrents.", "93")
-        gap = database.execute("SELECT value FROM metadata WHERE key='gap'").fetchone()
-        if gap:
-            report.line("History has a recording failure; counts may be incomplete. Last failure: " + display_time(float(gap[0])), "93")
-        started = database.execute("SELECT value FROM metadata WHERE key='started'").fetchone()
-        if started:
-            report.line("Daemon started: " + display_time(float(started[0])) + f" ({max(0, now - float(started[0])) / 3600:.1f}h ago)")
-        snapshot = database.execute("SELECT value FROM metadata WHERE key='snapshot'").fetchone()
-        if snapshot:
-            value = json.loads(snapshot[0])
-            report.line("\nLast completed-poll snapshot: " + display_time(float(value["at"]))
-                        + f" ({max(0, now - float(value['at'])):.0f}s ago; last observed counts)")
-            for key, count in value["counts"].items():
-                report.line(f"  {key}: {count}")
-        else:
-            report.line("No completed-poll snapshot recorded yet", "93")
-        report.line("\nLatest warnings and errors (up to 5 of each)")
-        for levels, title in (("WARNING", "Warnings"), ("ERROR", "Errors")):
-            rows = database.execute("SELECT at, level, message FROM issues WHERE level "
-                                    + ("= 'WARNING'" if levels == "WARNING" else "IN ('ERROR','CRITICAL')")
-                                    + " ORDER BY rowid DESC LIMIT 5").fetchall()
-            if not rows:
-                report.line(title + ": none retained", "92")
-            for at, level, message in rows:
-                report.line(f"{display_time(at)} {level}: {message}", "93" if levels == "WARNING" else "91")
+            windows[str(hours)] = {metric: counts.get(metric, 0) for metric in ("cleaned", "rejected", "warnings", "errors")}
+            windows[str(hours)]["partial"] = since > now - hours * 3600
+        issues = []
+        # Preserve visibility of the last errors even during a warning burst.
+        for condition in ("level='WARNING'", "level IN ('ERROR','CRITICAL')"):
+            issues.extend({"at": at, "level": level, "message": private_text(message)}
+                          for at, level, message in database.execute(
+                              f"SELECT at, level, message FROM issues WHERE {condition} ORDER BY rowid DESC LIMIT 4"))
+        issues.sort(key=lambda item: item["at"], reverse=True)
+        activity = []
+        # v1.6 history remains readable before the daemon's additive migration.
+        if database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='activity'").fetchone():
+            for at, decision, message in database.execute("SELECT at, decision, message FROM activity ORDER BY rowid DESC LIMIT 30"):
+                name = NAME.search(message)
+                activity.append({"at": at, "decision": decision, "name": private_text(name['value'][1:-1] if name else message[:120]),
+                                 "detail": private_text(message)})
+        return {"available": True, "since": since, "gap": metadata.get("gap"), "windows": windows,
+                "started": float(metadata["started"]) if "started" in metadata else None,
+                "snapshot": json.loads(metadata["snapshot"]) if "snapshot" in metadata else None,
+                "issues": issues, "activity": activity}
 
 
-def journal_summary(path: Path) -> str:
-    """Read persisted pending work in one consistent SQLite snapshot."""
+def journal_data(path: Path, names: dict) -> dict:
+    """Read bounded pending/retry details without constructing or migrating a journal."""
     with read_database(path) as database:
         database.execute("BEGIN")
-        counts = []
-        for table in ("pending", "filesystem_retry", "cleanup_retry", "metadata_wait", "stalled_wait"):
-            count = database.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
-            counts.append(f"{table}={count}")
-        phases = database.execute("SELECT phase, count(*) FROM pending GROUP BY phase").fetchall()
-        return "; ".join(counts + [f"phase {phase}={count}" for phase, count in phases])
+        counts = {table: database.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                  for table in ("pending", "filesystem_retry", "cleanup_retry", "metadata_wait", "stalled_wait")}
+        pending = [{"name": private_text(name), "app": app, "phase": phase, "kind": kind, "reason": private_text(reason)}
+                   for name, app, phase, kind, reason in database.execute(
+                       "SELECT name, app, phase, kind, reason FROM pending ORDER BY rowid LIMIT 50")]
+        holds = []
+        for table, label in (("filesystem_retry", "Filesystem hold"), ("cleanup_retry", "Cleanup retry")):
+            for h, name, attempt, next_at, reason in database.execute(
+                    f"SELECT r.hash, p.name, r.attempts, r.next_at, r.reason FROM {table} r LEFT JOIN pending p ON r.hash=p.hash ORDER BY r.next_at LIMIT 25"):
+                holds.append({"name": private_text(name or names.get(h) or "Retained download"), "type": label,
+                              "attempt": attempt, "next_at": next_at, "reason": private_text(reason)})
+        return {"available": True, "counts": counts, "pending": pending, "holds": holds}
 
 
-def run_status(color: str = "always", width: int | None = None) -> int:
-    """Run one-shot diagnostics without polling, journal writes or cleanup."""
-    from guard import ApiError, Config, HEARTBEAT_FILE, Http, Qbit, VERSION, display_time, healthcheck, torrent_app
+def collect_status() -> dict:
+    """Collect bounded diagnostics in an isolated process, never on an HTTP request."""
+    from guard import ApiError, Config, Http, Qbit, VERSION, torrent_app
 
-    report = Report(color == "always" or (color == "auto" and sys.stdout.isatty()),
-                    width or max(20, shutil.get_terminal_size((80, 24)).columns))
-    now = time.time()
-    report.line(f"Torrent Guard v{VERSION} status | {display_time(now)}")
+    config = Config.from_env()
+    result = {"version": VERSION, "collected_at": time.time(), "services": [], "drives": [],
+              "settings": {"dry_run": config.dry_run, "cleanup_leftovers": config.cleanup_leftovers,
+                           "import_grace_minutes": config.import_grace_minutes, "poll_seconds": config.poll_seconds,
+                           "verify_video_content": config.verify_video_content, "uid": os.getuid(), "gid": os.getgid()}}
+    names = {}
     try:
-        config = Config.from_env()
-    except (ValueError, OSError):
-        report.line("FAIL  Configuration invalid; check required settings in the container environment", "91")
-        return 1
-    report.line(f"Mode: {'DRY RUN' if config.dry_run else 'LIVE'}; cleanup leftovers: {config.cleanup_leftovers}; "
-                f"import grace: {config.import_grace_minutes}m; UID:GID {os.getuid()}:{os.getgid()}",
-                "95" if config.dry_run else "96")
-
-    def polling():
-        if healthcheck() != 0:
-            raise DiagnosticError("no recent completed poll (heartbeat missing, stale or invalid)")
-        age = time.monotonic() - float(HEARTBEAT_FILE.read_text())
-        return f"last completed poll {age:.0f}s ago"
-
-    report.check("Polling heartbeat", polling)
-
-    def qbit_connection():
         client = Qbit(config)
         torrents = client.torrents()
         if not isinstance(torrents, list) or any(not isinstance(row, dict) for row in torrents):
-            raise ApiError("invalid torrent inventory")
-        owned = [row for row in torrents if torrent_app(row, config)]
+            raise ApiError("Invalid torrent inventory")
+        owned = [torrent for torrent in torrents if torrent_app(torrent, config)]
+        names = {str(row.get("hash", "")).lower(): str(row.get("name", "Unnamed download")) for row in torrents}
         states = {}
         for row in owned:
-            state = str(row.get("state", "unknown"))
+            state = private_text(str(row.get("state", "unknown")))
             states[state] = states.get(state, 0) + 1
-        return f"authenticated; total={len(torrents)}, managed={len(owned)}; " + ", ".join(f"{key}={value}" for key, value in sorted(states.items()))
-
-    report.check("qBittorrent", qbit_connection)
+        result["services"].append({"name": "qBittorrent", "ok": True, "detail": "Authenticated · " + str(len(owned)) + " managed downloads",
+                                   "total": len(torrents), "managed": len(owned), "states": states})
+    except Exception as exc:
+        # Diagnostic boundary: keep independent sections available on failure.
+        result["services"].append({"name": "qBittorrent", "ok": False, "detail": public_error(exc)})
     for app in ("SONARR", "RADARR"):
         instance = config.instances.get(app)
-        if instance is None:
-            report.line(f"SKIP  {app}: not configured", "93")
-            continue
-
-        def arr_connection(instance=instance):
-            result = Http().request("GET", instance.url + "/api/v3/system/status", headers={"X-Api-Key": instance.api_key})
-            if not isinstance(result, dict) or not isinstance(result.get("version"), str) or not result["version"]:
-                raise ApiError("invalid system status")
-            return "authenticated; version " + result["version"]
-
-        report.check(app, arr_connection)
-    report.line("\nDrive access (directory checks; not a full media-file or mount-source audit)")
+        service = {"name": app.title(), "configured": instance is not None, "ok": None, "detail": "Not configured"}
+        if instance:
+            try:
+                data = Http().request("GET", instance.url + "/api/v3/system/status", headers={"X-Api-Key": instance.api_key})
+                if not isinstance(data, dict) or not isinstance(data.get("version"), str) or not data["version"]:
+                    raise ApiError("Invalid system status")
+                service.update(ok=True, detail="Authenticated · v" + private_text(data["version"]))
+            except Exception as exc:
+                service.update(ok=False, detail=public_error(exc))
+        result["services"].append(service)
     root = Path(config.guard_download_root)
-    mapped = {}
-    for label, location in (("Completed", config.qbit_complete_dir), ("Incomplete", config.qbit_incomplete_dir)):
-        mapped[label] = root / PurePosixPath(location).relative_to(PurePosixPath(config.qbit_download_root))
-    for label, path in {"Downloads": root, **mapped}.items():
-        report.check(f"{label} {path}", lambda path=path: check_drive(path))
-    report.check("State " + str(Path(config.state_db).parent), lambda: check_drive(Path(config.state_db).absolute().parent, write=True))
+    completed = root / PurePosixPath(config.qbit_complete_dir).relative_to(config.qbit_download_root)
+    incomplete = root / PurePosixPath(config.qbit_incomplete_dir).relative_to(config.qbit_download_root)
+    drives = [("Downloads", root, False, None), ("Completed", completed, False, None),
+              ("Incomplete", incomplete, False, None), ("State", Path(config.state_db).absolute().parent, True, None)]
     if config.cleanup_leftovers:
-        report.check("Completed cleanup alias " + config.cleanup_write_root,
-                     lambda: check_drive(Path(config.cleanup_write_root), write=True, match=mapped["Completed"]))
-    else:
-        report.line("SKIP  Completed cleanup write test: cleanup disabled", "93")
-    report.check("Persistent journal", lambda: journal_summary(Path(config.state_db)))
-
-    def history():
-        show_history(report, history_path(config.state_db), now)
-        return "persistent history read"
-
-    report.check("Monitoring history", history)
-    report.line("\nStatus checks do not stop, blocklist or delete downloads. API status does not prove import history is available.")
-    return 1 if report.failed else 0
+        drives.append(("Completed cleanup", Path(config.cleanup_write_root), True, completed))
+    for name, path, write, match in drives:
+        drive = {"name": name, "path": private_text(str(path)), "ok": False}
+        try:
+            drive.update(check_drive(path, write, match), ok=True)
+        except Exception as exc:
+            drive["detail"] = public_error(exc)
+        result["drives"].append(drive)
+    try:
+        result["history"] = history_data(history_path(config.state_db), time.time())
+    except Exception as exc:
+        result["history"] = {"available": False, "detail": public_error(exc)}
+    try:
+        result["journal"] = journal_data(Path(config.state_db), names)
+    except Exception as exc:
+        result["journal"] = {"available": False, "detail": public_error(exc)}
+    result["collected_at"] = time.time()
+    return result
 
 
 if __name__ == "__main__":
-    # Private subprocess entry point. A failed probe returns no raw exception or
-    # path details; the parent labels the failing drive and keeps checking.
     try:
-        location, writable, expected = json.loads(sys.argv[1])
-        print(probe_drive(Path(location), writable, Path(expected) if expected else None))
+        if sys.argv[1] == "--collect":
+            print(json.dumps(collect_status(), allow_nan=False))
+        elif sys.argv[1] == "--drive":
+            location, writable, expected = json.loads(sys.argv[2])
+            print(json.dumps(probe_drive(Path(location), writable, Path(expected) if expected else None)))
+        else:
+            raise SystemExit(2)
     except DiagnosticError as exc:
         print(str(exc))
         raise SystemExit(1)
     except OSError as exc:
-        print(os.strerror(exc.errno) if exc.errno else "filesystem operation failed")
+        print(os.strerror(exc.errno) if exc.errno else "Filesystem operation failed")
         raise SystemExit(1)
     except (ValueError, TypeError, IndexError):
         raise SystemExit(1)

@@ -3,7 +3,7 @@ services:
   torrent-guard:
     build:
       context: .
-    image: torrent-guard:1.6
+    image: torrent-guard:1.7
     # Match the host download owner's numeric IDs; remain non-root.
     user: "${GUARD_UID:-1000}:${GUARD_GID:-1000}"
     container_name: torrent-guard
@@ -11,6 +11,10 @@ services:
     init: true
     env_file:
       - .env
+    # For a remote Nginx server, bind a private host IP and allow only that
+    # proxy in STATUS_ALLOWED_CLIENTS plus the host firewall. See INSTALL.md.
+    ports:
+      - "${STATUS_BIND_ADDRESS:-127.0.0.1}:${STATUS_HOST_PORT:-8088}:${STATUS_PORT:-8080}"
     # Access host-published qBittorrent/Sonarr/Radarr API ports on Linux.
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -32,4 +36,4 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=8m
     pids_limit: 48
     mem_limit: 256m
-    # No inbound listening ports, Docker socket or write access to downloads.
+    # Status is read-only; no Docker socket or write access to downloads.

@@ -3,6 +3,35 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 1.7 - 11.03.2026
+
+### Added
+
+- Single-page web status dashboard inside the existing container: service and
+  drive health, recent download decisions, pending deletion phases, retry holds,
+  import waits, 6/12/24-hour statistics, warnings and errors.
+- Approved navy/slate and cyan design with responsive layouts, auto-refresh,
+  explicit stale/unavailable states and expandable download details.
+- Restricted GET/HEAD routes, actual-peer IP/CIDR allowlist, concurrency limits,
+  no-store responses and browser security headers behind your authenticated Nginx.
+
+### Changed
+
+- Replace the v1.6 `--status` CLI with the web page. Preserve existing monitoring
+  history and add a bounded recent-decision table without changing deletion data.
+- Run diagnostics on a bounded background schedule, separate from torrent polling
+  and HTTP requests. Keep temporary write tests inside state and the verified
+  completed cleanup alias. Nginx provides authentication/TLS on its existing host.
+- Add configurable status port, private host binding and allowed proxy clients;
+  document Docker firewall restrictions and upgrade/reverse-proxy setup.
+
+### Fixed
+
+- Keep slow probes and browser traffic independent of polling; stale observations
+  and lost browser connections no longer appear as current service health.
+- Render download/log strings as text, redact configured credentials and retain
+  fail-closed cleanup, dry-run and independent heartbeat behavior.
+
 ## 1.6 - 11.02.2026
 
 ### Added

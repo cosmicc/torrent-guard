@@ -321,77 +321,118 @@ retain their existing history and grace requirements.
 
 ## Live monitoring and Docker health
 
-### Command-line status
+### Web status page
 
-After upgrading to v1.6, run this on the Docker host from any directory:
+Version 1.7 replaces the `--status` CLI with one page served by the existing
+Torrent Guard container. No additional Nginx/frontend container or JavaScript
+build is needed. Open the dedicated hostname configured on your main Nginx
+server. Nginx must supply TLS and authentication for **the whole site**, including
+`/api/status` and static assets: download names and operational details are private.
+The backend has no login of its own and must not be exposed to the public internet.
 
-```bash
-docker exec -it torrent-guard python /app/guard.py --status
-# Plain output for scripts; no terminal required:
-docker exec torrent-guard python /app/guard.py --status --color never --width 100
+For your Nginx server on another machine, merge these settings into the existing
+host `.env` (replace the example addresses with your actual private addresses):
+
+```dotenv
+STATUS_ENABLED=true
+STATUS_PORT=8080
+STATUS_BIND_ADDRESS=192.0.2.20
+STATUS_HOST_PORT=8088
+STATUS_ALLOWED_CLIENTS=192.0.2.10/32
 ```
 
-From the checkout, `docker compose exec torrent-guard python /app/guard.py --status`
-also works. The container must be running. The report uses its existing
-configuration, credentials, network, mounted paths and non-root identity.
-No host Python, extra packages, exposed port or Docker socket inside Guard is needed.
+Here `192.0.2.20` represents the Docker host and `192.0.2.10` the connecting Nginx
+server. These are documentation addresses, not usable deployment defaults.
+`STATUS_BIND_ADDRESS` and `STATUS_HOST_PORT` control Docker's host publication;
+`STATUS_PORT` controls the internal listener. Bind to a specific private host
+address and permit only Nginx in the host/network firewall. Account for Docker's
+published-port rules (for example, the `DOCKER-USER` chain); a generic UFW rule
+alone may not restrict Docker forwarding.
 
-The report checks qBittorrent login and torrent inventory, Sonarr/Radarr
-authenticated system status, last completed poll, managed torrent states,
-readable download/complete/incomplete directories and free disk space. It also
-shows live/dry-run mode, cleanup setting, import grace, runtime UID/GID, persisted
-pending phases/retry holds/timers, daemon start time and the most recent poll
-counters (with their timestamp). Disabled Arr instances are marked unconfigured.
-An API status check does not certify that its queue/history endpoints work;
-directory access does not validate every media file, the host mount source or
-the main library. Read-only download access is expected.
+`STATUS_ALLOWED_CLIENTS` is a comma-separated list of up to sixteen exact IPs or
+CIDRs, matched to the actual TCP peer, never `X-Forwarded-For`. Unrestricted `/0`
+networks are rejected. The defaults bind only `127.0.0.1:8088` on the host and
+allow loopback clients inside the container. Remote access requires the explicit
+settings above. Docker NAT may change the observed source for local connections;
+allow the actual trusted proxy address rather than widening access to a whole LAN.
+Set `STATUS_ENABLED=false` to disable the listener and collector.
 
-Write checks create a random mode-0600 `.torrent-guard-status-*` file in the
-state directory, write/fsync/read it, and remove it. If leftover cleanup is
-enabled, the command also tests its writable alias **after** verifying it is the
-same directory as the mapped completed root. Downloads and incomplete directories
-are never write-tested. No permissions or mounts change. These explicit probes
-run even in dry-run; they do not stop, blocklist or delete torrents, alter journal
-records, or refresh polling health. Each drive probe has a ten-second subprocess
-timeout. A killed/interrupted probe can leave its own test file; never sweep
-download files to resolve this. Kernel-level stalled NFS I/O can delay process
-termination beyond a userspace timeout.
+Inside your existing authenticated TLS Nginx server block, proxy the whole
+hostname to the Docker host's private published port:
 
-Rolling **6, 12 and 24 hour** totals count confirmed `CLEANED` events, rejection
-candidates, warnings and errors. These windows overlap. Counts are events, not
-unique torrents: rejection candidates include dry-run observations, may recur
-after restarts, and also count as warnings. Errors are separate from warnings.
-`CLEANED` includes zero-payload metadata removal, which verifies only client
-absence, and does not imply reclaimed disk space. Up to five latest warnings
-and five errors are shown, retained independently of log rotation.
+```nginx
+location / {
+    # Preserve your existing authentication/auth_request protection here.
+    proxy_pass http://192.0.2.20:8088;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 15s;
+    proxy_buffering off;
+}
+```
 
-The daemon collects monitoring in `<STATE_DB>.status.sqlite3` (by default
-`/state/torrent-guard.sqlite3.status.sqlite3`). Keep this file with the state
-directory to preserve statistics across recreations. It retains seven days of
-events and twenty issues per severity. Collection starts on the v1.6 upgrade;
-short windows are marked **partial**, old logs are not backfilled, and daemon
-downtime cannot be observed. Collection continues in dry-run and at higher
-console log thresholds without changing pending/deletion state. Monitoring
-failures are logged without blocking polling; recovered recording failures are
-flagged as potentially incomplete history. The report reads databases without
-creating or migrating them. Missing history is reported as unavailable.
+Use your real Docker host address instead of the example. Keep TLS certificate
+and authentication configuration on your existing Nginx server. If the hop
+between Nginx and Guard crosses an untrusted network, use a private VPN/tunnel;
+the lightweight backend speaks HTTP. Test the Nginx configuration and reload it
+through your normal management process. No access to that server is required
+for Guard's build, and this repository does not change your main Nginx setup.
 
-Exit code **0** means all enabled checks succeeded; **1** means at least one
-failed or data was unavailable. Historical errors and pending work are shown
-without making a currently healthy connection fail. Each check continues after
-independent failures. Default colors use the approved bright palette; use
-`--color auto` for terminal detection or `--color never` to disable them.
-`--width` overrides terminal width (minimum 20). Times use Eastern EST/EDT offsets.
-
-Upgrade by pulling v1.6 and rebuilding/recreating. Preserve the existing `.env`
-and `/config/torrent-guard`; no deletion-journal migration or reset is required:
+Pull v1.7, then rebuild/recreate using the same Compose files already in use:
 
 ```bash
 git pull
 docker compose up -d --build --force-recreate
-# If already using completed-download cleanup, use both files instead:
+# If completed-download cleanup is already enabled, use both files instead:
 # docker compose -f compose.yaml -f compose.cleanup.yaml up -d --build --force-recreate
 ```
+
+Keep `.env`, `/config/torrent-guard`, all journal evidence and the existing
+`<STATE_DB>.status.sqlite3` history file. The additive upgrade creates only a
+bounded recent-activity table in the monitoring database. Deletion tables are
+not migrated or reset. The application healthcheck and SSH log viewer remain.
+
+The page shows live/dry-run mode, polling heartbeat/uptime, API connections,
+managed torrent states, directory access/free space, recent validation/import/
+cleanup decisions, pending deletion names/phases/reasons, retry holds/deadlines,
+and recent warnings/errors. A refresh button and ten-second browser updates read
+a cached snapshot. Diagnostics run once per minute **after** the previous pass
+finishes, independently of polling. Each drive probe has a ten-second timeout;
+the complete collection has a 120-second limit. Collection failure preserves
+old results with an explicit warning; observations older than three minutes are
+marked stale. The heartbeat is read independently and never refreshed by HTTP
+or background diagnostics. A responsive page is not proof of healthy polling.
+
+State and the identity-matched completed cleanup alias (when enabled) receive
+exclusive mode-0600 temporary-file create/write/fsync/read/remove tests. Downloads
+and incomplete directories are checked read-only. Write tests run independently
+of dry-run mode and only on the collection schedule, never per browser request.
+An interrupted probe can leave its own `.torrent-guard-status-*` file; never
+sweep download files to resolve it. Kernel-level NFS stalls may delay process
+termination beyond userspace timeouts. Directory checks do not certify every
+media file, the underlying mount source, or library access. API system status
+checks do not prove Arr history endpoints are available.
+
+Rolling **6, 12 and 24 hour** totals are overlapping emitted-event counts, not
+unique downloads. Rejection candidates include dry-run observations and may
+repeat after restarts; they also count as warnings. Errors are separate from
+warnings. `CLEANED` includes zero-payload client removals and is not reclaimed
+disk space. History starts with v1.6 (or first startup if newer); short windows
+are marked partial, old logs are not backfilled, and downtime is not observed.
+The separate history retains seven days of event counts, twenty issues per
+severity and fifty recent decisions across log rotation/restarts. Recent decisions begin with v1.7. Up to eight recent decisions, four warnings,
+four errors and fifty pending records are displayed, with up to
+twenty-five holds per kind. Import counters show the timestamp of their last
+completed-poll snapshot; persisted timers exclude dry-run-only observations.
+
+All external text is escaped/redacted, shown as text rather than HTML, and served
+with no-store and restrictive browser headers. The page has no destructive
+controls or writable API. The HTTP server limits concurrent requests and accepts
+only fixed GET/HEAD routes; its proxy allowlist is an additional restriction,
+not a replacement for Nginx authentication. New colors follow the approved
+[navy/slate and cyan palette](docs/status-palette.svg). Display times use Eastern
+Time with EST/EDT; hover timestamps for their full zone/offset.
 
 ### SSH event viewer
 
@@ -503,7 +544,7 @@ unhealthy; health status is available for monitoring and alerts.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile guard.py deletion.py status_report.py scripts/release_notes.py scripts/watch_logs.py
+python3 -m py_compile guard.py deletion.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
 python3 scripts/release_notes.py
 # If Docker is available and .env has correct paths:
 docker compose config
