@@ -65,6 +65,78 @@ class CompletionTests(unittest.TestCase):
         self.guard.poll(now=NOW + 5)
         self.assertEqual(self.guard.store.entries(), [])
 
+    def test_all_seeding_states_use_imported_completion_cleanup(self):
+        for state in ("uploading", "stalledUP", "forcedUP"):
+            with self.subTest(state=state):
+                self.torrent["state"] = state
+                self.qbit.delete_with_data.reset_mock()
+                guard = Guard(self.cfg, self.qbit, {"RADARR": self.arr}, validator=self.validator)
+                try:
+                    guard.poll(now=NOW)
+                    self.qbit.delete_with_data.assert_called_once_with("abcde1")
+                    self.arr.blocklist_and_remove.assert_not_called()
+                    self.assertEqual(guard.store.entries()[0][-1], "imported")
+                finally:
+                    guard.store.db.close()
+
+    def test_seeding_still_waits_for_successful_arr_import(self):
+        for state in ("uploading", "stalledUP", "forcedUP"):
+            with self.subTest(state=state):
+                self.torrent["state"] = state
+                self.arr.imported_history.return_value = {}
+                guard = Guard(self.cfg, self.qbit, {"RADARR": self.arr}, validator=self.validator)
+                try:
+                    guard.poll(now=NOW)
+                    self.qbit.delete_with_data.assert_not_called()
+                    self.arr.blocklist_and_remove.assert_not_called()
+                finally:
+                    guard.store.db.close()
+
+    def test_non_media_download_is_rejected_and_replacement_requested_before_delete(self):
+        self.qbit.files.return_value = [{"name": "readme.txt", "priority": 1, "progress": 1}]
+        self.arr.queue_by_hash.return_value = {"abcde1": 42}
+        order = []
+        self.qbit.stop.side_effect = lambda _: order.append("stop")
+        self.arr.blocklist_and_remove.side_effect = lambda _: order.append("reject and replace")
+        self.qbit.delete_with_data.side_effect = lambda _: order.append("delete with data")
+        self.guard.poll(now=NOW)
+        self.assertEqual(order, ["stop", "reject and replace", "stop", "delete with data"])
+        self.assertEqual(self.guard.store.entries()[0][-1], "reject")
+        self.arr.imported_history.assert_not_called()
+
+    def test_save_tag_exempts_completed_imported_dangerous_and_no_media_releases(self):
+        for filename in ("Movie 2026.mkv", "fake.exe", "notes.txt"):
+            with self.subTest(filename=filename):
+                self.torrent["tags"] = "movies, SaVe"
+                self.qbit.files.return_value = [{**self.file, "name": filename}]
+                self.guard.poll(now=NOW)
+                self.qbit.stop.assert_not_called()
+                self.qbit.delete_with_data.assert_not_called()
+                self.arr.blocklist_and_remove.assert_not_called()
+                self.arr.imported_history.assert_not_called()
+                self.assertEqual(self.guard.store.entries(), [])
+
+    def test_save_added_before_bad_release_stop_prevents_rejection(self):
+        self.qbit.files.return_value = [{**self.file, "name": "fake.exe"}]
+        self.qbit.torrents.side_effect = [[self.torrent], [{**self.torrent, "tags": "movies, save"}]]
+        self.guard.poll(now=NOW)
+        self.qbit.stop.assert_not_called()
+        self.arr.blocklist_and_remove.assert_not_called()
+        self.qbit.delete_with_data.assert_not_called()
+
+    def test_save_added_after_bad_release_stop_prevents_blocklist(self):
+        self.qbit.files.return_value = [{**self.file, "name": "fake.exe"}]
+        self.arr.queue_by_hash.return_value = {"abcde1": 42}
+        self.qbit.stop.side_effect = lambda _: self.torrent.update(tags="movies, save")
+        self.guard.poll(now=NOW)
+        self.arr.blocklist_and_remove.assert_not_called()
+        self.qbit.delete_with_data.assert_not_called()
+
+    def test_positive_total_seeders_do_not_block_imported_cleanup(self):
+        self.torrent["num_complete"] = 3
+        self.guard.poll(now=NOW)
+        self.qbit.delete_with_data.assert_called_once_with("abcde1")
+
     def test_import_age_below_fifteen_min_does_not_cleanup(self):
         self.event["date"] = when(NOW-899)
         self.guard.poll(now=NOW)

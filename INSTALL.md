@@ -269,26 +269,47 @@ under the existing configured categories/tags. A matching category alone is not
 enough. This tag requirement applies to timeout rules; filename screening and
 successful-import cleanup keep their existing scope.
 
-| Condition continuously observed by Guard | Timeout |
+| Condition | Removal policy |
 | --- | --- |
-| `metaDL` or `forcedMetaDL`, with explicit zero payload and no file metadata | More than 10 minutes |
-| `stalledDL`, with zero lifetime downloaded bytes, zero completed bytes and zero progress | One hour |
-| `stalledDL`, strictly below 25% complete, no progress, and zero seeders reported in the swarm | Seven days |
+| Exact `save` tag, ignoring case | Exempt from every Guard stop/rejection/replacement/deletion, including completed/imported and bad releases |
+| Incomplete download with positive total seeders | Wait for seeders; exempt from shorter timeouts, subject only to the 30-day zero-active exception below 80% |
+| Below 15%, zero total swarm seeders | 3 observed hours |
+| 15% to under 50%, zero total swarm seeders | 3 observed days |
+| 50% to under 80%, zero total swarm seeders | 7 observed days |
+| 80% or more, still incomplete | Exempt from all incomplete-download timeouts |
+| Below 15%, stalled, zero speed and zero active/total seeders | 3 observed hours of stalling |
+| Below 80%, zero connected active seeders, any total count | 30 observed days without active seeders; reset when one connects |
+| Metadata, explicit zero payload and no file metadata | More than 10 observed minutes unless save or positive total seeders protects it |
 
-The weekly rule uses qBittorrent's `num_complete` swarm count, not just connected
-seeders. Unknown/missing/negative swarm counts preserve the download. A connected
-seeder also prevents this rule from firing. Total size, progress, byte counters
-and zero download speed must be explicit and valid. Swarm information is what
-qBittorrent reports; Guard cannot independently prove that no seed exists.
+**Save always wins.** It protects while the torrent remains tagged in
+qBittorrent. Removing the tag permits fresh normal authorization. If the torrent
+is manually removed, its files can qualify for normal orphan cleanup after the
+separate absence wait; no permanent ignore list is created. A pending cleanup
+cannot bypass save, even after a restart or when the tag appears between actions.
 
-Intentionally stopped, paused, queued, checking, moving and actively downloading
-torrents do not start timeout timers. Timers begin with Guard's first observation
-of the qualifying condition, survive daemon restarts/API outages, and reset on
-observed recovery, disappearance, tag removal, ownership/incarnation change or
-clock rollback. Switching between metadata states keeps the same timer. Stalled
-timers also reset when downloaded/completed bytes, progress, size, paths or tags
-change. Returning swarm seeders reset the weekly timer. No historical stalled
-time is inferred from the torrent's age.
+Total seeders means the reported swarm count (`num_complete`); active seeders
+means connected seeders (`num_seeds`). Positive totals protect shorter incomplete
+timeouts even when none are connected. The 30-day exception measures observed
+zero **active** seeders, never torrent age/added date. An old torrent is not
+immediately purged on upgrade. Connected seeders or missing/invalid active counts
+reset this clock. Peer progress and total-seeder changes alone do not. Metadata
+with positive totals also waits for connections; after the long observation,
+zero-payload client removal still cannot claim filesystem absence.
+
+Zero-total history survives peer progress and percentage-band changes. Recompute
+the required wait from the current percentage before every stop, blocklist and
+delete request. Use the higher of API progress and completed/total bytes so stale
+lower progress cannot bypass 80% retention. Unknown counts are not zero.
+Pauses/stops/queues/checking/moving cannot initiate a timeout; only Guard's own
+journaled stop for the same incarnation can resume pending work. Timers survive
+restarts/API outages and reset on observed recovery, owner/incarnation/size/path/
+tag changes, disappearance or clock rollback. Dry-run timers stay in memory.
+
+Positive total seeders and 80% retention apply to incomplete-download timeouts.
+Completed/seeding import cleanup and dangerous/no-media rejection remain enabled
+unless save is present. Rejected incomplete torrents request Arr replacement
+before client deletion. The dashboard's **Removal rules → View all rules and
+exceptions** lists every policy and exemption without initiating actions.
 
 Failure uses the owning Sonarr/Radarr queue and blocklist, with replacement
 search permitted. Guard stops the torrent, confirms Arr blocklisting, then
@@ -364,7 +385,7 @@ hostname to the Docker host's private published port:
 location / {
     # Preserve your existing authentication/auth_request protection here.
     proxy_pass http://192.0.2.20:8088;
-    proxy_set_header Host $host;
+    proxy_set_header Host $http_host;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_connect_timeout 5s;
     proxy_read_timeout 15s;
@@ -707,3 +728,38 @@ without blocking unrelated cleanup; missing counters, resumed payload, an API
 failure or a filesystem hold keeps that protection. Resolve the named client's
 metadata/download issue and let Guard retry. A torrent still under the incomplete
 directory must finish its final move before completed-media validation resumes.
+
+## Automatic orphan cleanup (v1.9)
+
+For unattended removal in `complete/tv`, `complete/movies`, `incomplete/tv` and
+`incomplete/movies`, follow the [orphan cleanup deployment guide](docs/orphan-cleanup.md#deployment).
+Use `compose.orphans.yaml` on each recreation. This is separate from the older
+completed-root fallback; it also removes untracked files without import evidence
+once every qBittorrent torrent has left them unowned for 15 observed minutes.
+No Forget record action is needed. Keep the existing state directory and credentials.
+
+Forget record results refresh every two seconds while queued. A queued result
+means the polling thread has not yet confirmed client absence; inspect polling
+health if it persists. A refused result explains whether the torrent is still
+present or the record changed. Errors remain visible after the dialog closes.
+Historical warning entries are retained even after the active record is archived.
+When proxying on a nonstandard public port, preserve the complete Host header
+with `proxy_set_header Host $http_host;` so same-origin checks match the browser's
+Origin. Do not bypass origin/token checks or trust forwarded headers instead.
+
+### v1.9 completion and timeout clarification
+
+Seeding (`uploading`, `stalledUP`, `forcedUP`) uses the same completed cleanup
+path, with no added seed-time or ratio requirement. Once every selected video
+has confirmed Sonarr/Radarr import and the ordinary import grace has elapsed,
+Guard requests torrent deletion with its data. No-media releases still use
+rejection/blocklisting with `skipRedownload=false` to permit replacement, then
+explicit qBittorrent deletion with data; the default `REJECT_NO_VIDEO=true`
+keeps this screening enabled.
+
+The save exemption applies to every Guard removal action. Positive total seeders
+protect shorter incomplete timeouts, while thirty observed zero-active-seeder
+days below 80% may trigger replacement/deletion. Policy 4 starts fresh condition
+observations for legacy age/seeder evidence, preserving journals, audits and
+valid Guard-stop provenance. Preserve the state directory; no environment or
+manual database edits are needed. Recreate with the same Compose overrides.

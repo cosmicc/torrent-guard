@@ -197,6 +197,8 @@ class StatusHandler(BaseHTTPRequestHandler):
         if route == "/api/status":
             payload = self.server.cache.read()
             payload["csrf_token"] = self.server.csrf_token
+            from guard import removal_reference
+            payload["removal_rules"] = removal_reference()
             if self.server.state_db is not None:
                 from records import view
                 from status_report import journal_data, private_text

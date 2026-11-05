@@ -74,6 +74,20 @@ class HistoryTests(unittest.TestCase):
             with sqlite3.connect(path) as database:
                 self.assertEqual(database.execute("SELECT count(*) FROM issues").fetchone()[0], 21)
 
+    def test_orphan_removal_is_visible_without_counting_as_imported_torrent_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            handler = StatusHistory(path)
+            now = time.time()
+            handler.handle(logging.makeLogRecord({
+                "msg": "ORPHAN removed /downloads/incomplete/tv/episode.mkv.!qB; no qBittorrent ownership for 15 minutes",
+                "levelno": logging.INFO, "created": now}))
+            handler.close()
+            data = history_data(path, now)
+            self.assertEqual(data["activity"][0]["decision"], "Orphan file removed")
+            self.assertIn("episode.mkv", data["activity"][0]["detail"])
+            self.assertEqual(data["windows"]["6"]["cleaned"], 0)
+
     def test_old_history_upgrade_preserves_existing_events(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.sqlite3"
@@ -270,6 +284,26 @@ class HTTPTests(unittest.TestCase):
             collect.assert_not_called()
         self.assertFalse(json.loads(self.request("/api/status")[2])["ready"])
         self.assertEqual(self.request("/api/status", "HEAD")[2], b"")
+
+    def test_removal_reference_available_before_diagnostics_without_probes(self):
+        from guard import removal_reference
+        with patch.object(self.cache, "collect_once") as collect:
+            code, _, body = self.request("/api/status")
+            self.assertEqual(code, 200)
+            payload = json.loads(body)
+            self.assertFalse(payload["ready"])
+            self.assertEqual(payload["removal_rules"], removal_reference())
+            rows = payload["removal_rules"]["rows"]
+            self.assertEqual(len(rows), 12)
+            self.assertIn("save", rows[0]["condition"])
+            self.assertIn("Always retain", rows[0]["action"])
+            self.assertIn("more than zero", rows[1]["condition"])
+            self.assertIn("3 days", rows[3]["action"])
+            self.assertIn("7 days", rows[4]["action"])
+            self.assertIn("80%", rows[5]["condition"])
+            self.assertIn("30 days", rows[7]["action"])
+            self.assertIn("observed zero active", rows[7]["action"])
+            collect.assert_not_called()
 
     def test_forwarded_headers_cannot_bypass_source_allowlist(self):
         self.server.allowed_clients = (ipaddress.ip_network("192.0.2.1/32"),)

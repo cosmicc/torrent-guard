@@ -31,9 +31,12 @@ from deletion import FileVerifier, metadata_manifest, validate_metadata_manifest
 
 LOG = logging.getLogger("torrent-guard")
 DISPLAY_TIMEZONE = ZoneInfo("America/New_York")
-VERSION = "1.8"
+VERSION = "1.9"
 METADATA_TIMEOUT_SECONDS = 600
-STALL_TIMEOUTS = {"empty": 3600, "seedless": 7 * 86400}
+STALL_TIMEOUTS = {"inactive": 3 * 3600, "unconnected": 30 * 86400}
+SEEDLESS_BANDS = ((0.15, 3 * 3600), (0.50, 3 * 86400), (0.80, 7 * 86400))
+INCOMPLETE_RETENTION_PROGRESS = 0.80
+TIMEOUT_POLICY = 4
 METADATA_STATES = frozenset({"metaDL", "forcedMetaDL"})
 HEARTBEAT_FILE = Path("/tmp/torrent-guard-heartbeat")
 DEFAULT_VIDEO = frozenset({".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".webm", ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".divx", ".flv"})
@@ -104,6 +107,8 @@ class Config:
     history_lookback_days: int = 30
     completed_settle_seconds: int = 60
     ffprobe_timeout_seconds: int = 30
+    orphan_cleanup: bool = False
+    orphan_write_root: str = "/cleanup/orphans"
     cleanup_leftovers: bool = False
     cleanup_write_root: str = "/cleanup/completed"
     delete_settle_seconds: int = 120
@@ -166,6 +171,7 @@ class Config:
             import_grace_minutes=grace, import_check_seconds=check,
             history_lookback_days=history, completed_settle_seconds=settle,
             ffprobe_timeout_seconds=timeout,
+            orphan_cleanup=boolean("ORPHAN_CLEANUP", False),
             cleanup_leftovers=boolean("CLEANUP_LEFTOVERS", False),
             delete_settle_seconds=delete_settle,
         )
@@ -386,10 +392,21 @@ def torrent_app(torrent: dict, config: Config) -> str | None:
     return cat or (next(iter(tagged)) if tagged else None)
 
 
+def save_tagged(torrent: dict) -> bool:
+    """An exact case-insensitive save tag prohibits every Guard removal path."""
+    return "save" in {tag.strip().casefold() for tag in str(torrent.get("tags") or "").split(",")}
+
+
 def timeout_tagged(torrent: dict) -> bool:
     """Limit timeout rules to explicit media tags, independently of categories."""
     tags = {tag.strip().casefold() for tag in str(torrent.get("tags") or "").split(",")}
     return bool(tags & {"movies", "tv"})
+
+
+def positive_total_seeders(torrent: dict) -> bool:
+    """Known positive swarm availability suppresses shorter incomplete timeouts."""
+    count = torrent.get("num_complete")
+    return finite_number(count) and count > 0
 
 
 def finite_number(value) -> bool:
@@ -397,31 +414,124 @@ def finite_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def stall_rule(torrent: dict, stopped: bool = False) -> str | None:
-    """Classify only explicit inactive incomplete downloads; unknown means retain.
+def download_fraction(torrent: dict) -> float | None:
+    """Require explicit consistent incomplete facts; prefer the higher progress.
 
-    Stopped states are allowed solely for an operation Guard has already stopped.
-    Swarm seeds (num_complete) and connected seeds (num_seeds) must both be zero
-    for the weekly rule; an unknown swarm count must never be inferred as zero.
+    A stale lower progress field must never bypass an 80% retention boundary
+    when completed/total bytes already indicate more data has been downloaded.
     """
-    states = {"stalledDL", "stoppedDL", "pausedDL"} if stopped else {"stalledDL"}
-    if not timeout_tagged(torrent) or torrent.get("state") not in states:
-        return None
-    fields = ("progress", "downloaded", "completed", "completion_on", "dlspeed")
+    fields = ("progress", "downloaded", "completed", "completion_on", "total_size")
     if not all(finite_number(torrent.get(key)) for key in fields):
         return None
-    if (torrent["dlspeed"] != 0 or torrent["completion_on"] > 0
-            or torrent["downloaded"] < 0 or torrent["completed"] < 0):
+    size = torrent["total_size"]
+    if (size <= 0 or not 0 <= torrent["progress"] < 1
+            or torrent["downloaded"] < 0 or not 0 <= torrent["completed"] < size
+            or torrent["completion_on"] > 0):
         return None
-    if zero_payload(torrent):
-        return "empty"
-    size = torrent.get("total_size")
-    if (finite_number(size) and size > 0 and 0 <= torrent["progress"] < 0.25
-            and torrent["completed"] < size * 0.25
-            and finite_number(torrent.get("num_complete")) and torrent["num_complete"] == 0
-            and finite_number(torrent.get("num_seeds")) and torrent["num_seeds"] == 0):
-        return "seedless"
-    return None
+    return max(torrent["progress"], torrent["completed"] / size)
+
+
+def stall_timeout(rule: str, torrent: dict) -> int:
+    """Compute the deadline from the current band, including pending retries."""
+    if rule == "seedless":
+        fraction = download_fraction(torrent)
+        if fraction is not None:
+            for upper, seconds in SEEDLESS_BANDS:
+                if fraction < upper:
+                    return seconds
+        raise ValueError("download is exempt from zero-total-seeder removal")
+    return STALL_TIMEOUTS[rule]
+
+
+def duration_text(seconds: int) -> str:
+    """Describe fixed policy intervals for logs and the dashboard reference."""
+    if seconds % 86400 == 0:
+        return f"{seconds // 86400} days"
+    return f"{seconds // 3600} hours"
+
+
+def stall_conditions(torrent: dict, stopped: bool = False, now: float | None = None) -> tuple[str, ...]:
+    """Return incomplete conditions with save/availability/80% protection first.
+
+    Positive total seeders suppress short rejection. Regardless of total count,
+    thirty observed days with no connected active seeders can authorize removal
+    below 80%. Metadata with explicit zero payload can use the same long wait;
+    its shorter ten-minute rule is handled separately when totals are not positive.
+    """
+    states = {"stalledDL", "downloading", "forcedDL", *METADATA_STATES}
+    if stopped:
+        states.update({"stoppedDL", "pausedDL"})
+    if save_tagged(torrent) or not timeout_tagged(torrent) or torrent.get("state") not in states:
+        return ()
+    no_active = finite_number(torrent.get("num_seeds")) and torrent["num_seeds"] == 0
+    # Metadata may have neither a known size nor a file list. Zero-payload
+    # evidence can only authorize client removal, never local filesystem unlink.
+    metadata_wait = torrent.get("state") in METADATA_STATES or (
+        stopped and torrent.get("state") in {"stoppedDL", "pausedDL"}
+        and (not finite_number(torrent.get("total_size")) or torrent["total_size"] <= 0))
+    if metadata_wait and zero_payload(torrent):
+        return ("unconnected",) if no_active else ()
+    fraction = download_fraction(torrent)
+    if fraction is None or fraction >= INCOMPLETE_RETENTION_PROGRESS:
+        return ()
+    conditions = []
+    total_zero = finite_number(torrent.get("num_complete")) and torrent["num_complete"] == 0
+    if total_zero:
+        conditions.append("seedless")
+    if (total_zero and torrent.get("state") in {"stalledDL", "stoppedDL", "pausedDL"}
+            and fraction < SEEDLESS_BANDS[0][0]
+            and finite_number(torrent.get("dlspeed")) and torrent["dlspeed"] == 0 and no_active):
+        conditions.append("inactive")
+    if no_active:
+        conditions.append("unconnected")
+    return tuple(conditions)
+
+
+def stall_rule(torrent: dict, stopped: bool = False) -> str | None:
+    """Expose the first observed stall/seeder condition for read-only callers."""
+    return next(iter(stall_conditions(torrent, stopped)), None)
+
+
+def removal_reference() -> dict:
+    """Build the read-only dashboard policy from the same runtime constants.
+
+    No configuration, journal, API or filesystem checks run here. Optional
+    cleanup/rejection settings are labeled conditional instead of assumed on.
+    """
+    from orphans import ABSENCE_SECONDS
+
+    rows = []
+    lower = 0
+    for upper, seconds in SEEDLESS_BANDS:
+        rows.append({"condition": f"{lower}% to under {upper * 100:g}% downloaded; zero total seeders",
+                     "action": f"Reject after {duration_text(seconds)} of observed zero total seeders."})
+        lower = int(upper * 100)
+    rows.extend([
+        {"condition": f"{INCOMPLETE_RETENTION_PROGRESS * 100:g}% or more; still incomplete",
+         "action": "Retain: exempt from stalled, zero-total-seeder and no-active-seeder removal."},
+        {"condition": f"Below {SEEDLESS_BANDS[0][0] * 100:g}%; stalled with zero active/total seeders and zero speed",
+         "action": f"Reject after {duration_text(STALL_TIMEOUTS['inactive'])} of observed stalling."},
+        {"condition": f"Below {INCOMPLETE_RETENTION_PROGRESS * 100:g}%; no connected active seeders, any total count",
+         "action": f"Reject after {duration_text(STALL_TIMEOUTS['unconnected'])} of observed zero active seeders. Reset when one connects; torrent age alone is insufficient."},
+        {"condition": "Downloading metadata with explicit zero payload and no file metadata",
+         "action": f"Reject after more than {METADATA_TIMEOUT_SECONDS // 60} observed minutes unless total seeders are positive or save is present."},
+        {"condition": "Dangerous files, or no selected media when no-media rejection is enabled",
+         "action": "Reject when confirmed; retain files if access or evidence is inconclusive. Applies regardless of percentage."},
+        {"condition": "Completed or seeding; every selected video imported into Sonarr/Radarr",
+         "action": "Remove with download files after the configured import grace (15 minutes by default). No replacement requested."},
+        {"condition": "Orphan files in complete/incomplete TV/movie folders; orphan cleanup enabled",
+         "action": f"Remove after {ABSENCE_SECONDS // 60} observed minutes without any qBittorrent ownership."},
+    ])
+    rows.insert(0, {"condition": "Exact save tag on a torrent (case-insensitive)",
+                    "action": "Always retain while tagged in qBittorrent: no stop, rejection, replacement, torrent deletion or file cleanup, even when completed or imported."})
+    rows.insert(1, {"condition": "Incomplete download with more than zero total swarm seeders",
+                    "action": "Wait for seeders to connect. Exempt from shorter incomplete-download timeouts; only the 30-day zero-active-seeder exception below 80% can apply."})
+    return {"rows": rows, "notes": [
+        "Timeout rules require an owned torrent with a movies or tv tag. Paused, stopped, queued, checking and moving downloads cannot start timeout removal. Only Guard-owned stops can resume pending work.",
+        "Active seeders are connected seeders; total seeders are qBittorrent's reported swarm count. Unknown counts never mean zero. Timers persist across restarts. Continuous zero-total-seeder history survives percentage changes. The 30-day clock tracks observed zero active seeders, not the added date, and resets when an active seeder connects.",
+        "Every rejected incomplete torrent requests a replacement through its owning Sonarr/Radarr before qBittorrent deletion with data. API, ownership or filesystem uncertainty retains the download. Dry run never stops, rejects or deletes payloads.",
+        "The save exemption overrides every removal rule. It ends when the tag is removed or the torrent leaves qBittorrent; orphan protection is not permanent. Positive total seeders and 80% retention apply to incomplete-download timeouts only: dangerous/no-media rejection and completed-import cleanup remain in effect unless save is present. Libraries are never cleanup targets. Forget record archives bookkeeping only.",
+    ]}
 
 
 def is_unstarted_download(torrent: dict) -> bool:
@@ -436,7 +546,11 @@ def is_unstarted_download(torrent: dict) -> bool:
 
 
 def is_complete(torrent: dict) -> bool:
-    """Require explicit completion metadata and no active move or recheck."""
+    """Treat seeding as completed; require completion facts and no move/recheck.
+
+    Seeding has no additional retention requirement. Valid completed payloads
+    still follow the same all-video Arr import/grace checks before deletion.
+    """
     state = str(torrent.get("state") or "").casefold()
     return (
         float(torrent.get("progress") or 0) >= 0.999999
@@ -795,13 +909,17 @@ class Guard:
         self.last_import_check: float = 0.0
         self.retirement_files: dict[str, tuple[dict, list]] = {}
         self.last_retirement_check: float | None = None
+        from orphans import OrphanCleaner
+        self.orphan_cleaner = OrphanCleaner(self)
 
     def poll(self, now: float | None = None):
         now = time.time() if now is None else now
-        torrents = self.qbit.torrents()
-        if not isinstance(torrents, list):
-            raise ApiError("Unexpected qBittorrent torrent-list response")
-        self._inventory_hashes(torrents)
+        try:
+            torrents = self.qbit.torrents()
+            self._inventory_hashes(torrents)
+        except (ApiError, OSError, urllib.error.URLError):
+            self.orphan_cleaner.invalidate(now)
+            raise
         by_hash = {str(t.get("hash", "")).lower(): t for t in torrents if t.get("hash")}
         self.retirement_files.clear()
         self._retire_absent_records(torrents, by_hash, now)
@@ -819,7 +937,7 @@ class Guard:
         candidates: dict[str, tuple[str, str, dict, list[dict]]] = {}
         for h, torrent in by_hash.items():
             app = torrent_app(torrent, self.config)
-            if not app or h in pending:
+            if not app or h in pending or save_tagged(torrent):
                 continue
             if not self._filesystem_ready(h, torrent, now):
                 continue
@@ -838,10 +956,17 @@ class Guard:
                         self.warned_defer[h] = message
                 continue
             stalled = self.stalled_waits.get(h)
-            if stalled and now - stalled["first_seen"] >= STALL_TIMEOUTS[stalled["rule"]]:
-                reason = ("stalled with zero downloaded bytes for one hour" if stalled["rule"] == "empty"
-                          else "stalled below 25% with zero swarm seeders for seven days")
-                self._reject(h, app, name, reason, torrent, kind="stalled")
+            if stalled and now - stalled["first_seen"] >= stall_timeout(stalled["rule"], torrent):
+                rule = stalled["rule"]
+                if rule == "inactive":
+                    reason = "stalled below 15% with no active seeders for three hours"
+                elif rule == "unconnected":
+                    reason = "incomplete below 80% with zero active seeders for 30 observed days"
+                else:
+                    reason = f"zero total swarm seeders for {duration_text(stall_timeout(rule, torrent))} in current percentage band"
+                metadata_only = torrent.get("state") in METADATA_STATES and zero_payload(torrent)
+                self._reject(h, app, name, reason, torrent, kind="metadata" if metadata_only else "stalled",
+                             metadata_timeout=stalled if metadata_only else None)
                 continue
             age = now - int(torrent.get("added_on") or 0)
             fresh = 0 <= age <= self.config.max_age_hours * 3600
@@ -935,6 +1060,11 @@ class Guard:
                         pending.add(h)
         if not self.config.dry_run:
             self._process_pending(by_hash, now)
+        try:
+            self.orphan_cleaner.poll(now)
+        except ApiError as exc:
+            self.orphan_cleaner.invalidate(now)
+            LOG.warning("ORPHAN deferred; client unavailable: %s", exc)
         self.import_candidates = set(candidates) - self.store.hashes() - self.logged_import_dry
         self.import_grace_waits.intersection_update(self.import_candidates)
 
@@ -957,9 +1087,11 @@ class Guard:
             len(self.filesystem_retries), len(self.cleanup_retries),
         )
 
-    def _rejection_ready(self, h: str, torrent: dict, files: list, now: float) -> bool:
+    def _rejection_ready(self, h: str, torrent: dict, files: list, now: float, *, live: bool = True) -> bool:
         """Require current rejection evidence; a journal reason alone is insufficient."""
         if not isinstance(files, list) or not files:
+            return False
+        if live and save_tagged(torrent):
             return False
         if classify(files, reject_no_video=self.config.reject_no_video):
             return True
@@ -981,7 +1113,7 @@ class Guard:
         for h, torrent in by_hash.items():
             app = torrent_app(torrent, self.config)
             added = torrent.get("added_on")
-            if (not app or not timeout_tagged(torrent) or torrent.get("state") not in METADATA_STATES
+            if (save_tagged(torrent) or positive_total_seeders(torrent) or not app or not timeout_tagged(torrent) or torrent.get("state") not in METADATA_STATES
                     or isinstance(added, bool) or not isinstance(added, (int, float))
                     or not 0 < added <= now):
                 continue
@@ -997,35 +1129,57 @@ class Guard:
 
     @staticmethod
     def _stall_signature(torrent: dict, app: str, rule: str) -> dict:
-        """Reset observation on payload, selection, path or ownership changes."""
-        fields = ("added_on", "downloaded", "completed", "progress", "total_size", "size",
-                  "category", "tags", "save_path", "download_path", "content_path")
-        return {"app": app, "rule": rule, **{key: torrent.get(key) for key in fields}}
+        """Version timer authorization and bind it to ownership/incarnation/paths.
+
+        Peer progress does not recover a zero-total-seeder condition. Progress
+        changes do end an inactive stall, so only that rule includes counters.
+        Policy 4 prevents prior age/seeder evidence authorizing the active-seeder policy.
+        """
+        fields = ("added_on", "total_size", "size", "category", "tags",
+                  "save_path", "download_path", "content_path")
+        if rule == "inactive":
+            fields += ("downloaded", "completed", "progress")
+        return {"policy": TIMEOUT_POLICY, "app": app, "rule": rule,
+                **{key: torrent.get(key) for key in fields}}
 
     def _track_stalled_waits(self, by_hash: dict, now: float) -> None:
-        """Persist continuous observed stalls; dry-run updates only memory.
+        """Persist independent percentage-band observations; dry-run stays in memory.
 
-        API outages cannot establish recovery. A Guard-owned stop preserves the
-        existing expired authorization, but an operator pause before it resets it.
+        Recovery resets only its own condition. A Guard-owned stop can preserve
+        elapsed evidence for pending retries, while intentional stops cannot.
+        Legacy observations lack the current policy signature and start a fresh observation period.
         """
         waits = {}
         pending = self.store.hashes()
         for h, torrent in by_hash.items():
             app = torrent_app(torrent, self.config)
             previous = self.stalled_waits.get(h, {})
-            stopped = previous.get("stopped_by_guard", False) and h in pending
-            rule = stall_rule(torrent, stopped=stopped)
+            identity_fields = ("app", "added_on", "category", "tags", "save_path",
+                               "download_path", "content_path", "total_size", "size")
+            current = self._stall_signature(torrent, app, "seedless")
+            same_incarnation = all(previous.get("signature", {}).get(key) == current.get(key)
+                                   for key in identity_fields)
+            stopped = bool(previous.get("stopped_by_guard", False) and h in pending and same_incarnation)
+            rules = stall_conditions(torrent, stopped=stopped, now=now)
             added = torrent.get("added_on")
-            if not app or not rule or not finite_number(added) or not 0 < added <= now:
+            if not app or not rules or not finite_number(added) or not 0 < added <= now:
                 continue
-            signature = self._stall_signature(torrent, app, rule)
-            if previous.get("signature") != signature or now < previous.get("first_seen", now):
-                waits[h] = {"signature": signature, "first_seen": now, "rule": rule,
-                            "stopped_by_guard": False}
-                LOG.info("WAIT stalled [%s] %s rule=%s timeout=%ds starts now",
-                         app, download_context(torrent), rule, STALL_TIMEOUTS[rule])
-            else:
-                waits[h] = previous
+            observations = {}
+            for rule in rules:
+                signature = self._stall_signature(torrent, app, rule)
+                old = previous.get("observations", {}).get(rule, {})
+                if old.get("signature") == signature and now >= old.get("first_seen", now):
+                    observations[rule] = old
+                else:
+                    observations[rule] = {"signature": signature, "first_seen": now}
+                    LOG.info("WAIT stalled [%s] %s rule=%s timeout=%ds starts now",
+                             app, download_context(torrent), rule, stall_timeout(rule, torrent))
+            # An expired condition may act without waiting for a newer overlapping
+            # condition. Keep both clocks even when the selected reason changes.
+            rule = min(rules, key=lambda value: observations[value]["first_seen"] + stall_timeout(value, torrent))
+            chosen = observations[rule]
+            waits[h] = {**chosen, "rule": rule, "observations": observations,
+                        "stopped_by_guard": stopped}
         if waits != self.stalled_waits and not self.config.dry_run:
             self.store.save_stalled_waits(waits)
         self.stalled_waits = waits
@@ -1034,10 +1188,11 @@ class Guard:
         """Require unchanged, expired live evidence at every destructive boundary."""
         wait = self.stalled_waits.get(h)
         app = torrent_app(torrent, self.config)
-        rule = stall_rule(torrent, stopped=bool(wait and wait["stopped_by_guard"]))
-        if (not wait or not app or rule != wait["rule"]
+        rules = stall_conditions(torrent, stopped=bool(wait and wait["stopped_by_guard"]), now=now)
+        rule = wait["rule"] if wait else None
+        if (not wait or not app or rule not in rules
                 or self._stall_signature(torrent, app, rule) != wait["signature"]
-                or not STALL_TIMEOUTS[rule] <= now - wait["first_seen"]):
+                or not stall_timeout(rule, torrent) <= now - wait["first_seen"]):
             raise ValueError("stalled timeout evidence changed or is incomplete; preserving download")
 
     def _refresh_stalled(self, h: str, now: float) -> dict:
@@ -1059,7 +1214,7 @@ class Guard:
         self.store.save_stalled_waits(self.stalled_waits)
         self.qbit.stop(h)
 
-    def _refresh_metadata(self, h: str) -> None:
+    def _refresh_metadata(self, h: str, now: float) -> None:
         """Recheck timeout tags, ownership and zero payload before a remote action."""
         live = self.qbit.torrents()
         if not isinstance(live, list):
@@ -1067,26 +1222,49 @@ class Guard:
         torrent = next((t for t in live if str(t.get("hash", "")).lower() == h), None)
         if torrent is None:
             raise ValueError("metadata download disappeared before action")
-        self._metadata_removal_ready(h, torrent, self.qbit.files(h))
+        self._metadata_removal_ready(h, torrent, self.qbit.files(h), now)
 
-    def _metadata_removal_ready(self, h: str, torrent: dict, files: list) -> None:
+    def _stop_metadata(self, h: str, now: float) -> None:
+        """Checkpoint long-wait stop provenance only after current authorization."""
+        self._refresh_metadata(h, now)
+        saved = self.store.evidence(h)
+        if saved and saved[0].get("timeout"):
+            self.stalled_waits[h]["stopped_by_guard"] = True
+            self.store.save_stalled_waits(self.stalled_waits)
+        self.qbit.stop(h)
+
+    def _metadata_removal_ready(self, h: str, torrent: dict, files: list, now: float) -> None:
         """Persist empty-payload evidence before stopping/blocklisting a magnet."""
+        if save_tagged(torrent):
+            raise ValueError("save tag prohibits all removal")
         if not timeout_tagged(torrent):
             raise ValueError("metadata timeout requires a movies or tv tag")
         if files != []:
             raise ValueError("metadata recovered or file list unavailable; preserving download for review")
         manifest = metadata_manifest(torrent)
         saved = self.store.evidence(h)
+        long_wait = positive_total_seeders(torrent) or bool(saved and saved[0].get("timeout"))
+        if long_wait:
+            self._stalled_removal_ready(h, torrent, now)
+            if self.stalled_waits[h]["rule"] != "unconnected":
+                raise ValueError("positive total seeders require 30 observed days without active seeders")
+            manifest["timeout"] = self.stalled_waits[h]
         if saved is not None:
             validate_metadata_manifest(saved[0])
             if (saved[0]["torrent"].get("added_on") != torrent.get("added_on")
                     or str(saved[0]["torrent"].get("hash", "")).lower() != h
                     or torrent_app(saved[0]["torrent"], self.config) != torrent_app(torrent, self.config)):
                 raise ValueError("metadata torrent incarnation changed; preserving download")
+            if long_wait and not saved[0].get("timeout"):
+                saved[0]["timeout"] = self.stalled_waits[h]
+                self.store.save_manifest(h, saved[0])
         else:
             self.store.save_manifest(h, manifest)
 
-    def _reject(self, h: str, app: str, name: str, reason: str, torrent: dict, kind: str = "reject"):
+    def _reject(self, h: str, app: str, name: str, reason: str, torrent: dict, kind: str = "reject",
+                metadata_timeout: dict | None = None):
+        if save_tagged(torrent):
+            return
         if h in self.filesystem_retries:
             return  # An unresolved access failure overrides filename-based rejection.
         if h not in self.logged_dry:
@@ -1096,6 +1274,12 @@ class Guard:
                 LOG.warning("DRY RUN: would stop, Arr-blocklist and delete torrent + tracked files: %s", self.log_context.get(h, download_context(torrent)))
             self.logged_dry.add(h)
         else:
+            if kind == "metadata" and metadata_timeout is not None:
+                # Persist the selected long-wait authorization before queuing:
+                # retries must not silently downgrade to an expired old reason.
+                manifest = metadata_manifest(torrent)
+                manifest["timeout"] = metadata_timeout
+                self.store.save_manifest(h, manifest)
             self.store.add(h, app, name, reason, kind=kind)
 
     def _defer_filesystem(self, h: str, reason: str, now: float):
@@ -1266,7 +1450,7 @@ class Guard:
         """
         since = now - self.config.history_lookback_days * 86400
         added = int(torrent.get("added_on") or 0)
-        if (not is_complete(torrent) or not 0 < added <= now or added < since
+        if (save_tagged(torrent) or not is_complete(torrent) or not 0 < added <= now or added < since
                 or now - int(torrent["completion_on"]) < self.config.completed_settle_seconds):
             return False
         files = self.qbit.files(h) if files is None else files
@@ -1296,6 +1480,8 @@ class Guard:
         if not isinstance(current, list):
             raise ApiError("Cannot refresh torrent before deletion snapshot")
         fresh = next((row for row in current if str(row.get("hash", "")).lower() == h), None)
+        if fresh is not None and save_tagged(fresh):
+            raise ValueError("save tag prohibits all removal")
         fields = ("added_on", "save_path", "download_path", "content_path", "progress", "amount_left", "completion_on", "state", "category", "tags")
         if fresh is None or any(fresh.get(key) != torrent.get(key) for key in fields):
             raise ValueError("torrent moved or changed before deletion; retrying inspection")
@@ -1313,7 +1499,7 @@ class Guard:
             if not self._rejection_ready(h, fresh, files, now):
                 raise ValueError("current payload is not verified as a bad release; preserving download")
         if metadata_only:
-            self._metadata_removal_ready(h, fresh, files)
+            self._metadata_removal_ready(h, fresh, files, now)
             manifest = self.store.evidence(h)[0]
         elif evidence is None:
             manifest = self.verifier.snapshot(torrent, files)
@@ -1364,12 +1550,20 @@ class Guard:
         live = self.qbit.torrents()
         if not isinstance(live, list):
             raise ApiError("Cannot establish active torrent ownership")
+        self._inventory_hashes(live)
         paths = set()
         queued_content = []
         for torrent in live:
             try:
                 torrent_hash = str(torrent.get("hash") or "").lower()
                 files = self.qbit.files(torrent_hash)
+                if save_tagged(torrent) and torrent.get("content_path"):
+                    # A saved content directory also reserves untracked extras
+                    # against the original evidence-based leftover cleanup.
+                    content = PurePosixPath(str(torrent["content_path"]))
+                    if not content.is_absolute() or ".." in content.parts:
+                        raise ValueError("unsafe saved content path")
+                    queued_content.append(content)
                 if files == [] and is_unstarted_download(torrent) and torrent_hash not in self.filesystem_retries:
                     # An unstarted magnet may not have a content path yet. Do
                     # not infer one from its title or require a directory to exist.
@@ -1387,6 +1581,7 @@ class Guard:
                 error_type = OSError if isinstance(exc, OSError) else ValueError
                 cache["error"] = (error_type, message)
                 raise error_type(message) from exc
+        cache["inventory"] = live
         cache["hashes"] = {str(t.get("hash", "")).lower() for t in live}
         cache["queued_content"] = queued_content
         return paths
@@ -1429,14 +1624,14 @@ class Guard:
                 if not yes:
                     raise ValueError("local removal lacks current import evidence: " + reason)
             elif kind == "reject":
-                if not self._rejection_ready(h, manifest["torrent"], manifest["files"], now):
+                if not self._rejection_ready(h, manifest["torrent"], manifest["files"], now, live=False):
                     raise ValueError("local removal lacks verified bad-release evidence; preserving files")
             wanted = {(item["root"], item["path"]) for item in manifest["items"]}
             for root, relative in wanted:
                 target = PurePosixPath(root) / relative
                 if any(target.is_relative_to(content) or content.is_relative_to(target)
                        for content in ownership_cache["queued_content"]):
-                    raise ValueError(f"metadata/queued torrent reserves recorded download path {str(target)!r}")
+                    raise ValueError(f"live torrent reserves recorded download path {str(target)!r}")
             if owned_paths & wanted:
                 overlap = sorted(owned_paths & wanted)
                 raise ValueError(f"another torrent owns recorded download path {str(PurePosixPath(*overlap[0]))!r}")
@@ -1474,6 +1669,14 @@ class Guard:
         LOG.info("CLEANED [%s] kind=%s %s torrent absent and all %d recorded file paths independently verified absent", app, kind, self.log_context.get(h), len(manifest["items"]))
         return True
 
+    def _assert_not_saved(self, h: str) -> None:
+        """Refresh save protection immediately before rejection stop/blocklist."""
+        live = self.qbit.torrents()
+        self._inventory_hashes(live)
+        torrent = next((row for row in live if row["hash"].lower() == h), None)
+        if torrent is None or save_tagged(torrent):
+            raise ValueError("torrent absent or protected by save tag; removal prohibited")
+
     def _process_pending(self, by_hash: dict[str, dict], now: float):
         """Retry journal operations while keeping import and rejection paths separate."""
         queue_cache: dict[str, dict[str, int]] = {}
@@ -1491,6 +1694,8 @@ class Guard:
                     LOG.error("PENDING invalid journal kind/phase; manual review required %s", self.log_context[h])
                     continue
                 torrent = by_hash.get(h)
+                if torrent and save_tagged(torrent):
+                    continue
                 if torrent and torrent_app(torrent, self.config) != app:
                     LOG.error("PENDING ownership changed; manual review required [%s] %s", app, self.log_context[h])
                     continue
@@ -1502,7 +1707,7 @@ class Guard:
                     current_files = self.qbit.files(h)
                     self.retirement_files[h] = (torrent, current_files)
                     if kind == "metadata":
-                        self._metadata_removal_ready(h, torrent, current_files)
+                        self._metadata_removal_ready(h, torrent, current_files, now)
                     else:
                         if kind == "stalled":
                             self._stalled_removal_ready(h, torrent, now)
@@ -1525,9 +1730,10 @@ class Guard:
                         continue
                     if kind == "stalled":
                         self._stop_stalled(h, now)
+                    elif kind == "metadata":
+                        self._stop_metadata(h, now)
                     else:
-                        if kind == "metadata":
-                            self._refresh_metadata(h)
+                        self._assert_not_saved(h)
                         self.qbit.stop(h)
                     if app not in queue_cache:
                         queue_cache[app] = self.arr_clients[app].queue_by_hash()
@@ -1545,7 +1751,9 @@ class Guard:
                         if kind == "stalled":
                             self._refresh_stalled(h, now)
                         elif kind == "metadata":
-                            self._refresh_metadata(h)
+                            self._refresh_metadata(h, now)
+                        else:
+                            self._assert_not_saved(h)
                         self.arr_clients[app].blocklist_and_remove(queue_id)
                     except ApiError as exc:
                         if exc.status != 404:
@@ -1565,9 +1773,10 @@ class Guard:
                         continue
                     if kind == "stalled":
                         self._stop_stalled(h, now)
-                    elif kind in {"reject", "metadata"}:
-                        if kind == "metadata":
-                            self._refresh_metadata(h)
+                    elif kind == "metadata":
+                        self._stop_metadata(h, now)
+                    elif kind == "reject":
+                        self._assert_not_saved(h)
                         self.qbit.stop(h)
                     self._request_deletion(h, torrent, now, metadata_only=kind == "metadata", kind=kind)
                     LOG.warning("DELETE requested [%s] kind=%s %s deleteFiles=true", app, kind, self.log_context[h])
@@ -1677,6 +1886,7 @@ def main():
     except (OSError, sqlite3.Error):
         LOG.error("Status history unavailable; polling continues without monitoring history")
     LOG.info("Starting v%s categories=%r tags=%r poll=%ds dry_run=%s verify_media=%s import_grace=%dm complete_dir=%s incomplete_dir=%s incomplete_suffix=.!qB state=%s", VERSION, config.categories, config.tags, config.poll_seconds, config.dry_run, config.verify_video_content, config.import_grace_minutes, config.qbit_complete_dir, config.qbit_incomplete_dir, config.state_db)
+    LOG.info("Orphan cleanup enabled=%s absence_seconds=900 scopes=complete/incomplete tv/movies", config.orphan_cleanup)
     LOG.info("Cleanup settings automatic_leftovers=%s delete_settle_seconds=%d write_root=%s", config.cleanup_leftovers, config.delete_settle_seconds, config.cleanup_write_root)
     from status_web import start_status_server
     try:

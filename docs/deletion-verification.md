@@ -1,5 +1,10 @@
 # Download deletion verification and leftover cleanup
 
+v1.9 adds a separate [orphan policy](orphan-cleanup.md) for unowned files in the
+four dedicated complete/incomplete tv/movies folders. The restrictions below
+continue to apply to the original evidence-based cleanup path; orphan cleanup
+has its own explicit authorization and narrowly scoped mounts.
+
 Available starting with v0.6. Installations on v0.5 or earlier must upgrade
 before using the settings or Compose override below.
 
@@ -309,3 +314,27 @@ without broadening writable mounts. Metadata-only manifests remain unchanged
 and never authorize filesystem deletion. Keep `/state`; no journal reset is
 required. Tests mock APIs with real temporary files/SQLite and do not verify
 production qBittorrent deletion or actual Arr replacement availability.
+
+## v1.9 save, percentage retention and active-seeder authorization
+
+Read [removal protection](removal-rules.md) before changing any removal gate.
+The exact case-insensitive save tag prohibits every stop/blocklist/replacement/
+client deletion and local cleanup while that torrent remains tagged in the
+client. Check again before each action, including pending retries. Existing
+ownership checks must protect live saved data in both local cleanup paths.
+Protection ends when the tag or client record is removed; no permanent ignore
+rule may be inferred from saved manifest tags.
+
+Positive total seeders suppress shorter incomplete timeouts. Below 80%, thirty
+observed days without active connected seeders can authorize rejection even with
+positive totals. It is never based on torrent age. Keep independent zero-total
+percentage clocks and recalculate the required wait from fresh progress. At 80%
+or higher, incomplete timeouts cannot authorize removal. Only save also exempts
+completed imports and bad releases. Require Arr replacement before deleting any
+rejected incomplete torrent; uncertainty preserves files.
+
+Policy 4 starts fresh legacy observations without deleting journals, audits,
+Guard-stop provenance or manifests. Long-wait metadata records use version-2
+zero-target manifests with explicit timeout proof; retries cannot downgrade to
+an old reason. No payload unlink is authorized by zero-target evidence or old
+stall evidence. All original mount/identity/quarantine constraints remain.

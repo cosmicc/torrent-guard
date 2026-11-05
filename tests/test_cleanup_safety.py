@@ -111,6 +111,18 @@ class CleanupSafetyTests(unittest.TestCase):
                     self.guard.store.remove("abc123")
                     self.guard.cleanup_retries.clear()
 
+    def test_save_tag_blocks_every_kind_and_pending_phase(self):
+        self.torrent["tags"] = "save"
+        for kind in ("imported", "reject", "metadata", "stalled"):
+            for phase in ("match", "arr", "delete", "verify"):
+                with self.subTest(kind=kind, phase=phase):
+                    self.guard.store.add("abc123", "RADARR", "Movie", "pending work", kind=kind)
+                    self.guard.store.set_phase("abc123", phase, 42)
+                    self.guard._process_pending({"abc123": self.torrent}, self.now)
+                    self.assert_preserved()
+                    self.arr.imported_history.assert_not_called()
+                    self.guard.store.remove("abc123")
+
     def test_retry_history_outage_preserves_data(self):
         self.schedule()
         self.arr.imported_history.side_effect = ApiError("unavailable", 503)

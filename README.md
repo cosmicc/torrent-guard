@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v1.8** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v1.9** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -12,15 +12,26 @@ grace interval has elapsed (15 minutes by default).
 
 - Bad releases are stopped and blocklisted through their owning Arr instance
   before qBittorrent is asked to delete their tracked data.
+- Seeding follows completed-torrent cleanup: confirmed Arr import and ordinary
+  import grace, with no extra seeding retention.
 - Successful imports are never blocklisted. Pending deletion attempts recheck
   completion, media, and import evidence; uncertainty preserves the download.
+- Optional automatic orphan cleanup removes unowned files from the four
+  `complete`/`incomplete` `tv`/`movies` folders after 15 observed minutes.
+  Includes old leftovers without journal records; no button clicks are needed.
+  See [enable orphan cleanup](docs/orphan-cleanup.md#deployment).
 - Runs without root privileges, Docker socket access, or a writable media mount.
   A status page runs in the same container behind your authenticated Nginx proxy.
 - Color-coded live logs and a Docker healthcheck show ongoing polling activity.
-- Timeout rules require a `movies` or `tv` tag: metadata waits over 10 minutes,
-  zero-byte stalls for an hour, or stalls below 25% with zero swarm seeders for
-  seven days. Arr blocklisting requests a replacement before deletion.
-  See [timeout rules](INSTALL.md#stalled-download-timeouts) for timer and safety details.
+- The **save** tag exempts a live torrent from every Guard removal rule,
+  including completed imports and bad releases. Tag matching ignores case.
+- Incomplete downloads with positive total seeders wait for connections.
+  Below 80%, removal is allowed after 30 observed days without active seeders;
+  a connection resets that clock. With zero total seeders, waits are 3 hours
+  below 15%, 3 days from 15–under 50%, and 7 days from 50–under 80%.
+  Incomplete downloads at 80% or more and intentionally paused/stopped/queued
+  downloads remain protected from timeouts. Rejections request an Arr replacement.
+  See the dashboard's **Removal rules** or [timeout details](INSTALL.md#stalled-download-timeouts).
 - Starts with `DRY_RUN=true`: no torrent stop, blocklist or payload deletion.
   Verified retirement and explicit archive-only bookkeeping still work.
 
@@ -112,8 +123,8 @@ warnings identify the live torrent whose missing metadata blocks removal;
 see [cleanup troubleshooting](docs/deletion-verification.md#cleanup-retries-and-missing-metadata).
 Zero-data queued or metadata downloads can wait without directories or file
 metadata and do not block unrelated cleanup; known overlapping paths stay protected.
-Incomplete-directory leftovers remain pending for manual recovery while eligible
-completed files can be cleaned. See [recovery steps](INSTALL.md#leftovers-in-the-incomplete-directory).
+With the orphan override disabled, incomplete-directory leftovers remain pending
+for manual recovery while eligible completed files can be cleaned. See [recovery steps](INSTALL.md#leftovers-in-the-incomplete-directory).
 
 The Docker healthcheck reports unhealthy when no poll has finished for 300
 seconds, with startup grace and retries. Increase `HEALTHCHECK_MAX_AGE_SECONDS`
@@ -125,7 +136,7 @@ Docker does not automatically restart unhealthy containers.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile guard.py deletion.py records.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
+python3 -m py_compile guard.py deletion.py records.py orphans.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
 python3 scripts/release_notes.py
 ```
 

@@ -269,6 +269,16 @@ class DeletionTests(unittest.TestCase):
         self.assertTrue(self.path.exists())
         self.assertTrue(self.guard.store.entries())
 
+    def test_saved_content_directory_blocks_untracked_local_leftover_removal(self):
+        self.request()
+        self.qbit.torrents.return_value = [{**self.torrent, "hash": "saved", "tags": "save",
+                                           "content_path": "/downloads/completed"}]
+        self.qbit.files.return_value = [{"name": "Different.mkv", "priority": 1}]
+        self.guard.poll(now=self.now + 121)
+        self.assertTrue(self.path.exists())
+        self.assertTrue(self.sidecar.exists())
+        self.assertTrue(self.guard.store.entries())
+
     def queued_torrent(self):
         """A real queue state with explicit zero lifetime and completed data."""
         return {**self.torrent, "hash": "queued", "category": "manual", "name": "Not started",
@@ -356,7 +366,7 @@ class DeletionTests(unittest.TestCase):
         self.qbit.files.return_value = []
         with self.assertLogs("torrent-guard", level="WARNING") as logs:
             self.guard.poll(now=self.now + 120)
-        self.assertTrue(any("metadata/queued torrent reserves recorded download path" in line for line in logs.output))
+        self.assertTrue(any("live torrent reserves recorded download path" in line for line in logs.output))
         self.assertTrue(self.path.exists())
 
     def test_queued_with_unresolved_filesystem_hold_still_blocks_cleanup(self):

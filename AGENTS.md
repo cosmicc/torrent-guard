@@ -8,6 +8,13 @@ Torrent Guard is a long-running Python 3.12 daemon deployed via Docker Compose o
 
 The highest priority is preventing deletion of useful, unimported media. API outages, ambiguous ownership, missing/moving files and incomplete import history must not be treated as proof of a bad torrent or a completed import. Missing metadata alone is inconclusive; v1.5 applies explicit observed timeouts only to torrents tagged movies or tv, as described below.
 
+v1.9 adds an independent operator-authorized orphan policy: read
+[orphan cleanup](docs/orphan-cleanup.md) before changing discovery, timers,
+ownership checks or its four writable download scopes. It removes unowned files
+without import evidence after 15 continuously observed minutes; this supersedes
+older prohibitions on discovering unknown leftovers and incomplete-root cleanup
+only within the four dedicated tv/movies folders when explicitly enabled.
+
 A bounded HTTP status server runs inside the Guard container behind an authenticated Nginx proxy; its backend is restricted by connecting IP/CIDR. Torrent/file access stays read-only; the explicit archive-only bookkeeping endpoint is described below. There is no qBittorrent completion hook, Docker socket access or external database server. Standard Compose uses a read-only download mount. An explicit cleanup override can additionally mount only the completed-download directory writable. Library mounts must never be writable or targeted. The app polls qBittorrent and Arr APIs and records cleanup operations in a local SQLite journal.
 
 ## Project structure
@@ -32,6 +39,8 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
 - tests/test_v031.py — qBittorrent 5.2+ login compatibility.
 - deletion.py — saved file manifests, independent absence checks, and guarded completed-download quarantine/unlink operations.
 - tests/test_deletion.py — actual temporary-file and SQLite tests for verification, leftover removal, library protection and restart/race handling.
+- orphans.py, tests/test_orphans.py, compose.orphans.yaml — independent 15-minute
+  absence cleanup; read [orphan workflow](docs/orphan-cleanup.md).
 - records.py, tests/test_records.py — absence-based retirement, preserved audit archives, durable archive-only requests; read [record retirement](docs/record-retirement.md) before changing these paths.
 - tests/test_nfs.py — stale-handle deferral, bounded backoff, persistent access holds and completion-independent retention.
 - Dockerfile — Alpine Python 3.12, ffmpeg/ffprobe, non-root UID/GID 1000:1000.
@@ -46,7 +55,7 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
 - tests/test_cleanup_safety.py, tests/test_release.py — cleanup retry authorization and release metadata regression tests.
 - scripts/watch_logs.py — read-only SSH event blocks, width-aware wrapping, bright dark-shell palette, file rotation and partial-write handling; shipped as /app/watch_logs.py.
 - tests/test_watch_logs.py — viewer rendering, control escaping and actual-file follow/rotation checks.
-- tests/test_stalled_timeout.py — persistent zero-byte/seedless stall timers, tag scope, recovery races and real-file verification.
+- tests/test_stalled_timeout.py — independent inactive/zero-total-seeder timers, tag scope, recovery races and real-file verification.
 - tests/test_metadata_timeout.py — persisted observation deadlines, Arr-first zero-payload rejection, dry-run/restart safety and metadata-recovery races.
 - tests/test_monitoring.py — palette isolation, terminal-control escaping and completed-poll health checks.
 - status_report.py, status_web.py, web/, tests/test_status.py — cached diagnostics, persistent monitoring history and the single-page HTTP status server; read [status workflow](docs/status-web.md) before modifying these paths.
@@ -64,7 +73,9 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
 2. Route a torrent to Sonarr or Radarr using the exact configured qBittorrent category and/or tv/movies tag. Conflicting ownership is skipped.
 3. Fresh torrents (MAX_AGE_HOURS defaults to 24) are inspected using GET /api/v2/torrents/files?hash=HASH. Wait when metadata is unavailable. Only selected files (priority not zero) are considered. Flag dangerous extensions (.exe, .msi, .ps1, .bat, .scr, etc.) even if video is also present. REJECT_NO_VIDEO optionally blocks releases containing no recognized video extension. Filenames alone do not prove a valid movie.
 4. For bad releases, create a durable rejection in PendingStore. Processing must first stop qBittorrent, obtain a matching Arr queue item by infohash, call Arr rejection/blocklisting while keeping the torrent in qBittorrent, then explicitly ask qBittorrent POST /api/v2/torrents/delete with hashes=HASH and deleteFiles=true. Verify the torrent record disappears. Keep the download if its Arr blocklist outcome cannot be confirmed; never let Arr remove the torrent first.
-5. For completed torrents, respect progress, amount_left, completion_on, moving/checking states and the completed settle delay. Only inspect files after they are in the configured final completed directory. Confirm all selected video files using ffprobe readable video stream metadata. If paths are moving, absent, unreadable, or unsafe, DEFER rather than reject. A completed release with no video or an actual invalid ffprobe result can be rejected.
+5. Seeding states (`uploading`, `stalledUP`, `forcedUP`) follow completed-torrent
+   cleanup with no extra seed-time or ratio retention. Require confirmed Arr
+   import and the ordinary grace before removal with data. For completed torrents, respect progress, amount_left, completion_on, moving/checking states and the completed settle delay. Only inspect files after they are in the configured final completed directory. Confirm all selected video files using ffprobe readable video stream metadata. If paths are moving, absent, unreadable, or unsafe, DEFER rather than reject. A completed release with no video or an actual invalid ffprobe result can be rejected.
 6. Valid video remains in qBittorrent awaiting matching Arr history. GET /api/v3/history paginated with page/pageSize/sortKey=date/sortDirection=descending. Match downloadFolderImported (string or numeric 3, never numeric 5) and downloadId to the same torrent infohash, require import occurred after added_on, and require the import age >= IMPORT_GRACE_MINUTES (default 15, minimum 10; existing environment values override the default). Check history immediately after media validation and repeat at IMPORT_CHECK_SECONDS; the cleanup grace does not delay history checking. Report missing/partial/mismatched evidence and confirmed-import grace separately at INFO when the reason changes. Displayed grace deadlines use Eastern Time (America/New_York), with EST/EDT and numeric UTC offset. Multiple selected video files require import evidence for all of them. An absent queue item or a completed qBittorrent download alone is NEVER proof of successful Arr import.
 7. Once all import and retention criteria hold, delete the qBittorrent torrent plus its tracked data without blocklisting the successfully imported release. The Arr-managed main movie/TV library must remain intact; imported hardlinked or copied files should not be removed.
 8. Log ACCEPT metadata/completed, REJECT candidate, DEFER validation, WAIT import, DRY RUN, PENDING, CLEANUP, DELETE, CLEANED, warnings and errors. Pending journal phases must be restart-safe and idempotent.
@@ -90,30 +101,23 @@ ordinary file verifier or local unlink path. Its CLEANED label reports client
 absence only, explicitly without claiming filesystem absence. Preserve existing
 v1 file evidence, journals and audits. See INSTALL.md and the deletion guide.
 
-### Stalled download timeouts (v1.5)
+### Removal protection and incomplete-download timeouts (v1.9)
 
-`stalled_wait(hash, observation)` is additive JSON timer/authorization state.
-Only owned torrents with an explicit case-insensitive `movies` or `tv` tag qualify;
-category matches alone never authorize any timeout. Other existing rules keep
-their existing scope. Observe `stalledDL` with explicit zero speed for one hour
-at zero lifetime downloaded/completed bytes and progress, or seven days below
-25% complete with no progress and `num_complete == 0` swarm seeders (also require
-zero connected seeders). Missing/negative/non-finite counters are inconclusive.
-Never infer swarm counts from connected seeders or infer elapsed stalls from age.
+Read [removal rules](docs/removal-rules.md) before changing save-tag checks,
+metadata/stall timers, pending authorization or the dashboard policy reference.
+An exact case-insensitive `save` tag is an absolute live-torrent exemption,
+including completed/imported and bad-release cleanup. Check it at every action
+boundary. It ends on tag removal or manual client removal; no permanent file
+ignore rule is stored. Existing ownership checks protect live saved payloads.
 
-Reset on condition exit, progress/byte/size/path/tag/owner/incarnation changes,
-disappearance or clock rollback. Persist across restarts/outages; dry-run only
-updates memory. `kind=stalled` uses match/arr/delete/verify with fresh live
-condition and filesystem checks before stop, blocklist and deletion. Checkpoint
-`stopped_by_guard` only at an authorized stop so recovery can accept Guard-stopped
-states; manually paused/stopped/queued torrents cannot start timers.
-Blocklist with `skipRedownload=false`, `removeFromClient=false`, then explicitly
-request qBittorrent `deleteFiles=true`. Missing Arr matches/errors retain work.
-Save normal file evidence and independently verify absence after client removal.
-A historical stall NEVER authorizes local leftover unlink, including completed
-files; retain leftovers for manual recovery. No new writable mounts/settings.
-Preserve all existing journals/evidence/audits and metadata timers on upgrade;
-eligible old metadata timers now use the shorter ten-minute threshold.
+Positive total seeders protect shorter incomplete-download timeouts. Below 80%,
+thirty **observed** days with zero active connected seeders can override that
+protection; an active seeder resets the clock. Torrent age is not authorization.
+Keep zero-total-seeder percentage bands (3 hours / 3 days / 7 days), 80% incomplete
+retention, intentional pause/queue exclusions, replacement-before-deletion and
+fail-closed filesystem checks. Policy 4 invalidates old age/seeder authorizations
+without erasing state. Only save exempts bad releases and completed imports.
+The web rules panel is a read-only reference generated from runtime constants.
 
 ### Cleanup authorization and retries (v0.4)
 
@@ -202,7 +206,7 @@ while stopped; see INSTALL.md. Keep the image non-root, mounts restricted and
 existing journals intact. qBittorrent API deletion uses qBittorrent's own process
 identity, not Guard's identity.
 
-Key variables: QBIT_URL/USERNAME/PASSWORD, SONARR_URL/API_KEY/CATEGORY/TAG, RADARR_URL/API_KEY/CATEGORY/TAG, DOWNLOADS_HOST_PATH, QBIT_DOWNLOAD_ROOT, GUARD_DOWNLOAD_ROOT, QBIT_COMPLETE_DIR, QBIT_INCOMPLETE_DIR, VERIFY_VIDEO_CONTENT, COMPLETED_SETTLE_SECONDS, FFPROBE_TIMEOUT_SECONDS, POLL_SECONDS, MAX_AGE_HOURS, REJECT_NO_VIDEO, IMPORT_GRACE_MINUTES, IMPORT_CHECK_SECONDS, HISTORY_LOOKBACK_DAYS, DRY_RUN, STATE_DB, LOG_FILE, LOG_LEVEL, LOG_MAX_BYTES, LOG_BACKUP_COUNT, LOG_COLOR, HEALTHCHECK_MAX_AGE_SECONDS, STATUS_ENABLED, STATUS_PORT, STATUS_ALLOWED_CLIENTS, and Compose-only STATUS_BIND_ADDRESS/STATUS_HOST_PORT.
+Key variables: QBIT_URL/USERNAME/PASSWORD, SONARR_URL/API_KEY/CATEGORY/TAG, RADARR_URL/API_KEY/CATEGORY/TAG, DOWNLOADS_HOST_PATH, QBIT_DOWNLOAD_ROOT, GUARD_DOWNLOAD_ROOT, QBIT_COMPLETE_DIR, QBIT_INCOMPLETE_DIR, VERIFY_VIDEO_CONTENT, COMPLETED_SETTLE_SECONDS, FFPROBE_TIMEOUT_SECONDS, POLL_SECONDS, MAX_AGE_HOURS, REJECT_NO_VIDEO, IMPORT_GRACE_MINUTES, IMPORT_CHECK_SECONDS, HISTORY_LOOKBACK_DAYS, DRY_RUN, STATE_DB, LOG_FILE, LOG_LEVEL, LOG_MAX_BYTES, LOG_BACKUP_COUNT, LOG_COLOR, HEALTHCHECK_MAX_AGE_SECONDS, STATUS_ENABLED, STATUS_PORT, STATUS_ALLOWED_CLIENTS, ORPHAN_CLEANUP, and Compose-only STATUS_BIND_ADDRESS/STATUS_HOST_PORT.
 
 ### Monitoring contract
 
@@ -230,7 +234,7 @@ Log effective cleanup settings at startup. Pending-file warnings must identify
 whether automatic cleanup is disabled, its settle deadline, or files remain
 after an attempt. Never recommend deleting the journal to retry leftovers;
 recreating with the explicit cleanup override resumes existing evidence.
-Incomplete-directory leftovers do not prevent authorized completed-root cleanup
+Without the independent v1.9 orphan override, incomplete-directory leftovers do not prevent authorized completed-root cleanup
 in the same manifest. Keep them pending with a manual-recovery diagnostic;
 do not repeatedly attempt local removal outside the writable completed root.
 Verification still checks every saved path before marking the operation clean.
@@ -299,7 +303,7 @@ Treat docker compose config output as possibly containing secrets; sanitize befo
 - Preserve dry-run guarantees, cross-Arr category/tag isolation, defer-vs-reject distinction and explicit deletion with data through the qBittorrent API.
 - Test fail-closed behavior on unreachable Arr APIs, incomplete/late move, malformed paths, unknown file types, repeated HTTP errors, journal restarts, and multi-episode partial imports. Assert the ORDER and ABSENCE of destructive calls as well as expected calls.
 - Run: python3 -m unittest discover -s tests -v
-- Run: python3 -m py_compile guard.py deletion.py records.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
+- Run: python3 -m py_compile guard.py deletion.py records.py orphans.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
 - Run: python3 scripts/release_notes.py (validates version consistency and changelog structure without publishing).
 - Run: docker compose config using safe dummy .env values when appropriate; NEVER commit secrets.
 - Update README, INSTALL.md and .env.example as appropriate when operator-facing flags or behavior change. Document state migrations and safety impact.
@@ -308,7 +312,7 @@ Treat docker compose config output as possibly containing secrets; sanitize befo
 
 ## Non-goals and immutable safety rules
 
-Do not delete main library files; do not add filesystem write access to libraries or the download parent; do not bypass the opt-in completed-root cleanup restrictions; do not disable or silently bypass import verification; do not blocklist good imports; do not manage torrents belonging to unrelated qBittorrent categories; do not claim checksum, full decoding or malware safety from ffprobe; do not silently swallow operational errors.
+Do not delete main library files; do not add filesystem write access to libraries or the download parent; do not bypass the opt-in cleanup restrictions (completed evidence fallback or the four v1.9 orphan scopes); do not disable or silently bypass import verification; do not blocklist good imports; do not manage torrents belonging to unrelated qBittorrent categories; do not claim checksum, full decoding or malware safety from ffprobe; do not silently swallow operational errors.
 
 Conservative retention is preferable to irreversible data loss.
 

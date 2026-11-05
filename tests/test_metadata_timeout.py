@@ -67,6 +67,66 @@ class MetadataTimeoutTests(unittest.TestCase):
         self.assertEqual(self.guard.store.db.execute("SELECT count(*) FROM deletion_audit").fetchone()[0], 1)
         self.assertFalse((self.base / "absent-download-mount").exists())
 
+    def test_save_tag_blocks_metadata_timer_and_rejection(self):
+        self.torrent["tags"] = "tv, SAVE"
+        self.expire()
+        self.assertFalse(self.guard.metadata_waits)
+        self.assertFalse(self.guard.store.entries())
+        self.qb.stop.assert_not_called()
+        self.arr.blocklist_and_remove.assert_not_called()
+        self.qb.delete_with_data.assert_not_called()
+
+    def test_positive_total_seeders_prevent_ten_minute_metadata_rejection(self):
+        self.torrent.update(num_complete=3, num_seeds=0, total_size=0)
+        self.expire()
+        self.assertFalse(self.guard.metadata_waits)
+        self.assertEqual(self.guard.stalled_waits["abc"]["rule"], "unconnected")
+        self.qb.stop.assert_not_called()
+        self.qb.delete_with_data.assert_not_called()
+
+    def test_metadata_zero_active_thirty_day_removal_uses_zero_target_evidence(self):
+        self.torrent.update(num_complete=3, num_seeds=0, total_size=0)
+        self.guard.poll(now=self.now)
+        self.guard.poll(now=self.now + 30 * 86400 - 1)
+        self.qb.delete_with_data.assert_not_called()
+        self.guard.poll(now=self.now + 30 * 86400)
+        self.qb.delete_with_data.assert_called_once_with("abc")
+        manifest, _ = self.guard.store.evidence("abc")
+        validate_metadata_manifest(manifest)
+        self.assertEqual(manifest["items"], [])
+        self.assertEqual(manifest["timeout"]["rule"], "unconnected")
+        self.arr.blocklist_and_remove.assert_called_once_with(42)
+
+    def test_metadata_long_wait_guard_stop_resumes_after_restart(self):
+        self.torrent.update(num_complete=3, num_seeds=0, total_size=0)
+        self.arr.queue_by_hash.return_value = {}
+        self.qb.stop.side_effect = lambda _: self.torrent.update(state="stoppedDL")
+        self.guard.poll(now=self.now)
+        self.guard.poll(now=self.now + 30 * 86400)
+        self.qb.delete_with_data.assert_not_called()
+        resumed = self.make_guard()
+        self.arr.queue_by_hash.return_value = {"abc": 42}
+        resumed.poll(now=self.now + 30 * 86400 + 5)
+        self.qb.delete_with_data.assert_called_once_with("abc")
+
+    def test_metadata_active_seeders_returning_after_blocklist_prevents_deletion(self):
+        self.torrent.update(num_complete=3, num_seeds=0, total_size=0)
+        self.arr.blocklist_and_remove.side_effect = lambda _: self.torrent.update(num_seeds=1)
+        self.guard.poll(now=self.now)
+        self.guard.poll(now=self.now + 30 * 86400)
+        self.qb.delete_with_data.assert_not_called()
+
+    def test_long_wait_metadata_never_downgrades_to_old_ten_minute_reason(self):
+        self.torrent.update(num_complete=3, num_seeds=0, total_size=0)
+        self.arr.blocklist_and_remove.side_effect = lambda _: self.torrent.update(num_complete=0, num_seeds=1)
+        self.guard.poll(now=self.now)
+        self.guard.poll(now=self.now + 30 * 86400)
+        self.qb.delete_with_data.assert_not_called()
+        self.assertIn("timeout", self.guard.store.evidence("abc")[0])
+        resumed = self.make_guard()
+        resumed.poll(now=self.now + 30 * 86400 + 61)
+        self.qb.delete_with_data.assert_not_called()
+
     def test_restart_preserves_timer(self):
         self.guard.poll(now=self.now)
         resumed = self.make_guard()
