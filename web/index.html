@@ -76,6 +76,10 @@
       <div class="bottom-grid">
         <section class="panel">
           <h2>Warnings &amp; errors</h2>
+          <p class="note">
+            Historical events. Archiving a record clears active work; past
+            warnings remain in this history.
+          </p>
           <div id="issues"></div>
         </section>
         <section class="panel">
@@ -96,6 +100,24 @@
         </div>
         <div id="work-details"></div>
       </section>
+      <section class="panel work-panel" aria-labelledby="recovery-title">
+        <h2 id="recovery-title">Record recovery</h2>
+        <p class="note">
+          Records retire automatically when qBittorrent and every saved path
+          confirm absence. Forget record archives bookkeeping only, including in
+          dry run. It does not delete files or mark cleanup successful.
+        </p>
+        <p id="action-notice" role="status" class="note"></p>
+        <details id="recovery-list">
+          <summary id="recovery-summary">Records available for review</summary>
+          <div id="record-actions"></div>
+        </details>
+        <div id="action-results"></div>
+        <details>
+          <summary>Recently archived records</summary>
+          <div id="archived-records"></div>
+        </details>
+      </section>
       <footer>
         <span
           >Auto-refresh every 10 seconds
@@ -105,5 +127,19 @@
       </footer>
       <p class="note settings" id="settings"></p>
     </main>
+    <dialog id="forget-dialog" aria-labelledby="forget-title">
+      <h2 id="forget-title">Forget record?</h2>
+      <p id="forget-name"></p>
+      <p>
+        This archives the record and stops its retries without checking whether
+        files remain. It does not delete files or torrents and cannot mark the
+        download as successfully cleaned. The download must no longer be in
+        qBittorrent.
+      </p>
+      <div class="dialog-actions">
+        <button id="forget-cancel" type="button" autofocus>Cancel</button
+        ><button id="forget-confirm" type="button">Archive record</button>
+      </div>
+    </dialog>
   </body>
 </html>

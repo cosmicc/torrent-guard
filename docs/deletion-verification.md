@@ -165,6 +165,14 @@ A missing-torrent record without saved evidence requires manual review and is
 never silently marked clean. Retry attempts stop if the torrent creation time
 or tracked filename list changes after the snapshot.
 
+The newer [record-retirement workflow](record-retirement.md) is separate from
+this deletion-verification flow. It can archive a missing-client record with
+all saved names independently absent, or accept an explicit **Forget record**
+action for unverifiable legacy work. Raw evidence is preserved. Neither outcome
+deletes files, changes Arr state or claims successful cleanup; both are allowed
+as bookkeeping-only exceptions in dry run. The original `CLEANED`/deletion-audit
+flow and its deletion authorization remain unchanged.
+
 The reported Greenland journal entry was already removed by v0.5. Neither its
 file identity nor a full tracked-file list can be reconstructed from the log or
 torrent title. This implementation does not automatically adopt that orphan or

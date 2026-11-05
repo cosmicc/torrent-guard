@@ -31,7 +31,7 @@ from deletion import FileVerifier, metadata_manifest, validate_metadata_manifest
 
 LOG = logging.getLogger("torrent-guard")
 DISPLAY_TIMEZONE = ZoneInfo("America/New_York")
-VERSION = "1.7"
+VERSION = "1.8"
 METADATA_TIMEOUT_SECONDS = 600
 STALL_TIMEOUTS = {"empty": 3600, "seedless": 7 * 86400}
 METADATA_STATES = frozenset({"metaDL", "forcedMetaDL"})
@@ -662,6 +662,8 @@ class PendingStore:
         self.db.execute("""CREATE TABLE IF NOT EXISTS stalled_wait (
             hash TEXT PRIMARY KEY, observation TEXT NOT NULL
         )""")
+        from records import initialize
+        initialize(self.db)
         self.db.commit()
 
     def stalled_waits(self) -> dict:
@@ -702,6 +704,7 @@ class PendingStore:
         self.db.execute("DELETE FROM pending WHERE hash=?", (torrent_hash,))
         self.db.execute("DELETE FROM deletion_evidence WHERE hash=?", (torrent_hash,))
         self.db.execute("DELETE FROM cleanup_retry WHERE hash=?", (torrent_hash,))
+        self.db.execute("DELETE FROM record_observations WHERE hash=?", (torrent_hash,))
         self.db.commit()
 
     def evidence(self, torrent_hash: str):
@@ -728,6 +731,7 @@ class PendingStore:
             self.db.execute("DELETE FROM pending WHERE hash=?", (torrent_hash,))
             self.db.execute("DELETE FROM deletion_evidence WHERE hash=?", (torrent_hash,))
             self.db.execute("DELETE FROM cleanup_retry WHERE hash=?", (torrent_hash,))
+            self.db.execute("DELETE FROM record_observations WHERE hash=?", (torrent_hash,))
 
     def entries(self):
         return self.db.execute("SELECT hash,app,name,reason,queue_id,phase,kind FROM pending ORDER BY rowid").fetchall()
@@ -773,6 +777,10 @@ class Guard:
         self.log_context: dict[str, str] = {}
         self.cleanup_retries = self.store.cleanup_retries()
         self.filesystem_retries = self.store.filesystem_retries()
+        for (h,) in self.store.db.execute("SELECT hash FROM record_observations"):
+            # Observed paths survive restarts, including dry-run observations;
+            # rebuild a read-check obligation without creating retry-table rows.
+            self.filesystem_retries.setdefault(h, (0, 0, "restored filesystem observation"))
         self.metadata_waits = self.store.metadata_waits()
         self.stalled_waits = self.store.stalled_waits()
         self.metadata_passed: set[str] = set()
@@ -785,13 +793,18 @@ class Guard:
         self.import_candidates: set[str] = set()
         self.import_grace_waits: set[str] = set()
         self.last_import_check: float = 0.0
+        self.retirement_files: dict[str, tuple[dict, list]] = {}
+        self.last_retirement_check: float | None = None
 
     def poll(self, now: float | None = None):
         now = time.time() if now is None else now
         torrents = self.qbit.torrents()
         if not isinstance(torrents, list):
             raise ApiError("Unexpected qBittorrent torrent-list response")
+        self._inventory_hashes(torrents)
         by_hash = {str(t.get("hash", "")).lower(): t for t in torrents if t.get("hash")}
+        self.retirement_files.clear()
+        self._retire_absent_records(torrents, by_hash, now)
         self._track_metadata_waits(by_hash, now)
         self._track_stalled_waits(by_hash, now)
         pending = self.store.hashes()
@@ -844,6 +857,7 @@ class Guard:
                 files = self.qbit.files(h)
                 if not isinstance(files, list):
                     raise ApiError("Unexpected qBittorrent file-list response")
+                self.retirement_files[h] = (torrent, files)
                 if not files:
                     label = "metadata/queue; no payload downloaded" if is_unstarted_download(torrent) else "metadata"
                     LOG.debug("WAIT %s [%s] %s", label, app, self.log_context[h])
@@ -1086,6 +1100,18 @@ class Guard:
 
     def _defer_filesystem(self, h: str, reason: str, now: float):
         """Retain the torrent and schedule 30/60/120/240/300-second retries."""
+        if h in self.retirement_files:
+            # Observational evidence is never supplied to a deletion operation.
+            # A failed capture explicitly invalidates an older path observation.
+            from records import remember_paths
+            torrent, files = self.retirement_files[h]
+            try:
+                observed = self.verifier.snapshot(torrent, files)
+                if not isinstance(observed, dict):
+                    raise ValueError("Path observation unavailable")
+            except (OSError, ValueError):
+                observed = None
+            remember_paths(self.store.db, h, observed, torrent, reason)
         attempt = self.filesystem_retries.get(h, (0, 0, ""))[0] + 1
         delay = min(300, 30 * 2 ** min(attempt - 1, 4))
         self.filesystem_retries[h] = (attempt, now + delay, reason)
@@ -1101,10 +1127,110 @@ class Guard:
                     math.ceil(next_at - now), attempt, retry_at)
 
     def _clear_filesystem(self, h: str):
-        """Clear retry state after recovery without changing dry-run journals."""
+        """Clear recovered observations; dry-run retry-table updates stay disabled."""
         self.filesystem_retries.pop(h, None)
+        with self.store.db:
+            self.store.db.execute("DELETE FROM record_observations WHERE hash=?", (h,))
         if not self.config.dry_run:
             self.store.clear_filesystem_retry(h)
+
+    @staticmethod
+    def _inventory_hashes(torrents: list) -> set[str]:
+        """Require a complete usable inventory before any bookkeeping retirement."""
+        if (not isinstance(torrents, list) or any(not isinstance(row, dict)
+                or not isinstance(row.get("hash"), str) or not row["hash"] for row in torrents)):
+            raise ApiError("Cannot retire records: qBittorrent inventory is inconclusive")
+        return {row["hash"].lower() for row in torrents}
+
+    def _forget_runtime_record(self, h: str) -> None:
+        """Clear only retired in-memory work; never alter torrent or payload state."""
+        for mapping in (self.filesystem_retries, self.cleanup_retries, self.metadata_waits,
+                        self.stalled_waits, self.cleanup_messages, self.warned_defer,
+                        self.import_wait_reasons, self.retirement_files):
+            mapping.pop(h, None)
+        for values in (self.metadata_passed, self.completed_passed, self.logged_dry,
+                       self.logged_import_dry, self.warned_missing, self.import_candidates,
+                       self.import_grace_waits):
+            values.discard(h)
+
+    def _fresh_inventory_hashes(self) -> set[str]:
+        """Treat client outages as an inconclusive poll, never absence evidence."""
+        try:
+            return self._inventory_hashes(self.qbit.torrents())
+        except (OSError, urllib.error.URLError) as exc:
+            raise ApiError("Cannot refresh qBittorrent inventory for record retirement") from exc
+
+    def _retire_absent_records(self, torrents: list, by_hash: dict, now: float) -> None:
+        """Archive proven-absent work or explicit dismissals, including in dry run.
+
+        No Arr calls or filesystem mutations occur. Unverifiable legacy records
+        remain active unless the operator explicitly chooses archive-only Forget.
+        """
+        from records import archive
+
+        self._inventory_hashes(torrents)
+        requests = self.store.db.execute("SELECT id,hash,revision FROM record_requests WHERE state='queued' ORDER BY created_at LIMIT 8").fetchall()
+        for request_id, h, expected in requests:
+            try:
+                # Refresh independently of the web's cached status or initial poll.
+                if h.lower() in self._fresh_inventory_hashes():
+                    raise ValueError("Download is still in qBittorrent; record was retained")
+                message = archive(self.store.db, h, now, "operator_dismissed", expected)
+                self._forget_runtime_record(h)
+                state = "completed"
+                LOG.info("ARCHIVED record by operator: %s; no torrent or file deletion requested", self.log_context.get(h, "retained record"))
+            except (ApiError, OSError, urllib.error.URLError):
+                # Keep a durable request queued until client absence is knowable.
+                raise
+            except ValueError as exc:
+                state, message = "refused", str(exc)
+            with self.store.db:
+                self.store.db.execute("UPDATE record_requests SET state=?,message=? WHERE id=?", (state, message, request_id))
+        if self.last_retirement_check is not None and 0 <= now - self.last_retirement_check < 60:
+            return
+        self.last_retirement_check = now
+        pending = {row[0]: row for row in self.store.entries()}
+        candidates = set(pending) | set(self.filesystem_retries) | set(self.cleanup_retries)
+        candidates.update(h for (h,) in self.store.db.execute("SELECT hash FROM record_observations"))
+        for h in (value for value in candidates if value.lower() not in by_hash):
+            try:
+                evidence = self.store.evidence(h)
+                row = pending.get(h)
+                # Preserve the existing successful-deletion audit/logging flow.
+                if (not self.config.dry_run and row and row[5] == "verify"
+                        and evidence and evidence[1] is not None):
+                    continue
+                observed = self.store.db.execute("SELECT manifest FROM record_observations WHERE hash=?", (h,)).fetchone()
+                manifests = []
+                if evidence:
+                    manifests.append(evidence[0])
+                if observed:
+                    manifests.append(json.loads(observed[0]))
+                if not manifests:
+                    continue
+                for manifest in manifests:
+                    if (not isinstance(manifest, dict) or manifest.get("unverifiable") or not isinstance(manifest.get("torrent"), dict)
+                            or str(manifest["torrent"].get("hash", "")).lower() != h.lower()):
+                        raise ValueError("Saved observation is incomplete or belongs to another torrent")
+                    if isinstance(manifest, dict) and manifest.get("kind") == "metadata_only":
+                        validate_metadata_manifest(manifest)
+                    elif self.verifier.remaining(manifest):
+                        break
+                else:
+                    if h.lower() in self._fresh_inventory_hashes():
+                        continue
+                    archive(self.store.db, h, now, "verified_absent")
+                    self._forget_runtime_record(h)
+                    proof = ("client absent; zero-payload metadata evidence has no filesystem targets"
+                             if all(manifest.get("kind") == "metadata_only" for manifest in manifests)
+                             else "client absent and all saved paths independently verified absent")
+                    LOG.info("RETIRED record: %s; %s; no deletion requested",
+                             self.log_context.get(h, row[2] if row else "retained download"), proof)
+            except ApiError:
+                raise
+            except (OSError, ValueError, TypeError, KeyError, urllib.error.URLError):
+                # Failed/ambiguous absence checks are not proof of deletion.
+                continue
 
     def _filesystem_ready(self, h: str, torrent: dict | None, now: float) -> bool:
         """A completion/state change never bypasses an unresolved filesystem hold."""
@@ -1117,6 +1243,7 @@ class Guard:
             return True  # Saved-path verification below must establish recovery.
         try:
             files = self.qbit.files(h)
+            self.retirement_files[h] = (torrent, files)
             self.validator.check_filesystem(torrent, files)
             if is_complete(torrent):
                 result, reason = self.validator.inspect(torrent, files)
@@ -1373,6 +1500,7 @@ class Guard:
                     # Check access before stop/blocklist/API deletion, including
                     # metadata-only rejection of incomplete torrents.
                     current_files = self.qbit.files(h)
+                    self.retirement_files[h] = (torrent, current_files)
                     if kind == "metadata":
                         self._metadata_removal_ready(h, torrent, current_files)
                     else:

@@ -7,8 +7,10 @@ setup is in [INSTALL.md](../INSTALL.md#web-status-page).
 ## Isolation and data
 
 - Keep Guard polling and its SQLite logging handler on the main thread. HTTP
-  threads only read a cached snapshot and the private heartbeat marker. They
-  never poll APIs, write state, log through the main SQLite handler or run probes.
+  reads combine cached diagnostics, current read-only bookkeeping and heartbeat.
+  The sole POST route may insert a bounded archive request through its own SQLite
+  connection. HTTP threads never edit active work, poll APIs, delete files, log
+  through the main SQLite handler or run probes. See [retirement](record-retirement.md).
 - `StatusCache` runs diagnostics in a subprocess with a 120-second limit and
   waits sixty seconds after completion. Each drive probe has a ten-second limit.
   Preserve old results after collection failures; show their age and mark them
@@ -43,8 +45,10 @@ setup is in [INSTALL.md](../INSTALL.md#web-status-page).
 ## HTTP and browser boundaries
 
 - Serve only packaged `/`, `/app.css`, `/app.js`, `/icon.svg` and `/api/status`
-  through fixed routes. No arbitrary file serving, management actions, writable
-  endpoints, CORS grants, credentials in URLs or third-party assets.
+  through GET/HEAD routes. POST `/api/forget` queues archive-only bookkeeping;
+  it must validate the actual peer, exact Origin/Host, per-process action token,
+  JSON content type, 1-KiB body limit and record revision. No CORS grants,
+  destructive actions, arbitrary files, URL credentials or third-party assets.
 - Nginx owns authentication/TLS for the entire hostname. The app checks actual
   connecting IPs/CIDRs, never proxy-provided identity or X-Forwarded-For. Defaults
   publish host loopback and allow only loopback; remote proxies require explicit
@@ -55,7 +59,11 @@ setup is in [INSTALL.md](../INSTALL.md#web-status-page).
 - Redact configured credentials before persistence/display. Browser rendering
   must use textContent and DOM creation, never innerHTML for remote text. Keep
   stale, unavailable, unconfigured and zero states distinct. HTTP freshness is
-  separate from daemon liveness. Refresh only reads the cache.
+  separate from daemon liveness. Refresh only reads cached diagnostics/current bookkeeping.
+- Do not redact opaque record IDs/revisions into unusable protocol values;
+  redact human names, reasons and messages. Keep request results and archives
+  distinct from deletion success. Current active counters may be read directly
+  from SQLite; diagnostics must still not run on HTTP requests.
 
 ## Design and validation
 

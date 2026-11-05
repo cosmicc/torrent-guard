@@ -41,6 +41,107 @@ let hours = "12";
 let busy = false;
 let lastFetch = 0;
 let connectionError = false;
+let selectedRecord = null;
+let activeRequestId = null;
+
+function renderRecovery(actions) {
+  const activeRequest = actions?.requests?.find(
+    (request) => request.id === activeRequestId,
+  );
+  if (activeRequest) {
+    $("action-notice").textContent =
+      `${activeRequest.name || "Record"} · ${activeRequest.state}: ${activeRequest.message}`;
+    $("action-notice").className =
+      activeRequest.state === "refused" ? "note warn" : "note";
+  }
+  $("record-actions").replaceChildren();
+  $("action-results").replaceChildren();
+  $("archived-records").replaceChildren();
+  const records = actions?.available ? actions.records : [];
+  $("recovery-summary").textContent = actions?.available
+    ? `${records.length} active records available for review (up to 100)`
+    : "Recovery information unavailable";
+  if (!actions?.available)
+    empty(
+      $("record-actions"),
+      "Recovery information is unavailable until a successful poll initializes the journal.",
+    );
+  for (const record of records) {
+    const row = node("article", undefined, "work");
+    const head = node("div", undefined, "work-head");
+    const button = node("button", "Forget record");
+    button.type = "button";
+    const queued = actions.requests.some(
+      (request) =>
+        request.record_id === record.id && request.state === "queued",
+    );
+    button.disabled = queued;
+    if (queued) button.textContent = "Queued";
+    button.addEventListener("click", () => {
+      selectedRecord = record;
+      $("forget-name").textContent = record.name;
+      $("forget-dialog").showModal();
+    });
+    head.append(node("strong", record.name), button);
+    row.append(head, node("p", record.reason, "note"));
+    $("record-actions").append(row);
+  }
+  if (actions?.available && !records.length)
+    empty($("record-actions"), "No active bookkeeping records.");
+  for (const request of (actions?.requests || []).slice(0, 8)) {
+    $("action-results").append(
+      node(
+        "p",
+        `${request.name || "Record"} · ${request.state}: ${request.message}`,
+        request.state === "refused" ? "note warn" : "note",
+      ),
+    );
+  }
+  for (const record of actions?.archived || []) {
+    const row = node("p", undefined, "note");
+    row.append(
+      document.createTextNode(
+        `${record.name} · ${record.disposition === "verified_absent" ? "Saved absence evidence verified" : "Operator archived; absence not certified"} · `,
+      ),
+      stamp(record.at),
+    );
+    $("archived-records").append(row);
+  }
+  if (!$("archived-records").children.length)
+    empty($("archived-records"), "No records archived yet.");
+}
+
+async function forgetRecord() {
+  if (!selectedRecord) return;
+  activeRequestId = null;
+  const record = selectedRecord;
+  $("forget-confirm").disabled = true;
+  try {
+    const response = await fetch("api/forget", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRF-Token": current?.csrf_token || "",
+      },
+      body: JSON.stringify({ record_id: record.id, revision: record.revision }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const result = await response.json();
+    activeRequestId = result.request_id;
+    $("action-notice").textContent =
+      "Archive request queued. Polling will check that the torrent is absent; no files or torrents will be deleted.";
+    $("forget-dialog").close();
+    selectedRecord = null;
+    await refresh();
+  } catch (error) {
+    $("action-notice").textContent =
+      `Archive request not confirmed: ${error.message}. Refresh before trying again; a timed-out request may already be queued.`;
+    $("forget-dialog").close();
+  } finally {
+    $("forget-confirm").disabled = false;
+  }
+}
 
 function stamp(at) {
   const time = node("time", timeFormat.format(new Date(at * 1000)));
@@ -100,6 +201,7 @@ function renderMetrics(history) {
 }
 function render(data) {
   current = data;
+  renderRecovery(data.record_actions);
   $("version").textContent = data.version ? "v" + data.version : "—";
   const cacheAge = data.cache_age_seconds;
   $("updated").textContent =
@@ -378,6 +480,8 @@ document.querySelectorAll("[data-hours]").forEach((button) =>
   }),
 );
 $("refresh").addEventListener("click", refresh);
+$("forget-cancel").addEventListener("click", () => $("forget-dialog").close());
+$("forget-confirm").addEventListener("click", forgetRecord);
 render({ ready: false, poll: { healthy: false } });
 refresh();
 setInterval(refresh, 10000);

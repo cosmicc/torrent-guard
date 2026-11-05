@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v1.7** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v1.8** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -15,14 +15,14 @@ grace interval has elapsed (15 minutes by default).
 - Successful imports are never blocklisted. Pending deletion attempts recheck
   completion, media, and import evidence; uncertainty preserves the download.
 - Runs without root privileges, Docker socket access, or a writable media mount.
-  A read-only status page runs in the same container behind your authenticated Nginx proxy.
+  A status page runs in the same container behind your authenticated Nginx proxy.
 - Color-coded live logs and a Docker healthcheck show ongoing polling activity.
 - Timeout rules require a `movies` or `tv` tag: metadata waits over 10 minutes,
   zero-byte stalls for an hour, or stalls below 25% with zero swarm seeders for
   seven days. Arr blocklisting requests a replacement before deletion.
   See [timeout rules](INSTALL.md#stalled-download-timeouts) for timer and safety details.
-- Starts with `DRY_RUN=true`: no torrent stop, blocklist, deletion, or pending
-  operation changes during polling.
+- Starts with `DRY_RUN=true`: no torrent stop, blocklist or payload deletion.
+  Verified retirement and explicit archive-only bookkeeping still work.
 
 ## Getting started
 
@@ -69,6 +69,11 @@ retry holds, 6/12/24-hour event statistics, warnings and errors. No separate web
 container is needed. Your Nginx server supplies TLS/authentication; only configured
 proxy IPs may reach the backend. See [web status setup](INSTALL.md#web-status-page).
 The v1.6 `--status` CLI is replaced by this page; existing history is preserved.
+
+Stale records retire automatically once the torrent and every saved file path
+are confirmed absent. For unverifiable legacy records, **Record recovery →
+Forget record** archives bookkeeping without deleting files or claiming cleanup
+succeeded. Both work in dry run. See [record recovery](INSTALL.md#record-recovery).
 
 For readable, colored event blocks in a PuTTY/SSH terminal, run from the project
 checkout on the Docker host (requires Python 3):
@@ -120,7 +125,7 @@ Docker does not automatically restart unhealthy containers.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile guard.py deletion.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
+python3 -m py_compile guard.py deletion.py records.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
 python3 scripts/release_notes.py
 ```
 

@@ -106,6 +106,7 @@ class StatusHistory(logging.Handler):
             with self.database:
                 decision = next((label for prefix, label in (
                     ("ACCEPT completed ", "Validated"), ("CLEANED ", "Cleaned"),
+                    ("RETIRED record:", "Record retired"), ("ARCHIVED record", "Record archived"),
                     ("WAIT import ", "Waiting for import"), ("CLEANUP scheduled ", "Cleanup scheduled"),
                     ("REJECT candidate ", "Rejection candidate"), ("DRY RUN:", "Dry run")
                 ) if message.startswith(prefix)), None)

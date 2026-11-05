@@ -379,7 +379,7 @@ the lightweight backend speaks HTTP. Test the Nginx configuration and reload it
 through your normal management process. No access to that server is required
 for Guard's build, and this repository does not change your main Nginx setup.
 
-Pull v1.7, then rebuild/recreate using the same Compose files already in use:
+Pull v1.8, then rebuild/recreate using the same Compose files already in use:
 
 ```bash
 git pull
@@ -427,12 +427,66 @@ twenty-five holds per kind. Import counters show the timestamp of their last
 completed-poll snapshot; persisted timers exclude dry-run-only observations.
 
 All external text is escaped/redacted, shown as text rather than HTML, and served
-with no-store and restrictive browser headers. The page has no destructive
-controls or writable API. The HTTP server limits concurrent requests and accepts
-only fixed GET/HEAD routes; its proxy allowlist is an additional restriction,
+with no-store and restrictive browser headers. The page cannot stop torrents or
+delete files. Its only POST route queues archive-only bookkeeping requests;
+status and static assets use fixed GET/HEAD routes. The proxy allowlist is an additional restriction,
 not a replacement for Nginx authentication. New colors follow the approved
 [navy/slate and cyan palette](docs/status-palette.svg). Display times use Eastern
 Time with EST/EDT; hover timestamps for their full zone/offset.
+
+### Record recovery
+
+Stale bookkeeping is retired automatically when a successful qBittorrent
+inventory confirms the torrent is gone and independent checks confirm that
+**every saved name** is absent. This includes files under the completed `tv`
+and `movies` subdirectories, incomplete/`.!qB` names, and saved quarantine payloads.
+The configured completed directory remains their shared parent. No directory
+sweeps or title-based file guesses are used. All saved manifests/observations
+must agree that the files are absent on unchanged, accessible mapped roots.
+Missing/replaced mounts, permission errors, malformed evidence and client API
+outages do not prove absence. Routine automatic retirement checks run at most
+once per minute; ordinary successful-deletion verification retains its existing
+audit and retry flow. In dry run, verified retirement also clears stale records.
+
+For legacy holds without trustworthy saved paths, open **Record recovery**,
+expand the active records and select **Forget record**. Read the confirmation,
+then choose **Archive record**. The request is durable and the polling thread
+performs a fresh qBittorrent inventory check before archiving. A torrent still
+present in qBittorrent is refused. Requests wait through client outages and
+survive container restarts. Changes to a record's phase or saved evidence require
+refreshing and reviewing it again. A timeout in the browser can occur after a
+request was queued; refresh to see its result before retrying.
+
+**Forget record does not inspect, remove or certify absence of files.** It stops
+retries for the selected missing-client record and preserves its raw evidence
+for audit, even when files may remain or the mount cannot be read. This is the
+fallback for records the app cannot safely verify automatically. It is not a
+replacement for Arr import verification or a way to mark files as successfully
+cleaned. Existing files are retained. If the torrent is added again later, normal
+screening/import processing resumes; archival does not create a permanent ignore.
+
+These bookkeeping actions work with `DRY_RUN=true`, while torrent stops, Arr
+blocklisting, cleanup scheduling and payload deletion remain disabled. The
+additive `record_observations`, `record_archive` and `record_requests` tables live
+in the existing state SQLite database. Original active rows are archived in one
+transaction before removal; historical `deletion_audit` rows are preserved.
+Captured filesystem path observations survive restarts, including dry run, and
+are rechecked rather than trusted as cleanup authorization. Legacy records may
+lack observations and need a one-time explicit archive. Keep the state directory
+and back it up through the normal stopped-container procedure; never erase it
+to clear the display. No new mounts or environment variables are required.
+
+The page shows current archive requests/results, up to 100 active recovery
+records and the ten latest archives. Active bookkeeping is read directly so
+completed actions clear pending/hold counters without waiting for the slower
+diagnostic cache. Import counts still show their last-poll timestamp. Historical
+warnings remain in **Warnings & errors** after their active record is retired;
+they are not a claim that the work is still pending. Archives use distinct
+`verified_absent` and `operator_dismissed` outcomes and never increment `CLEANED`
+statistics. The queue is bounded to 32 outstanding requests and up to eight are
+handled per successful poll. Nginx must preserve the browser Host/Origin and
+custom request headers, keep authentication on `/api/forget`, and allow POST
+to that route. Origin/token checks are additional protection, not authentication.
 
 ### SSH event viewer
 
@@ -544,7 +598,7 @@ unhealthy; health status is available for monitoring and alerts.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile guard.py deletion.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
+python3 -m py_compile guard.py deletion.py records.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
 python3 scripts/release_notes.py
 # If Docker is available and .env has correct paths:
 docker compose config

@@ -19,6 +19,38 @@
     sans-serif;
   font-synthesis: none;
 }
+dialog {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  max-width: 540px;
+  width: calc(100% - 32px);
+  padding: 24px;
+}
+dialog::backdrop {
+  background: rgba(0, 0, 0, 0.7);
+}
+dialog p {
+  margin: 16px 0;
+  overflow-wrap: anywhere;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+#forget-name {
+  font-weight: 650;
+}
+#action-results p,
+#archived-records p {
+  margin-top: 8px;
+}
+#recovery-list {
+  margin: 16px 0;
+}
 * {
   box-sizing: border-box;
 }

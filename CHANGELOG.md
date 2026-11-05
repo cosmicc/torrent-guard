@@ -3,6 +3,35 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 1.8 - 11.04.2026
+
+### Added
+
+- Automatic archival of stale records after a fresh qBittorrent inventory and
+  independent absence verification of every saved completed, incomplete and
+  quarantine path. Captured filesystem observations support orphaned holds.
+- Per-record **Forget record** confirmation on the status page. Requests persist
+  across restarts, are handled by the polling thread, and archive bookkeeping
+  without deleting files or claiming successful cleanup.
+- Audit archives retain original pending/evidence/retry/timer rows. Recovery
+  results and recent archives are visible separately from historical warnings.
+
+### Changed
+
+- Permit verified retirement and explicit archive-only requests in dry-run mode;
+  torrent stops, Arr blocklisting and all payload deletion remain disabled.
+- Protect the archive endpoint with proxy-IP checks, same-origin validation,
+  an action token, bounded JSON/queue limits and stale-record revision checks.
+- Read active bookkeeping directly for current web counters after retirement,
+  while connection and drive probes remain cached and independent of requests.
+
+### Fixed
+
+- Retire orphaned holds when their saved locations are verifiably empty instead
+  of retaining them indefinitely. Unreadable or changed mounts and unavailable
+  client inventories remain inconclusive; unknown legacy paths require explicit
+  archive-only review.
+
 ## 1.7 - 11.03.2026
 
 ### Added
