@@ -3,6 +3,57 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 1.9 - 11.05.2026
+
+### Added
+
+- Automatic orphan cleanup in the four dedicated completed/incomplete TV/movie
+  download directories after 15 continuously observed minutes without ownership
+  by any qBittorrent torrent. Includes sidecars and old untracked partials.
+- Persistent orphan candidates, deletion audits and interrupted-quarantine
+  recovery; separate opt-in Compose override grants only four writable scopes.
+- Expandable dashboard Removal rules reference covering all percentage bands,
+  deadlines, protection exceptions, import cleanup and optional orphan removal,
+  generated from runtime policy constants without initiating checks or actions.
+
+### Changed
+
+- Orphan deletion is independently authorized by sustained client absence, even
+  without import history. Files remain reserved while owned by any client
+  torrent; API/access uncertainty resets orphan eligibility.
+- Treat seeding as completed, with confirmed all-video Arr import and ordinary
+  import grace before removal with data; no extra seed-time/ratio retention.
+- Apply zero-total-seeder waits by current percentage: below 15% waits 3 hours,
+  15% to under 50% waits 3 days, and 50% to under 80% waits 7 days. Preserve
+  continuous seeder-absence history across band changes and peer progress.
+- Add an absolute exact, case-insensitive `save` tag exemption for every Guard
+  stop, rejection/replacement and torrent/file deletion, including completed
+  imports and bad releases. Refresh tags at action boundaries and pending retries.
+  Protection ends on tag or manual client removal; no permanent orphan ignore.
+- Positive total swarm seeders protect shorter incomplete-download timeouts.
+  Below 80%, require thirty observed days with zero active connected seeders
+  before replacement/deletion, resetting the observation when a seeder connects.
+  Torrent added date is no longer a removal deadline. Preserve 80% timeout
+  retention, percentage-band seedless waits and intentional pause/queue exclusions.
+- Keep metadata's ten-minute zero-payload failure unless save/positive totals
+  protects it. Positive-total metadata can use the thirty-day zero-active rule
+  with explicit zero-target timeout proof and restart-safe Guard-stop recovery.
+- Only save exempts completed-import cleanup and dangerous/no-media rejection.
+  Every Guard-rejected incomplete torrent requests Arr replacement first.
+- Policy 4 resets legacy timeout observations while preserving journal/audit/file
+  evidence and valid Guard-stop provenance; no database or environment reset.
+- Show orphan removals in recent activity without inflating torrent cleanup
+  counts. Show orphan cleanup configuration separately on the status page and refresh
+  queued Forget record results every two seconds. Keep record archival separate
+  from filesystem cleanup; preserve journals and historical audits on upgrade.
+
+### Fixed
+
+- Resolve incomplete-directory and unknown legacy leftovers automatically when
+  the orphan override is enabled, using saved identities and guarded quarantine.
+- Bring Forget record failures into view and preserve proxy Host ports in the
+  installation example so same-origin archival works on nonstandard ports.
+
 ## 1.8 - 11.04.2026
 
 ### Added

@@ -85,3 +85,36 @@ Check browser console, CSP, desktop/mobile overflow, range buttons, refresh,
 expandable details, initial/unavailable/stale states and malicious text as text.
 Use disposable API fixtures for Docker/browser tests; never contact production
 or claim these tests validate its API/import/mount configuration.
+
+## v1.9 recovery feedback
+
+Show the configured orphan policy separately from completed evidence fallback.
+Archive requests refresh status every two seconds while queued and display errors
+in view after closing the dialog. Forget record remains archive-only; it never
+triggers the independent orphan policy. Preserve Host including its port at the
+proxy; retain the strict Origin/Host and action-token checks.
+
+Include `ORPHAN removed` in recent activity as an orphan file removal, without
+counting individual orphan files as imported-torrent cleanup metrics.
+
+## Removal policy reference
+
+The expandable Removal rules panel displays a pure `removal_reference()` payload
+from `guard.py`, generated from the same percentage/duration constants that govern
+runtime checks. List the absolute live save-tag exemption and positive-total-seeder protection
+first. Include all zero-total-seeder bands, 80% incomplete retention,
+30-day zero-active-seeder observation, inactive stalls, metadata waits, dangerous/no-media
+rejection, completed/seeding imports and optional orphan cleanup. Clearly state
+pause/queue, tag/ownership and 80% exceptions, replacement-first ordering and dry
+run. No HTTP request may evaluate torrents, probe drives, or mutate cleanup state
+to generate this reference. It remains available before diagnostics finish.
+Use the approved palette/spacing, semantic table headers and keyboard-operable
+details disclosure. Verify desktop/mobile wrapping, opening/closing the panel,
+refresh preserving its state, policy values and safe text rendering in Chromium.
+
+The thirty-day rule is based on observed zero active connected seeders, resetting
+on a connection; never label it as torrent age. Save overrides completed/imported
+and dangerous/no-media cleanup too. Positive totals only protect incomplete
+shorter timeouts. Explain that save protection ends when the tag/client is removed,
+so it does not create a permanent orphan ignore. Keep these facts from the pure
+runtime reference, using the existing palette and wrapping on desktop/mobile.

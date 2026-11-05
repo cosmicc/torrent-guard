@@ -100,12 +100,30 @@
         </div>
         <div id="work-details"></div>
       </section>
+      <section class="panel work-panel" aria-labelledby="removal-title">
+        <div class="section-head">
+          <h2 id="removal-title">Removal rules</h2>
+          <span class="note">Reference only · no actions run from this panel</span>
+        </div>
+        <details id="removal-reference">
+          <summary>View all rules and exceptions</summary>
+          <div class="table-scroll rules-table">
+            <table aria-label="Automatic removal rules">
+              <thead><tr><th scope="col">Condition</th><th scope="col">Action and timing</th></tr></thead>
+              <tbody id="removal-rule-rows"></tbody>
+            </table>
+          </div>
+          <ul id="removal-rule-notes" class="note"></ul>
+        </details>
+      </section>
       <section class="panel work-panel" aria-labelledby="recovery-title">
         <h2 id="recovery-title">Record recovery</h2>
         <p class="note">
           Records retire automatically when qBittorrent and every saved path
           confirm absence. Forget record archives bookkeeping only, including in
-          dry run. It does not delete files or mark cleanup successful.
+          dry run. It does not delete files or mark cleanup successful. When orphan cleanup is
+          enabled, unowned files are removed automatically after 15 minutes;
+          Forget record is not needed for that cleanup.
         </p>
         <p id="action-notice" role="status" class="note"></p>
         <details id="recovery-list">

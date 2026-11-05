@@ -84,3 +84,11 @@ client reappearance/outages, restarts, stale confirmations, queue bounds, archiv
 atomicity, CSRF/source/body checks, immediate counters and absence of destructive
 calls. Browser-test cancel/confirm/result and mobile overflow. Production APIs,
 mounts and actual data deletion are outside these tests.
+
+## v1.9 automatic orphan cleanup and action feedback
+
+[Orphan cleanup](orphan-cleanup.md) is a separate polling-thread policy, never
+a side effect of Forget record. Once files are gone, ordinary verified retirement
+can resolve their stale records. Forget request results refresh every two seconds
+while queued; POST errors scroll into view after the dialog closes. Preserve the
+complete original Host header at the trusted proxy, including nonstandard ports.

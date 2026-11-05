@@ -43,12 +43,16 @@ let lastFetch = 0;
 let connectionError = false;
 let selectedRecord = null;
 let activeRequestId = null;
+let actionRefreshTimer = null;
 
 function renderRecovery(actions) {
   const activeRequest = actions?.requests?.find(
     (request) => request.id === activeRequestId,
   );
   if (activeRequest) {
+    clearTimeout(actionRefreshTimer);
+    if (activeRequest.state === "queued")
+      actionRefreshTimer = setTimeout(refresh, 2000);
     $("action-notice").textContent =
       `${activeRequest.name || "Record"} · ${activeRequest.state}: ${activeRequest.message}`;
     $("action-notice").className =
@@ -132,12 +136,17 @@ async function forgetRecord() {
     $("action-notice").textContent =
       "Archive request queued. Polling will check that the torrent is absent; no files or torrents will be deleted.";
     $("forget-dialog").close();
+    $("action-notice").scrollIntoView({ block: "nearest" });
     selectedRecord = null;
+    clearTimeout(actionRefreshTimer);
+    actionRefreshTimer = setTimeout(refresh, 2000);
     await refresh();
   } catch (error) {
     $("action-notice").textContent =
       `Archive request not confirmed: ${error.message}. Refresh before trying again; a timed-out request may already be queued.`;
     $("forget-dialog").close();
+    $("action-notice").className = "note warn";
+    $("action-notice").scrollIntoView({ block: "nearest" });
   } finally {
     $("forget-confirm").disabled = false;
   }
@@ -199,9 +208,27 @@ function renderMetrics(history) {
     ? `History unavailable${history?.detail ? ": " + history.detail : "; waiting for first collection."}`
     : `${counts.partial ? "Partial window · " : ""}Recorded since ${fullTimestamp(new Date(history.since * 1000))}. Event counts overlap; candidates include dry run. Downtime is not observed.${history.gap ? " Recording failures may leave gaps." : ""}`;
 }
+function renderRemovalRules(reference) {
+  // Policy comes from the daemon's runtime constants. Browser reads only display
+  // it; neither expanding this panel nor refreshing can initiate deletion.
+  const body = $("removal-rule-rows");
+  body.replaceChildren();
+  for (const rule of reference?.rows || []) {
+    const row = node("tr");
+    row.append(node("td", rule.condition), node("td", rule.action));
+    body.append(row);
+  }
+  $("removal-rule-notes").replaceChildren(
+    ...(reference?.notes || []).map((note) => node("li", note)),
+  );
+  if (!reference)
+    $("removal-rule-notes").append(node("li", "Removal rules will appear after the next successful status response."));
+}
+
 function render(data) {
   current = data;
   renderRecovery(data.record_actions);
+  renderRemovalRules(data.removal_rules);
   $("version").textContent = data.version ? "v" + data.version : "—";
   const cacheAge = data.cache_age_seconds;
   $("updated").textContent =
@@ -434,7 +461,7 @@ function render(data) {
   }
   const settings = data.settings;
   $("settings").textContent = settings
-    ? `Poll interval ${settings.poll_seconds}s · Import grace ${settings.import_grace_minutes}m · Video validation ${settings.verify_video_content ? "enabled" : "disabled"} · Completed cleanup ${settings.cleanup_leftovers ? "enabled" : "disabled"} · UID:GID ${settings.uid}:${settings.gid}`
+    ? `Poll interval ${settings.poll_seconds}s · Import grace ${settings.import_grace_minutes}m · Video validation ${settings.verify_video_content ? "enabled" : "disabled"} · Completed cleanup ${settings.cleanup_leftovers ? "enabled" : "disabled"} · Orphan cleanup ${settings.orphan_cleanup ? "enabled (15m absence)" : "disabled"} · UID:GID ${settings.uid}:${settings.gid}`
     : "";
 }
 

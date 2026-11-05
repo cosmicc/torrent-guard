@@ -1,0 +1,27 @@
+# Automatic orphan removal only within these four dedicated download folders.
+# docker compose -f compose.yaml -f compose.orphans.yaml up -d --build --force-recreate
+services:
+  torrent-guard:
+    environment:
+      ORPHAN_CLEANUP: "true"
+    volumes:
+      - type: bind
+        source: ${DOWNLOADS_HOST_PATH:?Set DOWNLOADS_HOST_PATH}/complete/tv
+        target: /cleanup/orphans/complete/tv
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOWNLOADS_HOST_PATH:?Set DOWNLOADS_HOST_PATH}/complete/movies
+        target: /cleanup/orphans/complete/movies
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOWNLOADS_HOST_PATH:?Set DOWNLOADS_HOST_PATH}/incomplete/tv
+        target: /cleanup/orphans/incomplete/tv
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOWNLOADS_HOST_PATH:?Set DOWNLOADS_HOST_PATH}/incomplete/movies
+        target: /cleanup/orphans/incomplete/movies
+        bind:
+          create_host_path: false

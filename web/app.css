@@ -647,3 +647,21 @@ footer {
     margin: 8px 0 0;
   }
 }
+
+/* Preserve the dashboard palette and gutters while keeping policy text readable. */
+.rules-table {
+  margin-top: 16px;
+}
+.rules-table th:first-child {
+  width: 46%;
+}
+.rules-table th:last-child {
+  width: 54%;
+}
+#removal-rule-notes {
+  padding-left: 20px;
+  margin: 16px 0 0;
+}
+#removal-rule-notes li + li {
+  margin-top: 10px;
+}

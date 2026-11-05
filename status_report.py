@@ -106,6 +106,7 @@ class StatusHistory(logging.Handler):
             with self.database:
                 decision = next((label for prefix, label in (
                     ("ACCEPT completed ", "Validated"), ("CLEANED ", "Cleaned"),
+                    ("ORPHAN removed ", "Orphan file removed"),
                     ("RETIRED record:", "Record retired"), ("ARCHIVED record", "Record archived"),
                     ("WAIT import ", "Waiting for import"), ("CLEANUP scheduled ", "Cleanup scheduled"),
                     ("REJECT candidate ", "Rejection candidate"), ("DRY RUN:", "Dry run")
@@ -288,6 +289,7 @@ def collect_status() -> dict:
     config = Config.from_env()
     result = {"version": VERSION, "collected_at": time.time(), "services": [], "drives": [],
               "settings": {"dry_run": config.dry_run, "cleanup_leftovers": config.cleanup_leftovers,
+                           "orphan_cleanup": config.orphan_cleanup,
                            "import_grace_minutes": config.import_grace_minutes, "poll_seconds": config.poll_seconds,
                            "verify_video_content": config.verify_video_content, "uid": os.getuid(), "gid": os.getgid()}}
     names = {}
