@@ -280,7 +280,7 @@ class HTTPTests(unittest.TestCase):
         for path in ("/.env", "/../guard.py", "/%2e%2e/guard.py", "/delete", "/state/torrent-guard.sqlite3"):
             self.assertEqual(self.request(path)[0], 404)
         for method in ("POST", "PUT", "DELETE", "PATCH"):
-            self.assertEqual(self.request("/api/status", method)[0], 501)
+            self.assertEqual(self.request("/api/status", method)[0], 404 if method == "POST" else 501)
 
     def test_invalid_settings_and_disabled_server(self):
         for raw in ("", "0.0.0.0/0", "::/0", "not-an-ip"):

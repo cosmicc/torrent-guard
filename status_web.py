@@ -1,8 +1,9 @@
-"""Restricted, read-only status HTTP server inside the existing Guard container.
+"""Restricted status HTTP server with archive-only bookkeeping requests.
 
 Nginx provides TLS and authentication. A source-address allowlist restricts the
 backend independently of forwarded headers. HTTP handlers only serve packaged
-assets and cached observations; they never initiate diagnostics or cleanup.
+assets, cached observations and current bookkeeping. The sole POST route queues
+archive requests; handlers never initiate diagnostics, cleanup or active-record edits.
 """
 from __future__ import annotations
 
@@ -13,6 +14,9 @@ import json
 import math
 import os
 from pathlib import Path
+import re
+import secrets
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -113,10 +117,12 @@ class StatusServer(ThreadingHTTPServer):
     request_queue_size = 16
     allow_reuse_address = True
 
-    def __init__(self, address: tuple, cache: StatusCache, allowed_clients: tuple):
+    def __init__(self, address: tuple, cache: StatusCache, allowed_clients: tuple, state_db: Path | None = None):
         self.cache = cache
         self.allowed_clients = allowed_clients
         self.slots = threading.BoundedSemaphore(8)
+        self.state_db = state_db
+        self.csrf_token = secrets.token_urlsafe(32)
         self.assets = {route: (ASSETS / filename).read_bytes() for route, filename in
                        (("/", "index.html"), ("/app.css", "app.css"), ("/app.js", "app.js"), ("/icon.svg", "icon.svg"))}
         super().__init__(address, StatusHandler)
@@ -144,7 +150,7 @@ class StatusServer(ThreadingHTTPServer):
 
 
 class StatusHandler(BaseHTTPRequestHandler):
-    """Serve an explicit route allowlist with no filesystem browsing or actions."""
+    """Serve fixed status routes and a protected, queue-only archival action."""
 
     server_version = "TorrentGuard"
     sys_version = ""
@@ -182,20 +188,99 @@ class StatusHandler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self) -> None:
-        """All browser requests are cache reads, never diagnostic triggers."""
+        """Read cached diagnostics/current bookkeeping, never trigger probes."""
         address = ipaddress.ip_address(self.client_address[0])
         if not any(address in network for network in self.server.allowed_clients):
             self.respond(403, "text/plain; charset=utf-8", b"Proxy address not allowed\n")
             return
         route = urlsplit(self.path).path
         if route == "/api/status":
-            body = json.dumps(self.server.cache.read(), allow_nan=False).encode("utf-8")
+            payload = self.server.cache.read()
+            payload["csrf_token"] = self.server.csrf_token
+            if self.server.state_db is not None:
+                from records import view
+                from status_report import journal_data, private_text
+                try:
+                    # Fast bookkeeping reads bypass the slower diagnostic cache.
+                    def clean(value):
+                        if isinstance(value, str):
+                            return private_text(value)
+                        if isinstance(value, dict):
+                            return {key: private_text(item) if key in {"name", "reason", "message"} and isinstance(item, str)
+                                    else clean(item) if isinstance(item, (dict, list)) else item for key, item in value.items()}
+                        if isinstance(value, list):
+                            return [clean(item) for item in value]
+                        return value
+                    actions = view(self.server.state_db)
+                    payload["record_actions"] = clean(actions)
+                    # An accepted archive should disappear immediately from
+                    # active-work counters, without waiting for API diagnostics.
+                    payload["journal"] = journal_data(self.server.state_db,
+                        {record["id"]: record["name"] for record in actions["records"]})
+                except (OSError, sqlite3.Error):
+                    payload["record_actions"] = {"available": False}
+                    payload["journal"] = {"available": False, "detail": "Current bookkeeping is unavailable"}
+            body = json.dumps(payload, allow_nan=False).encode("utf-8")
             self.respond(200, "application/json; charset=utf-8", body)
         elif route in self.server.assets:
             content_type = {"/": "text/html", "/app.js": "text/javascript", "/app.css": "text/css", "/icon.svg": "image/svg+xml"}[route]
             self.respond(200, content_type + "; charset=utf-8", self.server.assets[route])
         else:
             self.respond(404, "text/plain; charset=utf-8", b"Not found\n")
+
+    def do_POST(self) -> None:
+        """Queue archive-only work after source, origin, token and body checks."""
+        from records import enqueue
+
+        address = ipaddress.ip_address(self.client_address[0])
+        if not any(address in network for network in self.server.allowed_clients):
+            self.respond(403, "text/plain", b"Proxy address not allowed\n")
+            return
+        if self.path != "/api/forget":
+            self.respond(404, "text/plain", b"Not found\n")
+            return
+        try:
+            origin = urlsplit(self.headers.get("Origin", ""))
+        except ValueError:
+            self.respond(403, "text/plain", b"Origin invalid\n")
+            return
+        host = self.headers.get("Host", "")
+        token = self.headers.get("X-CSRF-Token", "")
+        if (origin.scheme not in {"http", "https"} or origin.netloc != host
+                or origin.path or origin.query or origin.fragment
+                or not token.isascii()
+                or not secrets.compare_digest(token, self.server.csrf_token)):
+            self.respond(403, "text/plain", b"Origin or action token invalid; refresh the page\n")
+            return
+        if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json" or self.headers.get("Transfer-Encoding"):
+            self.respond(415, "text/plain", b"A JSON request is required\n")
+            return
+        try:
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                raise ValueError("Invalid request size") from None
+            if not 0 < size <= 1024:
+                raise ValueError("Invalid request size")
+            payload = json.loads(self.rfile.read(size))
+            if (not isinstance(payload, dict) or set(payload) != {"record_id", "revision"}
+                    or not isinstance(payload["record_id"], str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", payload["record_id"])
+                    or not isinstance(payload["revision"], str) or not re.fullmatch(r"[0-9a-f]{64}", payload["revision"])):
+                raise ValueError("Invalid record identity")
+            if self.server.state_db is None:
+                self.respond(503, "text/plain", b"Bookkeeping queue unavailable\n")
+                return
+            request_id = enqueue(self.server.state_db, payload["record_id"], payload["revision"], time.time())
+        except (ValueError, UnicodeError) as exc:
+            from status_report import private_text
+            # Only locally authored validation messages; never echo the body.
+            message = str(exc) if not isinstance(exc, (json.JSONDecodeError, UnicodeError)) else "Invalid JSON"
+            self.respond(409, "text/plain; charset=utf-8", private_text(message).encode())
+            return
+        except (OSError, sqlite3.Error):
+            self.respond(503, "text/plain", b"Bookkeeping queue unavailable; try again after polling recovers\n")
+            return
+        self.respond(202, "application/json", json.dumps({"request_id": request_id, "message": "Queued; no files or torrents will be deleted"}).encode())
 
 
 def start_status_server() -> StatusServer | None:
@@ -204,7 +289,8 @@ def start_status_server() -> StatusServer | None:
     if not settings.enabled:
         return None
     cache = StatusCache()
-    server = StatusServer(("0.0.0.0", settings.port), cache, settings.allowed_clients)
+    server = StatusServer(("0.0.0.0", settings.port), cache, settings.allowed_clients,
+                          Path(os.getenv("STATE_DB", "/state/torrent-guard.sqlite3")))
     threading.Thread(target=server.serve_forever, name="status-http", daemon=True).start()
     threading.Thread(target=cache.run, name="status-collector", daemon=True).start()
     return server

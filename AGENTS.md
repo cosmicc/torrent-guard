@@ -8,7 +8,7 @@ Torrent Guard is a long-running Python 3.12 daemon deployed via Docker Compose o
 
 The highest priority is preventing deletion of useful, unimported media. API outages, ambiguous ownership, missing/moving files and incomplete import history must not be treated as proof of a bad torrent or a completed import. Missing metadata alone is inconclusive; v1.5 applies explicit observed timeouts only to torrents tagged movies or tv, as described below.
 
-A bounded read-only HTTP status server runs inside the Guard container behind an authenticated Nginx proxy; its backend is restricted by connecting IP/CIDR. There is no qBittorrent completion hook, Docker socket access or external database server. Standard Compose uses a read-only download mount. An explicit cleanup override can additionally mount only the completed-download directory writable. Library mounts must never be writable or targeted. The app polls qBittorrent and Arr APIs and records cleanup operations in a local SQLite journal.
+A bounded HTTP status server runs inside the Guard container behind an authenticated Nginx proxy; its backend is restricted by connecting IP/CIDR. Torrent/file access stays read-only; the explicit archive-only bookkeeping endpoint is described below. There is no qBittorrent completion hook, Docker socket access or external database server. Standard Compose uses a read-only download mount. An explicit cleanup override can additionally mount only the completed-download directory writable. Library mounts must never be writable or targeted. The app polls qBittorrent and Arr APIs and records cleanup operations in a local SQLite journal.
 
 ## Project structure
 
@@ -32,6 +32,7 @@ A bounded read-only HTTP status server runs inside the Guard container behind an
 - tests/test_v031.py — qBittorrent 5.2+ login compatibility.
 - deletion.py — saved file manifests, independent absence checks, and guarded completed-download quarantine/unlink operations.
 - tests/test_deletion.py — actual temporary-file and SQLite tests for verification, leftover removal, library protection and restart/race handling.
+- records.py, tests/test_records.py — absence-based retirement, preserved audit archives, durable archive-only requests; read [record retirement](docs/record-retirement.md) before changing these paths.
 - tests/test_nfs.py — stale-handle deferral, bounded backoff, persistent access holds and completion-independent retention.
 - Dockerfile — Alpine Python 3.12, ffmpeg/ffprobe, non-root UID/GID 1000:1000.
 - compose.yaml — container with read-only root, no Linux capabilities, no new privileges, temporary /tmp, persistent /state and read-only /downloads.
@@ -206,12 +207,19 @@ Key variables: QBIT_URL/USERNAME/PASSWORD, SONARR_URL/API_KEY/CATEGORY/TAG, RADA
 ### Monitoring contract
 
 The v1.7 web page replaces `--status`. Nginx supplies authentication and TLS;
-only explicit TCP peer IPs/CIDRs may access fixed GET/HEAD routes. Never trust
-forwarded headers for this allowlist. Browser requests read cached data and
-must not initiate probes, mutate journals or authorize cleanup. Diagnostics run
-in an isolated subprocess off the polling thread; only completed Guard polls
-advance liveness. Keep the deletion journal's dry-run guarantees and preserve
-v1.6 monitoring history. Read [status workflow](docs/status-web.md).
+only explicit TCP peer IPs/CIDRs may access the fixed routes. Never trust forwarded
+headers for this allowlist. GET/HEAD serve status; POST `/api/forget` only queues
+archive-only bookkeeping after same-origin, action-token and revision checks.
+The polling thread alone archives records after a fresh client-absence check.
+Automatic retirement additionally requires all saved file/quarantine names absent
+on unchanged readable roots. Neither path authorizes file deletion or reports
+CLEANED. Both operate in dry run; captured observations and audit archives persist.
+Read [record retirement](docs/record-retirement.md) and [status workflow](docs/status-web.md).
+
+Browser reads never initiate probes or cleanup. They read current bookkeeping
+alongside cached diagnostics. Diagnostics run in an isolated subprocess off the
+polling thread; only completed Guard polls advance liveness. Preserve v1.6
+monitoring history and all historical deletion audits.
 
 Additional cleanup controls are `CLEANUP_LEFTOVERS` (default false),
 `DELETE_SETTLE_SECONDS` (default 120, minimum 30), and the Compose-only
@@ -230,8 +238,9 @@ Verification still checks every saved path before marking the operation clean.
 Cleanup API/safety-check exceptions and repeated visible-client deletion attempts
 use additive `cleanup_retry` state: 60/120/240/480/900-second capped automatic
 backoff, restored after restart and cleared with successful deletion verification.
-Keep filesystem holds independent; neither deadline bypasses the other. Dry-run
-polling must not mutate cleanup retries. Cache failed ownership checks only within
+Keep filesystem holds independent; neither deadline bypasses the other. Ordinary
+dry-run polling must not advance cleanup retries; record archival may clear active
+rows after audit preservation. Cache failed ownership checks only within
 one poll; refresh successful ownership checks before each cleanup operation.
 Operator logs identify download names and actual API/saved paths, not infohashes.
 Use saved manifests and journal names after the client forgets a torrent; never
@@ -269,7 +278,7 @@ per-torrent failures may coexist with healthy polling; health is not dependency
 readiness or proof of deletion. Unhealthy status alone does not trigger a Docker
 restart. See INSTALL.md for monitoring commands and operational limits.
 
-DRY_RUN=true means no stop, Arr blocklist, delete or journal mutation; use it during initial validation. Changing environment values requires container recreation, not merely restart:
+DRY_RUN=true means no stop, Arr blocklist or payload deletion. Verified record retirement, explicit archive-only requests, path observations and their audit bookkeeping may persist during dry run; ordinary cleanup scheduling/phase advancement and retry updates remain disabled. Changing environment values requires container recreation, not merely restart:
 
     docker compose up -d --force-recreate
 
@@ -290,7 +299,7 @@ Treat docker compose config output as possibly containing secrets; sanitize befo
 - Preserve dry-run guarantees, cross-Arr category/tag isolation, defer-vs-reject distinction and explicit deletion with data through the qBittorrent API.
 - Test fail-closed behavior on unreachable Arr APIs, incomplete/late move, malformed paths, unknown file types, repeated HTTP errors, journal restarts, and multi-episode partial imports. Assert the ORDER and ABSENCE of destructive calls as well as expected calls.
 - Run: python3 -m unittest discover -s tests -v
-- Run: python3 -m py_compile guard.py deletion.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
+- Run: python3 -m py_compile guard.py deletion.py records.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
 - Run: python3 scripts/release_notes.py (validates version consistency and changelog structure without publishing).
 - Run: docker compose config using safe dummy .env values when appropriate; NEVER commit secrets.
 - Update README, INSTALL.md and .env.example as appropriate when operator-facing flags or behavior change. Document state migrations and safety impact.
@@ -308,7 +317,7 @@ cleanup. Persist unresolved holds in filesystem_retry and invalidate cached
 completed-media acceptance. Retry at 30/60/120/240/300 seconds without sleeping
 inside the poll loop; restart or completion-state changes must not bypass a hold.
 Clear it only after actual filesystem checks recover. Dry-run stores new retry
-state only in memory and must not mutate existing retry rows during polling.
+state only in memory for ordinary retry updates; verified or explicit record archival may clear active rows after audit preservation.
 Use DEFER validation for ESTALE and other unresolved resolution/stat/open/read
 failures. ffprobe I/O failures and malformed output are inconclusive; a failed
 probe permits rejection only when access remains readable and the result does

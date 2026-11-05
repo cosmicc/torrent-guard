@@ -42,13 +42,21 @@ rechecks actual access when the deadline arrives; complete torrents also rerun
 media inspection. Only successful recovery checks clear the hold. An absent
 torrent's saved-path deletion verification must establish recovery instead.
 
+The separate [record-retirement workflow](record-retirement.md) now archives
+missing-client records after independently verifying all saved names absent.
+It can also accept an explicit archive-only **Forget record** action when legacy
+evidence is unverifiable. These outcomes retire bookkeeping rather than assert
+filesystem recovery, successful import, or deletion. Existing files remain intact.
+
 The backoff also applies to other inconclusive validation deferrals, such as
 unavailable media, to avoid busy retry loops. No environment settings change.
 Keep the existing state database; do not delete retry rows to force cleanup.
 
-Dry-run keeps newly observed retry state in memory and does not change persisted
-retry rows while polling. Additive schema initialization still occurs during
-startup, consistent with the existing journal initialization workflow.
+Ordinary dry-run retries remain memory-only. Captured path observations and
+audit bookkeeping may persist; verified retirement or explicit archive-only
+requests may clear active retry rows after preserving them in the archive.
+They do not stop torrents, blocklist or delete payloads. Additive schema
+initialization remains part of application startup.
 
 ## Operator checks
 
