@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v1.9** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v2.0** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -79,6 +79,8 @@ connections, polling health, drive access, recent downloads, pending deletions,
 retry holds, 6/12/24-hour event statistics, warnings and errors. No separate web
 container is needed. Your Nginx server supplies TLS/authentication; only configured
 proxy IPs may reach the backend. See [web status setup](INSTALL.md#web-status-page).
+Recent downloads show up to 100 recorded decisions, ten per page, with First,
+Backward, Forward and Last controls. Warnings/errors show only the last 24 hours.
 The v1.6 `--status` CLI is replaced by this page; existing history is preserved.
 
 Stale records retire automatically once the torrent and every saved file path
@@ -145,3 +147,8 @@ server before enabling deletion. Release preparation validates matching versions
 in `VERSION`, `guard.py`, `compose.yaml`, and `CHANGELOG.md`. New versions use
 two parts (`0.4`, `0.5`, etc.); historical release numbers are preserved. Publishing a version
 change on `main` triggers the GitHub release workflow.
+
+For archive requests rejected with an origin error, preserve the browser's Host
+at Nginx or configure `STATUS_PUBLIC_ORIGIN` in v2.0 or later. See [archive troubleshooting](INSTALL.md#archive-origin-and-cleanup-permissions).
+Drive capability checks exercise the four cleanup folders using
+unique probe files; writable aliases require `compose.orphans.yaml`.

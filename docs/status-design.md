@@ -35,3 +35,9 @@ Desktop/mobile have no page overflow. There were no application console errors
 or CSP violations; an intentional aborted-request test produced only the
 expected browser network error. UI data came exclusively from disposable
 fixtures. Temporary screenshots/browser fixtures are not release assets.
+
+The v2.0 update keeps this palette and layout while adding a wrapping ten-row
+pagination bar for up to 100 recent decisions. First/Backward/Forward/Last have
+keyboard focus and disabled boundary states. Warning/error display now covers
+the last 24 hours. Desktop/mobile validation includes page navigation, refresh
+preservation, clamping after shorter snapshots and empty/unavailable history.

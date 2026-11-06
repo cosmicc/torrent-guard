@@ -21,7 +21,7 @@ setup is in [INSTALL.md](../INSTALL.md#web-status-page).
 - Only qBittorrent authentication uses POST. Other checks use GET; never invoke
   stop, blocklist, deletion, ffprobe or full Arr history scans from monitoring.
 - Keep history at `<STATE_DB>.status.sqlite3`. The additive `activity` table
-  retains fifty emitted decisions, not a synthetic torrent processing ledger.
+  retains up to 100 emitted decisions, not a synthetic torrent processing ledger.
   Preserve v1.6 tables/events and handle an older history lacking this table.
   Retain seven days of metric events and twenty issues per severity. Counts are
   exact rolling emitted-event totals, overlap and include dry-run candidates;
@@ -34,9 +34,11 @@ setup is in [INSTALL.md](../INSTALL.md#web-status-page).
 
 - Map locations relative to the trusted qBittorrent root. Open every filesystem
   component without symlink following. Read checks only list/check space.
-- Never write-test downloads/incomplete or libraries. State is writable by
-  design. Test the completed cleanup alias only when enabled and device/inode
-  matched against the mapped read-only completed root.
+- Never write-test the parent download mapping or libraries. State is writable
+  by design. Test all four complete/incomplete TV/movie writable cleanup aliases
+  after device/inode matching to their mapped read-only folders; missing mounts
+  and write/delete failures must be visible. Keep the legacy completed alias
+  check when that fallback is enabled.
 - Use random exclusive mode-0600 test files, descriptor-relative write/fsync/
   readback/remove and identity checks before removal. Never unlink replacements.
   As with cleanup, same-UID/root processes must not race directory/probe changes.
@@ -46,7 +48,8 @@ setup is in [INSTALL.md](../INSTALL.md#web-status-page).
 
 - Serve only packaged `/`, `/app.css`, `/app.js`, `/icon.svg` and `/api/status`
   through GET/HEAD routes. POST `/api/forget` queues archive-only bookkeeping;
-  it must validate the actual peer, exact Origin/Host, per-process action token,
+  it must validate the actual peer, the exact configured STATUS_PUBLIC_ORIGIN
+  (or Origin/Host when unset), per-process action token,
   JSON content type, 1-KiB body limit and record revision. No CORS grants,
   destructive actions, arbitrary files, URL credentials or third-party assets.
 - Nginx owns authentication/TLS for the entire hostname. The app checks actual
@@ -118,3 +121,37 @@ and dangerous/no-media cleanup too. Positive totals only protect incomplete
 shorter timeouts. Explain that save protection ends when the tag/client is removed,
 so it does not create a permanent orphan ignore. Keep these facts from the pure
 runtime reference, using the existing palette and wrapping on desktop/mobile.
+
+## Archive origin and hold diagnostics
+
+`STATUS_PUBLIC_ORIGIN` is an optional exact scheme/host/port origin, validated at
+startup; it permits TLS/Host-rewriting proxies without trusting forwarded headers
+or disabling source-IP/token validation. Reject credentials, paths, wildcards,
+queries/fragments and invalid ports. Normalize hostname case/default ports using
+browser origin semantics. Split origin/configuration errors from expired-token
+errors; a known 4xx rejection was never queued and must not imply uncertain success.
+
+`record_checks` provides current retirement details alongside the original reason.
+Redact human detail values, preserve opaque record/revision tokens and read only
+current bookkeeping on HTTP requests. Probes stay in the isolated background
+collector. Report four-folder capability failures with recreation/UID/mount
+troubleshooting; no request, modal or refresh may initiate a permission probe.
+Confirm the exact probe name is absent after unlink and never unlink a replacement.
+
+## Paginated monitoring (v2.0)
+
+Retain and return at most 100 recent decisions; render ten per page with First,
+Backward, Forward and Last controls. Navigation is browser-only over cached
+history, makes no API calls, and preserves the page number through refresh.
+Clamp the page when history shrinks; empty/unavailable/single-page states disable
+unavailable controls. Use semantic navigation, accessible names/status, keyboard
+focus and the approved responsive spacing/palette. No schema reset or historical
+backfill is required; previously pruned rows cannot be recovered.
+
+Query warning/error issues only within the inclusive last-24-hour window and
+exclude future timestamps. Preserve the per-severity visibility cap and the
+independent rolling metrics/audit retention. Refilter cached issue timestamps in
+the browser so an aging/stale snapshot cannot display out-of-window records.
+Test exact time boundaries, future rows, retention/restart ordering, all four
+controls, page preservation/clamping, zero/one/partial/ten-page history, safe text
+rendering, desktop/mobile overflow and console/CSP health.

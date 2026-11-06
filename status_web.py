@@ -28,6 +28,28 @@ REFRESH_SECONDS = 60
 STALE_SECONDS = 180
 
 
+def canonical_origin(value: str, *, allow_root_path: bool = False) -> str:
+    """Validate one exact browser origin without trusting forwarded headers."""
+    if not value or value != value.strip() or any(char.isspace() for char in value):
+        raise ValueError("An exact http/https origin is required")
+    parsed = urlsplit(value)
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None
+            or parsed.query or parsed.fragment or "?" in value or "#" in value
+            or parsed.path not in ({"", "/"} if allow_root_path else {""})):
+        raise ValueError("An origin must contain only scheme, hostname and optional port")
+    host = parsed.hostname.encode("idna").decode("ascii").lower()
+    if ":" in host:
+        host = "[" + str(ipaddress.IPv6Address(host)) + "]"
+    elif not re.fullmatch(r"[a-z0-9.-]+", host):
+        raise ValueError("Invalid origin hostname")
+    port = parsed.port
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("Invalid origin port")
+    suffix = f":{port}" if port is not None and port != {"http": 80, "https": 443}[parsed.scheme] else ""
+    return f"{parsed.scheme}://{host}{suffix}"
+
+
 @dataclass(frozen=True)
 class WebSettings:
     """Validate the backend listener and trusted proxy networks at startup."""
@@ -35,6 +57,7 @@ class WebSettings:
     enabled: bool
     port: int
     allowed_clients: tuple
+    public_origin: str | None = None
 
     @classmethod
     def from_env(cls) -> "WebSettings":
@@ -48,7 +71,12 @@ class WebSettings:
                          for value in os.getenv("STATUS_ALLOWED_CLIENTS", "127.0.0.1/32,::1/128").split(",") if value.strip())
         if not networks or len(networks) > 16 or any(network.prefixlen == 0 for network in networks):
             raise ValueError("STATUS_ALLOWED_CLIENTS requires 1–16 specific proxy IPs/CIDRs; unrestricted networks are forbidden")
-        return cls(boolean("STATUS_ENABLED", True), port, networks)
+        public = os.getenv("STATUS_PUBLIC_ORIGIN", "").strip()
+        try:
+            public_origin = canonical_origin(public, allow_root_path=True) if public else None
+        except (ValueError, UnicodeError):
+            raise ValueError("STATUS_PUBLIC_ORIGIN must be an exact http/https origin without credentials, query or path") from None
+        return cls(boolean("STATUS_ENABLED", True), port, networks, public_origin)
 
 
 def polling_status() -> dict:
@@ -117,12 +145,14 @@ class StatusServer(ThreadingHTTPServer):
     request_queue_size = 16
     allow_reuse_address = True
 
-    def __init__(self, address: tuple, cache: StatusCache, allowed_clients: tuple, state_db: Path | None = None):
+    def __init__(self, address: tuple, cache: StatusCache, allowed_clients: tuple, state_db: Path | None = None,
+                 public_origin: str | None = None):
         self.cache = cache
         self.allowed_clients = allowed_clients
         self.slots = threading.BoundedSemaphore(8)
         self.state_db = state_db
         self.csrf_token = secrets.token_urlsafe(32)
+        self.public_origin = canonical_origin(public_origin, allow_root_path=True) if public_origin else None
         self.assets = {route: (ASSETS / filename).read_bytes() for route, filename in
                        (("/", "index.html"), ("/app.css", "app.css"), ("/app.js", "app.js"), ("/icon.svg", "icon.svg"))}
         super().__init__(address, StatusHandler)
@@ -208,7 +238,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                         if isinstance(value, str):
                             return private_text(value)
                         if isinstance(value, dict):
-                            return {key: private_text(item) if key in {"name", "reason", "message"} and isinstance(item, str)
+                            return {key: private_text(item) if key in {"name", "reason", "message", "detail"} and isinstance(item, str)
                                     else clean(item) if isinstance(item, (dict, list)) else item for key, item in value.items()}
                         if isinstance(value, list):
                             return [clean(item) for item in value]
@@ -242,17 +272,20 @@ class StatusHandler(BaseHTTPRequestHandler):
             self.respond(404, "text/plain", b"Not found\n")
             return
         try:
-            origin = urlsplit(self.headers.get("Origin", ""))
-        except ValueError:
-            self.respond(403, "text/plain", b"Origin invalid\n")
+            origin = canonical_origin(self.headers.get("Origin", ""))
+            expected = self.server.public_origin
+            if expected is None:
+                scheme = urlsplit(origin).scheme
+                expected = canonical_origin(f"{scheme}://{self.headers.get('Host', '')}")
+            origin_allowed = secrets.compare_digest(origin, expected)
+        except (ValueError, UnicodeError):
+            origin_allowed = False
+        if not origin_allowed:
+            self.respond(403, "text/plain", b"Archive origin mismatch. Preserve the original Host at Nginx or set STATUS_PUBLIC_ORIGIN to this page's origin and recreate the container. Forwarded headers are not trusted.\n")
             return
-        host = self.headers.get("Host", "")
         token = self.headers.get("X-CSRF-Token", "")
-        if (origin.scheme not in {"http", "https"} or origin.netloc != host
-                or origin.path or origin.query or origin.fragment
-                or not token.isascii()
-                or not secrets.compare_digest(token, self.server.csrf_token)):
-            self.respond(403, "text/plain", b"Origin or action token invalid; refresh the page\n")
+        if not token.isascii() or not secrets.compare_digest(token, self.server.csrf_token):
+            self.respond(403, "text/plain", b"Archive action token expired or invalid; refresh the page and try again.\n")
             return
         if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json" or self.headers.get("Transfer-Encoding"):
             self.respond(415, "text/plain", b"A JSON request is required\n")
@@ -292,7 +325,8 @@ def start_status_server() -> StatusServer | None:
         return None
     cache = StatusCache()
     server = StatusServer(("0.0.0.0", settings.port), cache, settings.allowed_clients,
-                          Path(os.getenv("STATE_DB", "/state/torrent-guard.sqlite3")))
+                          Path(os.getenv("STATE_DB", "/state/torrent-guard.sqlite3")),
+                          public_origin=settings.public_origin)
     threading.Thread(target=server.serve_forever, name="status-http", daemon=True).start()
     threading.Thread(target=cache.run, name="status-collector", daemon=True).start()
     return server

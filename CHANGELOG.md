@@ -3,6 +3,36 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 2.0 - 11.05.2026
+
+### Added
+
+- Recent downloads pagination with First, Backward, Forward and Last controls;
+  show ten decisions per page from up to 100 retained entries.
+- Explicit `STATUS_PUBLIC_ORIGIN` for authenticated TLS/Host-rewriting proxies,
+  preserving source-IP and action-token checks with actionable error messages.
+- Persistent per-record retirement-check explanations and full scoped
+  read/write/fsync/readback/delete probes for all four cleanup directories.
+
+### Changed
+
+- Limit displayed warnings/errors to the last 24 hours, excluding future-dated
+  events. Preserve the independent rolling statistics and existing audit history.
+- Verify probe deletion independently, retain replacements, and show missing
+  writable aliases or permission failures with Compose recreation guidance.
+- Finish confirmed-absent, already-requested deletions without waiting old
+  retry backoff, preserving deletion audits without permitting local cleanup.
+
+### Fixed
+
+- Prevent an archived record from being recreated by the same poll's stale
+  qBittorrent inventory. Preserve future processing of real reappearances.
+- Separate archive origin failures from token expiry; rejected requests no
+  longer suggest they may have been queued. Normalize valid origin host case
+  and default ports without trusting forwarded headers or allowing CORS.
+- Explain why filesystem holds cannot retire instead of silently hiding missing
+  evidence, remaining paths, inaccessible mounts or changed mappings.
+
 ## 1.9 - 11.05.2026
 
 ### Added

@@ -21,6 +21,8 @@ import uuid
 from scripts.watch_logs import safe_text
 
 RETENTION = 7 * 86400
+ACTIVITY_LIMIT = 100
+ISSUE_WINDOW_SECONDS = 24 * 3600
 
 class DiagnosticError(Exception):
     """An intentionally public diagnostic without remote response content."""
@@ -114,7 +116,7 @@ class StatusHistory(logging.Handler):
                 if decision:
                     self.database.execute("INSERT INTO activity VALUES (?, ?, ?)",
                                           (record.created, decision, private_text(message)[:2000]))
-                    self.database.execute("DELETE FROM activity WHERE rowid NOT IN (SELECT rowid FROM activity ORDER BY rowid DESC LIMIT 50)")
+                    self.database.execute("DELETE FROM activity WHERE rowid NOT IN (SELECT rowid FROM activity ORDER BY rowid DESC LIMIT ?)", (ACTIVITY_LIMIT,))
                 self.database.executemany("INSERT INTO events VALUES (?, ?)",
                                           [(record.created, metric) for metric in metrics])
                 if record.levelno >= logging.WARNING:
@@ -187,7 +189,7 @@ def probe_drive(path: Path, write: bool = False, match: Path | None = None) -> d
             with directory_fd(match) as expected:
                 actual_info, expected_info = os.fstat(directory), os.fstat(expected)
                 if (actual_info.st_dev, actual_info.st_ino) != (expected_info.st_dev, expected_info.st_ino):
-                    raise DiagnosticError("cleanup alias does not match completed download directory")
+                    raise DiagnosticError("cleanup alias does not match its download directory")
         with os.scandir(directory) as entries:
             next(entries, None)
         usage = os.fstatvfs(directory)
@@ -210,10 +212,17 @@ def probe_drive(path: Path, write: bool = False, match: Path | None = None) -> d
                     if (saved.st_dev, saved.st_ino) != (current.st_dev, current.st_ino):
                         raise DiagnosticError("write probe was replaced; retained for review")
                     os.unlink(name, dir_fd=directory)
+                    try:
+                        os.stat(name, dir_fd=directory, follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise DiagnosticError("probe path reappeared after deletion; replacement retained")
                 finally:
                     os.close(descriptor)
             writable = "create/write/fsync/read/remove OK"
-        return {"readable": True, "write_tested": write, "free_bytes": free,
+        return {"readable": True, "write_tested": write, "delete_tested": write,
+                "delete_confirmed": write, "free_bytes": free,
                 "total_bytes": total, "detail": "Read/list OK; write: " + writable}
 
 
@@ -249,12 +258,13 @@ def history_data(path: Path, now: float) -> dict:
         for condition in ("level='WARNING'", "level IN ('ERROR','CRITICAL')"):
             issues.extend({"at": at, "level": level, "message": private_text(message)}
                           for at, level, message in database.execute(
-                              f"SELECT at, level, message FROM issues WHERE {condition} ORDER BY rowid DESC LIMIT 4"))
+                              f"SELECT at, level, message FROM issues WHERE {condition} AND at >= ? AND at <= ? ORDER BY rowid DESC LIMIT 4",
+                              (now - ISSUE_WINDOW_SECONDS, now)))
         issues.sort(key=lambda item: item["at"], reverse=True)
         activity = []
         # v1.6 history remains readable before the daemon's additive migration.
         if database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='activity'").fetchone():
-            for at, decision, message in database.execute("SELECT at, decision, message FROM activity ORDER BY rowid DESC LIMIT 30"):
+            for at, decision, message in database.execute("SELECT at, decision, message FROM activity ORDER BY rowid DESC LIMIT ?", (ACTIVITY_LIMIT,)):
                 name = NAME.search(message)
                 activity.append({"at": at, "decision": decision, "name": private_text(name['value'][1:-1] if name else message[:120]),
                                  "detail": private_text(message)})
@@ -324,16 +334,28 @@ def collect_status() -> dict:
     root = Path(config.guard_download_root)
     completed = root / PurePosixPath(config.qbit_complete_dir).relative_to(config.qbit_download_root)
     incomplete = root / PurePosixPath(config.qbit_incomplete_dir).relative_to(config.qbit_download_root)
-    drives = [("Downloads", root, False, None), ("Completed", completed, False, None),
-              ("Incomplete", incomplete, False, None), ("State", Path(config.state_db).absolute().parent, True, None)]
+    drives = [("Downloads mapping / free space", root, False, None),
+              ("State", Path(config.state_db).absolute().parent, True, None)]
     if config.cleanup_leftovers:
-        drives.append(("Completed cleanup", Path(config.cleanup_write_root), True, completed))
+        drives.append(("Completed legacy cleanup", Path(config.cleanup_write_root), True, completed))
+    # Probe the exact four writable aliases used by orphan removal. Keeping the
+    # parent mapping read-only does not prevent these scoped write/delete tests.
+    # A missing override is a visible failed capability check, never a fake pass.
+    orphan_aliases = set()
+    for kind, mapped in (("complete", completed), ("incomplete", incomplete)):
+        for media in ("tv", "movies"):
+            alias = Path(config.orphan_write_root) / kind / media
+            orphan_aliases.add(alias)
+            drives.append((f"{kind.title()} {media.upper()} cleanup", alias, True, mapped / media))
     for name, path, write, match in drives:
-        drive = {"name": name, "path": private_text(str(path)), "ok": False}
+        drive = {"name": name, "path": private_text(str(path)), "ok": False,
+                 "required_capability": "read/write/delete" if write else "read/list/space"}
         try:
             drive.update(check_drive(path, write, match), ok=True)
         except Exception as exc:
             drive["detail"] = public_error(exc)
+            if path in orphan_aliases:
+                drive["detail"] += "; four-folder write/delete check failed. Ensure compose.orphans.yaml is included, recreate the container and check mount/UID permissions."
         result["drives"].append(drive)
     try:
         result["history"] = history_data(history_path(config.state_db), time.time())

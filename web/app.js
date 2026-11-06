@@ -43,6 +43,9 @@ let lastFetch = 0;
 let connectionError = false;
 let selectedRecord = null;
 let activeRequestId = null;
+let activityPage = 0;
+const ACTIVITY_PAGE_SIZE = 10;
+const ACTIVITY_LIMIT = 100;
 let actionRefreshTimer = null;
 
 function renderRecovery(actions) {
@@ -88,6 +91,11 @@ function renderRecovery(actions) {
     });
     head.append(node("strong", record.name), button);
     row.append(head, node("p", record.reason, "note"));
+    if (record.retirement_check) {
+      const check = node("p", undefined, "note");
+      check.append(document.createTextNode(`Last retirement check: ${record.retirement_check.detail} · `), stamp(record.retirement_check.at));
+      row.append(check);
+    }
     $("record-actions").append(row);
   }
   if (actions?.available && !records.length)
@@ -130,7 +138,11 @@ async function forgetRecord() {
       body: JSON.stringify({ record_id: record.id, revision: record.revision }),
       signal: AbortSignal.timeout(8000),
     });
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) {
+      const rejection = new Error((await response.text()).trim());
+      rejection.status = response.status;
+      throw rejection;
+    }
     const result = await response.json();
     activeRequestId = result.request_id;
     $("action-notice").textContent =
@@ -143,7 +155,9 @@ async function forgetRecord() {
     await refresh();
   } catch (error) {
     $("action-notice").textContent =
-      `Archive request not confirmed: ${error.message}. Refresh before trying again; a timed-out request may already be queued.`;
+      error.status >= 400 && error.status < 500
+        ? `Archive request rejected: ${error.message}`
+        : `Archive request not confirmed: ${error.message}. Refresh before trying again; a timed-out request may already be queued.`;
     $("forget-dialog").close();
     $("action-notice").className = "note warn";
     $("action-notice").scrollIntoView({ block: "nearest" });
@@ -223,6 +237,41 @@ function renderRemovalRules(reference) {
   );
   if (!reference)
     $("removal-rule-notes").append(node("li", "Removal rules will appear after the next successful status response."));
+}
+
+function renderRecentDownloads(history) {
+  // Navigation only slices the bounded cached history. It never polls services.
+  const items = (history?.activity || []).slice(0, ACTIVITY_LIMIT);
+  const pageCount = Math.max(1, Math.ceil(items.length / ACTIVITY_PAGE_SIZE));
+  activityPage = Math.max(0, Math.min(activityPage, pageCount - 1));
+  $("activity").replaceChildren();
+  for (const item of items.slice(activityPage * ACTIVITY_PAGE_SIZE, (activityPage + 1) * ACTIVITY_PAGE_SIZE)) {
+    const row = node("tr");
+    const name = node("td");
+    const details = node("details");
+    details.append(node("summary", item.name), node("p", item.detail));
+    name.append(details);
+    const decision = node("td");
+    decision.append(stateText(item.decision, decisionColor(item.decision)));
+    const at = node("td");
+    at.append(stamp(item.at));
+    row.append(name, decision, at);
+    $("activity").append(row);
+  }
+  if (!$("activity").children.length) {
+    const row = node("tr");
+    const cell = node("td", history?.available ? "No download decisions recorded yet." : "Recent download history is unavailable.", "empty");
+    cell.colSpan = 3;
+    row.append(cell);
+    $("activity").append(row);
+  }
+  $("activity-first").disabled = $("activity-backward").disabled = activityPage === 0;
+  $("activity-forward").disabled = $("activity-last").disabled = activityPage === pageCount - 1;
+  const first = items.length ? activityPage * ACTIVITY_PAGE_SIZE + 1 : 0;
+  const last = Math.min((activityPage + 1) * ACTIVITY_PAGE_SIZE, items.length);
+  $("activity-page").textContent = history?.available
+    ? `Page ${activityPage + 1} of ${pageCount} · ${first}–${last} of ${items.length} entries`
+    : "Recent history unavailable";
 }
 
 function render(data) {
@@ -312,27 +361,7 @@ function render(data) {
     }),
   );
   renderMetrics(data.history);
-  $("activity").replaceChildren();
-  for (const item of (data.history?.activity || []).slice(0, 8)) {
-    const row = node("tr");
-    const name = node("td");
-    const details = node("details");
-    details.append(node("summary", item.name), node("p", item.detail));
-    name.append(details);
-    const decision = node("td");
-    decision.append(stateText(item.decision, decisionColor(item.decision)));
-    const at = node("td");
-    at.append(stamp(item.at));
-    row.append(name, decision, at);
-    $("activity").append(row);
-  }
-  if (!$("activity").children.length) {
-    const row = node("tr");
-    const cell = node("td", "No download decisions recorded yet.", "empty");
-    cell.colSpan = 3;
-    row.append(cell);
-    $("activity").append(row);
-  }
+  renderRecentDownloads(data.history);
   const snapshot = data.history?.snapshot;
   const persisted = data.journal?.available ? data.journal.counts : {};
   const observed = snapshot?.counts || {};
@@ -370,7 +399,11 @@ function render(data) {
         .join(" · ") || "none")
     : "";
   $("issues").replaceChildren();
-  for (const issue of (data.history?.issues || []).slice(0, 8)) {
+  const issueNow = Date.now() / 1000;
+  const recentIssues = (data.history?.issues || []).filter(
+    (issue) => Number.isFinite(issue.at) && issue.at >= issueNow - 24 * 3600 && issue.at <= issueNow,
+  );
+  for (const issue of recentIssues.slice(0, 8)) {
     const event = node("article", undefined, "event");
     const head = node("div", undefined, "event-head");
     const color = issue.level === "WARNING" ? "warn" : "bad";
@@ -382,7 +415,7 @@ function render(data) {
     empty(
       $("issues"),
       data.history?.available
-        ? "No warnings or errors retained."
+        ? "No warnings or errors recorded in the last 24 hours."
         : "Warning and error history is not available yet.",
     );
   $("drives").replaceChildren();
@@ -506,6 +539,17 @@ document.querySelectorAll("[data-hours]").forEach((button) =>
     renderMetrics(current?.history);
   }),
 );
+for (const [id, destination] of [
+  ["activity-first", () => 0],
+  ["activity-backward", () => activityPage - 1],
+  ["activity-forward", () => activityPage + 1],
+  ["activity-last", () => Math.max(0, Math.ceil(Math.min(current?.history?.activity?.length || 0, ACTIVITY_LIMIT) / ACTIVITY_PAGE_SIZE) - 1)],
+]) {
+  $(id).addEventListener("click", () => {
+    activityPage = destination();
+    renderRecentDownloads(current?.history);
+  });
+}
 $("refresh").addEventListener("click", refresh);
 $("forget-cancel").addEventListener("click", () => $("forget-dialog").close());
 $("forget-confirm").addEventListener("click", forgetRecord);

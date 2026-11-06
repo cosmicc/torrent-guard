@@ -88,6 +88,42 @@ class HistoryTests(unittest.TestCase):
             self.assertIn("episode.mkv", data["activity"][0]["detail"])
             self.assertEqual(data["windows"]["6"]["cleaned"], 0)
 
+    def test_recent_decisions_keep_latest_hundred_across_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            handler = StatusHistory(path)
+            now = time.time()
+            for index in range(105):
+                handler.handle(logging.makeLogRecord({"msg": f"ACCEPT completed name='Movie {index}'", "levelno": logging.INFO, "created": now}))
+            handler.close()
+            data = history_data(path, now)
+            self.assertEqual(len(data["activity"]), 100)
+            self.assertEqual(data["activity"][0]["name"], "Movie 104")
+            self.assertEqual(data["activity"][-1]["name"], "Movie 5")
+            reopened = StatusHistory(path)
+            reopened.handle(logging.makeLogRecord({"msg": "ACCEPT completed name='Movie 105'", "levelno": logging.INFO, "created": now}))
+            reopened.close()
+            data = history_data(path, now)
+            self.assertEqual(len(data["activity"]), 100)
+            self.assertEqual(data["activity"][0]["name"], "Movie 105")
+            self.assertEqual(data["activity"][-1]["name"], "Movie 6")
+
+    def test_issue_window_includes_exact_day_boundary_and_excludes_old_and_future(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            handler = StatusHistory(path)
+            now = time.time()
+            messages = [(now - 86400 - .01, "old warning", logging.WARNING),
+                        (now - 86400, "boundary warning", logging.WARNING),
+                        (now, "current error", logging.ERROR),
+                        (now + 1, "future critical", logging.CRITICAL)]
+            for at, message, level in messages:
+                handler.handle(logging.makeLogRecord({"msg": message, "levelno": level, "created": at}))
+            handler.close()
+            data = history_data(path, now)
+            self.assertEqual([row["message"] for row in data["issues"]], ["current error", "boundary warning"])
+            self.assertEqual(history_data(path, now + 86402)["issues"], [])
+
     def test_old_history_upgrade_preserves_existing_events(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.sqlite3"
@@ -143,10 +179,28 @@ class DriveTests(unittest.TestCase):
             self.assertFalse(probe_drive(path)["write_tested"])
             data = probe_drive(path, True, path)
             self.assertTrue(data["write_tested"])
+            self.assertTrue(data["delete_tested"])
+            self.assertTrue(data["delete_confirmed"])
             self.assertGreater(data["total_bytes"], 0)
             self.assertEqual(list(path.iterdir()), [payload])
             self.assertEqual(payload.read_bytes(), b"media")
             self.assertTrue(check_drive(path)["readable"])
+
+    def test_all_four_cleanup_scopes_have_real_read_write_delete_probes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for kind in ("complete", "incomplete"):
+                for media in ("tv", "movies"):
+                    path = root / kind / media
+                    path.mkdir(parents=True)
+                    payload = path / "media.mkv"
+                    payload.write_bytes(b"preserved media")
+                    result = probe_drive(path, True, path)
+                    self.assertTrue(result["readable"])
+                    self.assertTrue(result["write_tested"])
+                    self.assertTrue(result["delete_confirmed"])
+                    self.assertEqual(list(path.iterdir()), [payload])
+                    self.assertEqual(payload.read_bytes(), b"preserved media")
 
     def test_mismatched_alias_and_symlinks_never_write(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -171,6 +225,17 @@ class DriveTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     probe_drive(root, write=True)
             self.assertEqual(list(root.iterdir()), [payload])
+
+    def test_delete_failure_is_reported_and_media_is_never_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = root / "video.mkv"
+            payload.write_bytes(b"video")
+            with patch("status_report.os.unlink", side_effect=PermissionError("delete denied")):
+                with self.assertRaises(PermissionError):
+                    probe_drive(root, write=True, match=root)
+            self.assertEqual(payload.read_bytes(), b"video")
+            self.assertEqual(len(list(root.glob(".torrent-guard-status-*"))), 1)
 
     def test_replaced_probe_file_is_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -213,7 +278,7 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(data["journal"]["holds"][0]["name"], "Movie")
             self.assertNotIn("secret-token", json.dumps(data))
             self.assertEqual(journal.read_bytes(), before)
-            self.assertEqual([call.args[1] for call in drives.call_args_list], [False, False, False, True])
+            self.assertEqual([call.args[1] for call in drives.call_args_list], [False, True, True, True, True, True])
             client.stop.assert_not_called()
             client.delete_with_data.assert_not_called()
             http.return_value.request.assert_called_once_with("GET", "http://arr/api/v3/system/status", headers={"X-Api-Key": "token"})
@@ -304,6 +369,16 @@ class HTTPTests(unittest.TestCase):
             self.assertIn("30 days", rows[7]["action"])
             self.assertIn("observed zero active", rows[7]["action"])
             collect.assert_not_called()
+
+    def test_public_origin_configuration_is_exact_and_rejects_unsafe_urls(self):
+        from status_web import canonical_origin
+        self.assertEqual(canonical_origin("https://GUARD.example:443"), "https://guard.example")
+        for value in ("https://guard.example/path", "https://user:pass@guard.example", "null",
+                      "https://*.example", "https://guard.example?token=secret", "https://guard.example:0"):
+            with self.subTest(value=value):
+                with patch.dict(os.environ, {"STATUS_PUBLIC_ORIGIN": value}):
+                    with self.assertRaises(ValueError):
+                        WebSettings.from_env()
 
     def test_forwarded_headers_cannot_bypass_source_allowlist(self):
         self.server.allowed_clients = (ipaddress.ip_network("192.0.2.1/32"),)

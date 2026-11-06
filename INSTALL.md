@@ -442,8 +442,9 @@ warnings. `CLEANED` includes zero-payload client removals and is not reclaimed
 disk space. History starts with v1.6 (or first startup if newer); short windows
 are marked partial, old logs are not backfilled, and downtime is not observed.
 The separate history retains seven days of event counts, twenty issues per
-severity and fifty recent decisions across log rotation/restarts. Recent decisions begin with v1.7. Up to eight recent decisions, four warnings,
-four errors and fifty pending records are displayed, with up to
+severity and up to 100 recent decisions across log rotation/restarts. Recent decisions
+begin with v1.7. Ten decisions per page, up to four warnings/four errors from
+the last 24 hours, and fifty pending records are displayed, with up to
 twenty-five holds per kind. Import counters show the timestamp of their last
 completed-poll snapshot; persisted timers exclude dry-run-only observations.
 
@@ -763,3 +764,65 @@ days below 80% may trigger replacement/deletion. Policy 4 starts fresh condition
 observations for legacy age/seeder evidence, preserving journals, audits and
 valid Guard-stop provenance. Preserve the state directory; no environment or
 manual database edits are needed. Recreate with the same Compose overrides.
+
+## Archive origin and cleanup permissions
+
+An **origin mismatch** rejects Forget record before it enters the queue. It is
+separate from download filesystem permissions. Your external Nginx must preserve
+the browser's Host, including any port:
+
+```nginx
+proxy_set_header Host $http_host;
+```
+
+For TLS/Host-rewriting proxies, v2.0 and later can instead
+use this exact external browser origin in the existing host `.env`:
+
+```dotenv
+STATUS_PUBLIC_ORIGIN=https://guard.example.invalid
+```
+
+Replace the example with the scheme, hostname and optional port from your address
+bar. Do not include credentials, a path, query or fragment. Recreate Guard after
+changing environment settings. The source-IP allowlist and action token still
+apply; forwarded headers do not supply trusted origins. A token error instead
+requires refreshing the page. Before this fix, v1.9 reports the combined message
+`Origin or action token invalid`; forwarding Host correctly also works there.
+
+The older `compose.cleanup.yaml` grants only the completed-directory fallback.
+To enable the four-folder orphan cleanup, preserve your existing overrides and
+add the orphan override (the four host folders must already exist):
+
+```bash
+docker compose -f compose.yaml -f compose.cleanup.yaml -f compose.orphans.yaml up -d --build --force-recreate
+```
+
+The parent download mapping stays read-only. v2.0 and later perform
+full read/write/delete tests through the four scoped writable aliases, matching
+each to its read-only mapped folder. Only an exclusively created random probe
+file is removed; media is never a permission-test target. A failed/missing mount
+is reported explicitly. Keep the existing non-root UID/GID and `/state`; do not
+use root, world-writable permissions, broad writable parent/library binds, or
+journal deletion as a workaround. A successful probe tests its own file and does
+not guarantee that every existing media file has identical ownership/ACLs.
+
+Record recovery shows the last automatic retirement check: client still present,
+files still present, inaccessible/changed mapping, or missing legacy evidence.
+Confirmed-absent records retire automatically; unknown evidence can be explicitly
+archived after fresh client absence. Historical warnings remain historical.
+v2.0 also prevents an old same-poll snapshot from recreating an
+archived hold and finishes already-requested deletion verification without waiting
+out stale retry deadlines when client and every saved path are confirmed absent.
+
+## Recent decisions and warning history (v2.0)
+
+Recent downloads retains up to 100 emitted decisions, with ten rows per page.
+Use First, Backward, Forward and Last to navigate; auto-refresh keeps the current
+page when it remains valid. Repeated decisions for one torrent can occupy several
+entries. Older versions retained only 50 decisions, so upgrading does not restore
+already-pruned entries; the longer list fills as new decisions arrive.
+
+Warnings and errors displays only events from the last 24 hours, including the
+exact cutoff and excluding future-dated records. The browser also ages cached
+entries out. Existing 6/12/24-hour statistics and audit logs are unchanged; empty
+or unavailable history remains distinct from a successful service check.

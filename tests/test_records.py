@@ -214,6 +214,74 @@ class RetirementTests(unittest.TestCase):
         self.assertEqual(self.guard.store.db.execute('SELECT state FROM record_requests WHERE id=?', (request_id,)).fetchone()[0], 'completed')
         self.assert_no_deletion()
 
+    def test_archived_record_is_not_recreated_from_earlier_poll_inventory(self):
+        self.pending(evidence=False)
+        self.path.unlink()
+        completed = {**self.torrent, 'state': 'uploading', 'progress': 1,
+                     'amount_left': 0, 'completion_on': self.now - 300}
+        record = view(Path(self.config.state_db))['records'][0]
+        enqueue(Path(self.config.state_db), self.h, record['revision'], self.now)
+        # The first inventory is stale by the time archival confirms absence.
+        self.qbit.torrents.side_effect = [[completed], []]
+        self.guard.poll(self.now)
+        self.assertEqual(view(Path(self.config.state_db))['records'], [])
+        self.assertNotIn(self.h, self.guard.filesystem_retries)
+        self.assert_no_deletion()
+
+    def test_absent_verify_record_finishes_without_waiting_old_backoff(self):
+        self.guard.config = replace(self.config, dry_run=False)
+        self.pending()
+        self.path.unlink()
+        self.guard.store.set_phase(self.h, 'verify')
+        self.guard.store.requested(self.h, self.now - 300)
+        self.guard.store.set_cleanup_retry(self.h, 4, self.now + 900, 'old backoff')
+        self.guard.cleanup_retries = self.guard.store.cleanup_retries()
+        self.guard.store.set_filesystem_retry(self.h, 4, self.now + 300, 'old access hold')
+        self.guard.filesystem_retries = self.guard.store.filesystem_retries()
+        with patch.object(self.guard.verifier, 'remove') as unlink:
+            self.guard.poll(self.now)
+        self.assertEqual(self.guard.store.entries(), [])
+        self.assertEqual(view(Path(self.config.state_db))['records'], [])
+        self.assertEqual(self.guard.store.db.execute('SELECT count(*) FROM deletion_audit').fetchone()[0], 1)
+        unlink.assert_not_called()
+        self.assert_no_deletion()
+
+    def test_early_verification_race_never_falls_through_to_payload_cleanup(self):
+        self.guard.config = replace(self.config, dry_run=False, cleanup_leftovers=True)
+        manifest = self.pending()
+        self.guard.store.set_phase(self.h, 'verify')
+        self.guard.store.requested(self.h, self.now - 300)
+        self.guard.store.set_cleanup_retry(self.h, 4, self.now + 900, 'old backoff')
+        self.guard.cleanup_retries = self.guard.store.cleanup_retries()
+        with patch.object(self.guard.verifier, 'remaining', side_effect=[[], manifest['items']]), patch.object(self.guard.verifier, 'remove') as unlink:
+            self.guard.poll(self.now)
+        self.assertTrue(self.path.exists())
+        self.assertTrue(self.guard.store.entries())
+        self.assertIn('reappeared', view(Path(self.config.state_db))['records'][0]['retirement_check']['detail'])
+        unlink.assert_not_called()
+        self.assert_no_deletion()
+
+    def test_retirement_check_explains_missing_evidence_and_does_not_stale_confirmation(self):
+        self.pending(evidence=False)
+        before = view(Path(self.config.state_db))['records'][0]
+        self.guard.poll(self.now)
+        after = view(Path(self.config.state_db))['records'][0]
+        self.assertEqual(before['revision'], after['revision'])
+        self.assertIn('no saved file paths', after['retirement_check']['detail'])
+        enqueue(Path(self.config.state_db), self.h, before['revision'], self.now)
+        self.guard.poll(self.now + 1)
+        self.assertEqual(view(Path(self.config.state_db))['records'], [])
+        self.assert_no_deletion()
+
+    def test_retirement_check_explains_present_file_and_bad_mount(self):
+        self.pending()
+        self.guard.poll(self.now)
+        self.assertIn('saved files remain', view(Path(self.config.state_db))['records'][0]['retirement_check']['detail'])
+        self.completed.rename(self.root / 'detached')
+        self.guard.poll(self.now + 61)
+        self.assertIn('could not be verified', view(Path(self.config.state_db))['records'][0]['retirement_check']['detail'])
+        self.assert_no_deletion()
+
     def test_manual_archive_refuses_live_or_changed_record(self):
         self.pending(evidence=False)
         action = view(Path(self.config.state_db))['records'][0]
@@ -329,6 +397,21 @@ class ActionHTTPTests(unittest.TestCase):
             self.assertEqual(database.execute('SELECT count(*) FROM pending').fetchone()[0], 1)
             self.assertEqual(database.execute('SELECT count(*) FROM record_archive').fetchone()[0], 0)
             self.assertEqual(database.execute('SELECT count(*) FROM record_requests').fetchone()[0], 1)
+
+    def test_configured_public_origin_allows_tls_proxy_backend_host_mismatch(self):
+        self.server.public_origin = 'https://guard.example'
+        self.assertEqual(self.request(Origin='https://guard.example:443', Host='guard-backend:8080')[0], 202)
+        for origin in ('https://attacker.example', 'http://guard.example', 'https://guard.example:8443', 'null'):
+            self.assertEqual(self.request(Origin=origin, Host='guard-backend:8080')[0], 403)
+        self.assertEqual(self.request(Origin='https://guard.example', Host='guard-backend:8080', **{'X-CSRF-Token': 'wrong'})[0], 403)
+
+    def test_origin_and_token_failures_have_distinct_actionable_errors(self):
+        code, message = self.request(Origin='https://guard.example', Host='guard-backend:8080')
+        self.assertEqual(code, 403)
+        self.assertIn(b'STATUS_PUBLIC_ORIGIN', message)
+        code, message = self.request(**{'X-CSRF-Token': 'wrong'})
+        self.assertEqual(code, 403)
+        self.assertIn(b'token expired', message)
 
     def test_source_origin_token_and_schema_rejections(self):
         for headers in ({'Origin': 'https://attacker.invalid'}, {'X-CSRF-Token': ''}, {'X-CSRF-Token': 'wrong'}):

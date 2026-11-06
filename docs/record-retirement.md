@@ -16,8 +16,9 @@ Incomplete, malformed, symlinked or inaccessible evidence remains inconclusive.
 Zero-payload metadata manifests require their existing explicit validation and
 certify only client absence with no inferred filesystem targets.
 
-The ordinary live `verify` phase with a saved delete request keeps its existing
-deletion audit/logging flow. Other stale phases and orphaned holds may retire
+The live `verify` phase with a saved delete request keeps its deletion audit/logging
+flow, but confirmed client/file absence may finish verification before old retry
+deadlines. This early verification must pass `allow_cleanup=False` and never unlink. Other stale phases and orphaned holds may retire
 under the separate absence contract, including in dry run. Arr history is not
 needed to retire confirmed-absent files; it remains mandatory before deleting
 existing imported files. Retirement checks run at most once per minute and do
@@ -92,3 +93,21 @@ a side effect of Forget record. Once files are gone, ordinary verified retiremen
 can resolve their stale records. Forget request results refresh every two seconds
 while queued; POST errors scroll into view after the dialog closes. Preserve the
 complete original Host header at the trusted proxy, including nonstandard ports.
+
+## Reappearing records and missing absence proof
+
+After successful explicit archival, remove its hash from the current poll's old
+inventory. A fresh absence check may be newer than that snapshot; reprocessing
+it would recreate the just-archived hold. Do not add a permanent ignore: a future
+real torrent incarnation may be processed normally.
+
+The additive `record_checks` table stores timestamp/detail for the last read-only
+retirement attempt. Archive and remove these rows with active work; exclude them
+from confirmation revisions so reporting does not invalidate a dialog/request.
+Explain client presence, actual saved files/quarantine payloads, missing legacy
+paths and verification errors rather than silently skipping them. These diagnostic
+writes are bookkeeping in dry run and never authorize payload deletion.
+
+A reverse-proxy Origin/Host mismatch causes HTTP rejection before enqueueing.
+Use exact STATUS_PUBLIC_ORIGIN or preserve original Host at Nginx; retain IP and
+action-token checks. An accepted request and completed archival remain distinct.
