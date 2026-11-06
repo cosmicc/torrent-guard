@@ -31,7 +31,7 @@ from deletion import FileVerifier, metadata_manifest, validate_metadata_manifest
 
 LOG = logging.getLogger("torrent-guard")
 DISPLAY_TIMEZONE = ZoneInfo("America/New_York")
-VERSION = "1.9"
+VERSION = "2.0"
 METADATA_TIMEOUT_SECONDS = 600
 STALL_TIMEOUTS = {"inactive": 3 * 3600, "unconnected": 30 * 86400}
 SEEDLESS_BANDS = ((0.15, 3 * 3600), (0.50, 3 * 86400), (0.80, 7 * 86400))
@@ -819,6 +819,7 @@ class PendingStore:
         self.db.execute("DELETE FROM deletion_evidence WHERE hash=?", (torrent_hash,))
         self.db.execute("DELETE FROM cleanup_retry WHERE hash=?", (torrent_hash,))
         self.db.execute("DELETE FROM record_observations WHERE hash=?", (torrent_hash,))
+        self.db.execute("DELETE FROM record_checks WHERE hash=?", (torrent_hash,))
         self.db.commit()
 
     def evidence(self, torrent_hash: str):
@@ -846,6 +847,7 @@ class PendingStore:
             self.db.execute("DELETE FROM deletion_evidence WHERE hash=?", (torrent_hash,))
             self.db.execute("DELETE FROM cleanup_retry WHERE hash=?", (torrent_hash,))
             self.db.execute("DELETE FROM record_observations WHERE hash=?", (torrent_hash,))
+            self.db.execute("DELETE FROM record_checks WHERE hash=?", (torrent_hash,))
 
     def entries(self):
         return self.db.execute("SELECT hash,app,name,reason,queue_id,phase,kind FROM pending ORDER BY rowid").fetchall()
@@ -1350,7 +1352,7 @@ class Guard:
         No Arr calls or filesystem mutations occur. Unverifiable legacy records
         remain active unless the operator explicitly chooses archive-only Forget.
         """
-        from records import archive
+        from records import archive, checked
 
         self._inventory_hashes(torrents)
         requests = self.store.db.execute("SELECT id,hash,revision FROM record_requests WHERE state='queued' ORDER BY created_at LIMIT 8").fetchall()
@@ -1361,6 +1363,9 @@ class Guard:
                     raise ValueError("Download is still in qBittorrent; record was retained")
                 message = archive(self.store.db, h, now, "operator_dismissed", expected)
                 self._forget_runtime_record(h)
+                # The poll snapshot may predate the fresh absence check. Do not
+                # let subsequent validation recreate work we just archived.
+                by_hash.pop(h.lower(), None)
                 state = "completed"
                 LOG.info("ARCHIVED record by operator: %s; no torrent or file deletion requested", self.log_context.get(h, "retained record"))
             except (ApiError, OSError, urllib.error.URLError):
@@ -1376,14 +1381,16 @@ class Guard:
         pending = {row[0]: row for row in self.store.entries()}
         candidates = set(pending) | set(self.filesystem_retries) | set(self.cleanup_retries)
         candidates.update(h for (h,) in self.store.db.execute("SELECT hash FROM record_observations"))
-        for h in (value for value in candidates if value.lower() not in by_hash):
+        for h in candidates:
+            if h.lower() in by_hash:
+                checked(self.store.db, h, now, "qBittorrent still lists this download; automatic retirement requires client absence")
+                continue
             try:
                 evidence = self.store.evidence(h)
                 row = pending.get(h)
                 # Preserve the existing successful-deletion audit/logging flow.
-                if (not self.config.dry_run and row and row[5] == "verify"
-                        and evidence and evidence[1] is not None):
-                    continue
+                primary_verify = (not self.config.dry_run and row and row[5] == "verify"
+                                  and evidence and evidence[1] is not None)
                 observed = self.store.db.execute("SELECT manifest FROM record_observations WHERE hash=?", (h,)).fetchone()
                 manifests = []
                 if evidence:
@@ -1391,6 +1398,7 @@ class Guard:
                 if observed:
                     manifests.append(json.loads(observed[0]))
                 if not manifests:
+                    checked(self.store.db, h, now, "Client absent, but no saved file paths exist for an independent absence check. Forget record can archive this legacy bookkeeping.")
                     continue
                 for manifest in manifests:
                     if (not isinstance(manifest, dict) or manifest.get("unverifiable") or not isinstance(manifest.get("torrent"), dict)
@@ -1398,10 +1406,25 @@ class Guard:
                         raise ValueError("Saved observation is incomplete or belongs to another torrent")
                     if isinstance(manifest, dict) and manifest.get("kind") == "metadata_only":
                         validate_metadata_manifest(manifest)
-                    elif self.verifier.remaining(manifest):
-                        break
+                    else:
+                        remaining = self.verifier.remaining(manifest)
+                        if remaining:
+                            paths = []
+                            for item in remaining[:4]:
+                                relative = item.get("quarantine", "") + "/payload" if item.get("quarantine") else item["path"]
+                                paths.append(str(PurePosixPath(item["root"]) / relative))
+                            checked(self.store.db, h, now, "Client absent; saved files remain: " + ", ".join(paths))
+                            break
                 else:
                     if h.lower() in self._fresh_inventory_hashes():
+                        continue
+                    if primary_verify:
+                        # Finish already-requested deletion verification without
+                        # waiting old retry deadlines or authorizing any unlink.
+                        if self._verify_deletion(h, row[1], row[6], now, allow_cleanup=False):
+                            self._forget_runtime_record(h)
+                        else:
+                            checked(self.store.db, h, now, "Client absent; saved paths reappeared during verification. Retirement did not attempt local cleanup.")
                         continue
                     archive(self.store.db, h, now, "verified_absent")
                     self._forget_runtime_record(h)
@@ -1412,8 +1435,10 @@ class Guard:
                              self.log_context.get(h, row[2] if row else "retained download"), proof)
             except ApiError:
                 raise
-            except (OSError, ValueError, TypeError, KeyError, urllib.error.URLError):
-                # Failed/ambiguous absence checks are not proof of deletion.
+            except (OSError, ValueError, TypeError, KeyError, urllib.error.URLError) as exc:
+                # Retain evidence, and show the actual blocker instead of
+                # silently leaving the operator with an unexplained old hold.
+                checked(self.store.db, h, now, f"Client absent; filesystem absence could not be verified: {exc}")
                 continue
 
     def _filesystem_ready(self, h: str, torrent: dict | None, now: float) -> bool:
@@ -1586,7 +1611,8 @@ class Guard:
         cache["queued_content"] = queued_content
         return paths
 
-    def _verify_deletion(self, h: str, app: str, kind: str, now: float, ownership_cache: dict | None = None):
+    def _verify_deletion(self, h: str, app: str, kind: str, now: float, ownership_cache: dict | None = None,
+                         *, allow_cleanup: bool = True):
         """Confirm disk absence, or remove only authorized unchanged leftovers."""
         evidence = self.store.evidence(h)
         if evidence is None or evidence[1] is None:
@@ -1608,7 +1634,7 @@ class Guard:
         # A historical stall cannot authorize local unlink after client removal.
         if kind == "stalled":
             removable = []
-        if removable and now - requested_at >= self.config.delete_settle_seconds and self.config.cleanup_leftovers:
+        if allow_cleanup and removable and now - requested_at >= self.config.delete_settle_seconds and self.config.cleanup_leftovers:
             # Refresh remote state before local cleanup, including unrelated torrents.
             ownership_cache = {} if ownership_cache is None else ownership_cache
             owned_paths = self._ownership_paths(ownership_cache)
@@ -1647,7 +1673,9 @@ class Guard:
             remaining = self.verifier.remaining(manifest)
         if remaining:
             paths = ", ".join(repr(str(PurePosixPath(item.get("root", "")) / item["path"])) for item in remaining[:4])
-            if not self.config.cleanup_leftovers:
+            if not allow_cleanup:
+                blocker = "paths changed during read-only retirement verification; no local cleanup was attempted"
+            elif not self.config.cleanup_leftovers:
                 blocker = "automatic leftover cleanup disabled (CLEANUP_LEFTOVERS=false); enable compose.cleanup.yaml with the completed-directory write bind"
             elif now - requested_at < self.config.delete_settle_seconds:
                 deadline = display_time(requested_at + self.config.delete_settle_seconds)

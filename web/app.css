@@ -665,3 +665,26 @@ footer {
 #removal-rule-notes li + li {
   margin-top: 10px;
 }
+
+.activity-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+#activity-page {
+  text-align: center;
+  flex: 1 1 140px;
+}
+@media (max-width: 600px) {
+  #activity-page {
+    order: -1;
+    flex-basis: 100%;
+  }
+  .activity-pagination button {
+    flex: 1 1 auto;
+    padding-inline: 10px;
+  }
+}

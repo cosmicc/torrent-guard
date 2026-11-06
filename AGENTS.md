@@ -15,7 +15,7 @@ without import evidence after 15 continuously observed minutes; this supersedes
 older prohibitions on discovering unknown leftovers and incomplete-root cleanup
 only within the four dedicated tv/movies folders when explicitly enabled.
 
-A bounded HTTP status server runs inside the Guard container behind an authenticated Nginx proxy; its backend is restricted by connecting IP/CIDR. Torrent/file access stays read-only; the explicit archive-only bookkeeping endpoint is described below. There is no qBittorrent completion hook, Docker socket access or external database server. Standard Compose uses a read-only download mount. An explicit cleanup override can additionally mount only the completed-download directory writable. Library mounts must never be writable or targeted. The app polls qBittorrent and Arr APIs and records cleanup operations in a local SQLite journal.
+A bounded HTTP status server runs inside the Guard container behind an authenticated Nginx proxy; its backend is restricted by connecting IP/CIDR. HTTP reads use cached diagnostics and current bookkeeping; background capability probes may create/remove their own test file only in state and scoped cleanup aliases. The explicit archive-only bookkeeping endpoint is described below. There is no qBittorrent completion hook, Docker socket access or external database server. Standard Compose uses a read-only download mount. An explicit cleanup override can additionally mount only the completed-download directory writable. Library mounts must never be writable or targeted. The app polls qBittorrent and Arr APIs and records cleanup operations in a local SQLite journal.
 
 ## Project structure
 
@@ -206,7 +206,7 @@ while stopped; see INSTALL.md. Keep the image non-root, mounts restricted and
 existing journals intact. qBittorrent API deletion uses qBittorrent's own process
 identity, not Guard's identity.
 
-Key variables: QBIT_URL/USERNAME/PASSWORD, SONARR_URL/API_KEY/CATEGORY/TAG, RADARR_URL/API_KEY/CATEGORY/TAG, DOWNLOADS_HOST_PATH, QBIT_DOWNLOAD_ROOT, GUARD_DOWNLOAD_ROOT, QBIT_COMPLETE_DIR, QBIT_INCOMPLETE_DIR, VERIFY_VIDEO_CONTENT, COMPLETED_SETTLE_SECONDS, FFPROBE_TIMEOUT_SECONDS, POLL_SECONDS, MAX_AGE_HOURS, REJECT_NO_VIDEO, IMPORT_GRACE_MINUTES, IMPORT_CHECK_SECONDS, HISTORY_LOOKBACK_DAYS, DRY_RUN, STATE_DB, LOG_FILE, LOG_LEVEL, LOG_MAX_BYTES, LOG_BACKUP_COUNT, LOG_COLOR, HEALTHCHECK_MAX_AGE_SECONDS, STATUS_ENABLED, STATUS_PORT, STATUS_ALLOWED_CLIENTS, ORPHAN_CLEANUP, and Compose-only STATUS_BIND_ADDRESS/STATUS_HOST_PORT.
+Key variables: QBIT_URL/USERNAME/PASSWORD, SONARR_URL/API_KEY/CATEGORY/TAG, RADARR_URL/API_KEY/CATEGORY/TAG, DOWNLOADS_HOST_PATH, QBIT_DOWNLOAD_ROOT, GUARD_DOWNLOAD_ROOT, QBIT_COMPLETE_DIR, QBIT_INCOMPLETE_DIR, VERIFY_VIDEO_CONTENT, COMPLETED_SETTLE_SECONDS, FFPROBE_TIMEOUT_SECONDS, POLL_SECONDS, MAX_AGE_HOURS, REJECT_NO_VIDEO, IMPORT_GRACE_MINUTES, IMPORT_CHECK_SECONDS, HISTORY_LOOKBACK_DAYS, DRY_RUN, STATE_DB, LOG_FILE, LOG_LEVEL, LOG_MAX_BYTES, LOG_BACKUP_COUNT, LOG_COLOR, HEALTHCHECK_MAX_AGE_SECONDS, STATUS_ENABLED, STATUS_PORT, STATUS_ALLOWED_CLIENTS, STATUS_PUBLIC_ORIGIN, ORPHAN_CLEANUP, and Compose-only STATUS_BIND_ADDRESS/STATUS_HOST_PORT.
 
 ### Monitoring contract
 
@@ -219,6 +219,15 @@ Automatic retirement additionally requires all saved file/quarantine names absen
 on unchanged readable roots. Neither path authorizes file deletion or reports
 CLEANED. Both operate in dry run; captured observations and audit archives persist.
 Read [record retirement](docs/record-retirement.md) and [status workflow](docs/status-web.md).
+`STATUS_PUBLIC_ORIGIN` optionally sets the exact external browser origin behind
+TLS/Host-rewriting proxies; retain peer-IP allowlisting, action tokens and no
+CORS grants. Never infer it from forwarded headers. Origin and token failures
+must have distinct actionable errors. Successful archival removes the stale
+same-poll torrent snapshot so later validation cannot recreate the record.
+`record_checks` keeps read-only retirement diagnostics outside confirmation
+revisions; preserve them in archives and explain blocked absence checks in the UI.
+Already-requested deletion verification may finish on confirmed absence without
+old backoff, but this retirement path must never authorize local unlink.
 
 Browser reads never initiate probes or cleanup. They read current bookkeeping
 alongside cached diagnostics. Diagnostics run in an isolated subprocess off the
@@ -369,3 +378,22 @@ The image installs OS tzdata and sets TZ=America/New_York. The SSH viewer
 preserves the explicit zone/offset and still reads historical unzoned log lines;
 never guess or rewrite historical timestamps. Keep daylight-saving boundary
 and grace-duration tests when changing time presentation.
+
+### Scoped drive capability probes
+
+The parent `/downloads` mapping remains read-only. Background diagnostics test
+read/create/write/fsync/readback/delete and independent probe absence through
+all four `compose.orphans.yaml` cleanup aliases after matching their read-only
+mapped directory identity. Missing aliases or permissions fail visibly and
+explain the needed override/recreation. Never test-delete media, sweep probe
+leftovers, follow symlinks, write to a library or broaden parent permissions.
+Keep probe isolation/timeouts and the same-UID/root concurrency limitation.
+
+### Monitoring pagination and issue window (v2.0)
+
+Keep at most 100 recent emitted decisions, ten rows per page. First/Backward/
+Forward/Last only navigate cached browser data; preserve valid page selection
+on refresh and clamp it when fewer rows remain. Backend and browser both enforce
+the last-24-hour warning/error display window, excluding future events without
+changing rolling metrics or private audit retention. Follow docs/status-web.md
+and reuse the approved palette and spacing; browser-test all navigation states.

@@ -13,12 +13,13 @@ import secrets
 import sqlite3
 
 ACTIVE_TABLES = ("pending", "deletion_evidence", "filesystem_retry", "cleanup_retry",
-                 "metadata_wait", "stalled_wait", "record_observations")
+                 "metadata_wait", "stalled_wait", "record_observations", "record_checks")
 
 
 def initialize(database: sqlite3.Connection) -> None:
     """Add bookkeeping tables without rebuilding existing journals or audits."""
     database.executescript("""
+        CREATE TABLE IF NOT EXISTS record_checks (hash TEXT PRIMARY KEY, checked_at REAL NOT NULL, detail TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS record_observations (hash TEXT PRIMARY KEY, manifest TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS record_archive (
             id INTEGER PRIMARY KEY, hash TEXT NOT NULL, name TEXT NOT NULL,
@@ -41,7 +42,7 @@ def revision(record: dict) -> str:
     Retry deadlines and attempt counts naturally advance while the page is open;
     they do not change what record is being archived. Payload/journal changes do.
     """
-    stable = {table: rows for table, rows in record.items() if table not in {"filesystem_retry", "cleanup_retry"}}
+    stable = {table: rows for table, rows in record.items() if table not in {"filesystem_retry", "cleanup_retry", "record_checks"}}
     return hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()
 
 
@@ -151,6 +152,12 @@ def enqueue(path: Path, h: str, expected_revision: str, now: float) -> str:
         database.close()
 
 
+def checked(database: sqlite3.Connection, h: str, now: float, detail: str) -> None:
+    """Persist why a read-only absence check retained work, without changing its revision."""
+    with database:
+        database.execute("INSERT OR REPLACE INTO record_checks VALUES (?,?,?)", (h, now, detail[:2000]))
+
+
 def view(path: Path) -> dict:
     """Expose current actionable records/results using a short read transaction."""
     database = connect(path)
@@ -162,7 +169,9 @@ def view(path: Path) -> dict:
         for (h,) in hashes:
             current = snapshot(database, h)
             name, reason = label(current)
-            records[h] = {"id": h, "revision": revision(current), "name": name, "reason": reason}
+            check = current["record_checks"]
+            records[h] = {"id": h, "revision": revision(current), "name": name, "reason": reason,
+                          "retirement_check": {"at": check[0][1], "detail": check[0][2]} if check else None}
         requests = [{"id": request_id, "record_id": h, "state": state, "message": message, "name": name}
                     for request_id, h, state, message, name in database.execute(
                         "SELECT r.id,r.hash,r.state,r.message,coalesce(p.name,"

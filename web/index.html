@@ -48,7 +48,7 @@
           <div class="recent">
             <h2>Recent downloads</h2>
             <p class="note">
-              Latest recorded decisions · expand a download for details
+              Latest 100 recorded decisions · 10 per page · expand a download for details
             </p>
             <div class="table-scroll">
               <table>
@@ -62,6 +62,13 @@
                 <tbody id="activity"></tbody>
               </table>
             </div>
+            <nav class="activity-pagination" aria-label="Recent download pages">
+              <button id="activity-first" type="button" aria-label="First page" aria-controls="activity" disabled>First</button>
+              <button id="activity-backward" type="button" aria-label="Previous page" aria-controls="activity" disabled>Backward</button>
+              <span id="activity-page" class="note" role="status" aria-live="polite">Recent history unavailable</span>
+              <button id="activity-forward" type="button" aria-label="Next page" aria-controls="activity" disabled>Forward</button>
+              <button id="activity-last" type="button" aria-label="Last page" aria-controls="activity" disabled>Last</button>
+            </nav>
           </div>
         </section>
         <section class="panel">
@@ -77,8 +84,8 @@
         <section class="panel">
           <h2>Warnings &amp; errors</h2>
           <p class="note">
-            Historical events. Archiving a record clears active work; past
-            warnings remain in this history.
+            Last 24 hours only · latest warnings and errors. Archiving a record
+            clears active work; recent historical events remain until they age out.
           </p>
           <div id="issues"></div>
         </section>
@@ -86,8 +93,9 @@
           <h2>Drive access</h2>
           <div id="drives"></div>
           <p class="note">
-            Directory checks; download mounts are checked read-only. Temporary
-            write probes run only in state and the verified cleanup alias.
+            Cleanup folders are tested by creating, writing, reading back and deleting
+            a unique probe file. Media files are untouched by these tests.
+            The parent download mapping stays read-only.
           </p>
         </section>
       </div>

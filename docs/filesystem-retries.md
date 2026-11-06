@@ -83,3 +83,10 @@ quarantine rename may indicate an unsupported flag rather than unavailable
 files. See [NFS rename compatibility](deletion-verification.md#nfs-rename-compatibility-v13)
 for the guarded fallback and its concurrency requirements. Other filesystem
 errors continue to retain files.
+
+Confirmed client/file absence can now finish a saved delete request or retire
+other stale work during the once-per-minute retirement pass, without waiting
+old backoff. Early verification is strictly read-only. Current per-record
+retirement details identify the reason an absent-client hold still cannot retire.
+Write/delete probe failures concern cleanup permission, not permission to archive
+bookkeeping; archives write only `/state` after fresh client-absence validation.
