@@ -11,6 +11,7 @@ COPY --chown=1000:1000 guard.py /app/guard.py
 COPY --chown=1000:1000 deletion.py /app/deletion.py
 COPY --chown=1000:1000 orphans.py /app/orphans.py
 COPY --chown=1000:1000 records.py /app/records.py
+COPY --chown=1000:1000 maintenance.py /app/maintenance.py
 COPY --chown=1000:1000 status_report.py /app/status_report.py
 COPY --chown=1000:1000 status_web.py /app/status_web.py
 COPY --chown=1000:1000 web /app/web

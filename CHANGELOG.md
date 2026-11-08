@@ -3,6 +3,32 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 2.1 - 11.08.2026
+
+### Added
+
+- Two-server OMV/SnapRAID maintenance coordinator: stop Sonarr/Radarr at 02:00
+  Eastern, run daily 02:01 sync and Sunday 04:30 scrub, and restore apps after
+  all jobs succeed. Hold apps between Sunday jobs and through overruns.
+- Durable job/container recovery state, serialized execution, original restart
+  policy preservation, explicit failed-job retry, and dashboard maintenance status.
+- Restricted SSH agent on the Docker host; OMV requires session-matched stop
+  and NFS-write-flush acknowledgements before executing its local SnapRAID jobs.
+  Hostname, dedicated key and verified host keys are configured at installation.
+
+### Changed
+
+- Suspend Guard torrent processing and expected Arr diagnostics during host
+  maintenance. qBittorrent can keep downloading to storage outside SnapRAID.
+
+### Fixed
+
+- Prevent maintenance-controlled apps from automatically restarting with the
+  Docker daemon while SnapRAID work is pending. Failed/interrupted jobs retain
+  the maintenance hold instead of resuming imports at a fixed deadline.
+- Retry lost finish acknowledgements without re-running successful SnapRAID
+  jobs or stopping apps that the Docker host has already restored.
+
 ## 2.0 - 11.05.2026
 
 ### Added

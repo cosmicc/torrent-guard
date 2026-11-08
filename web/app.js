@@ -285,6 +285,8 @@ function render(data) {
       ? "First collection running…"
       : `Checked ${duration(cacheAge)} ago`;
   const notices = [];
+  if (data.maintenance?.active)
+    notices.push("Maintenance: " + data.maintenance.detail + ". Torrent processing is suspended; qBittorrent can continue downloading.");
   if (!data.ready)
     notices.push(
       "Collecting the first status snapshot. Torrent polling continues independently.",
@@ -298,7 +300,7 @@ function render(data) {
   $("notice").textContent = notices.join(" ");
   $("poll-health").replaceChildren(
     stateText(
-      data.poll?.healthy ? "Polling active" : "Polling not current",
+      data.maintenance?.active ? "Maintenance active" : data.poll?.healthy ? "Polling active" : "Polling not current",
       data.poll?.healthy ? "good" : "warn",
     ),
   );
@@ -322,6 +324,14 @@ function render(data) {
       ok: null,
       detail: "Waiting for collection",
     }));
+  if (data.maintenance?.active) {
+    for (const service of services) {
+      if (["Sonarr", "Radarr"].includes(service.name)) {
+        service.ok = null;
+        service.detail = "Maintenance: intentionally unavailable";
+      }
+    }
+  }
   const drives = data.drives || [];
   const storageOK = drives.length > 0 && drives.every((drive) => drive.ok);
   const items = [

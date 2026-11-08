@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v2.0** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v2.1** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -23,6 +23,10 @@ grace interval has elapsed (15 minutes by default).
 - Runs without root privileges, Docker socket access, or a writable media mount.
   A status page runs in the same container behind your authenticated Nginx proxy.
 - Color-coded live logs and a Docker healthcheck show ongoing polling activity.
+- Optional [OMV/SnapRAID maintenance](docs/maintenance.md) stops Sonarr/Radarr
+  for daily sync and Sunday scrub, then restores them when the jobs finish.
+  OMV can be a separate NFS server: restricted SSH coordinates the Docker host.
+  qBittorrent continues downloading; Docker control stays on that host.
 - The **save** tag exempts a live torrent from every Guard removal rule,
   including completed imports and bad releases. Tag matching ignores case.
 - Incomplete downloads with positive total seeders wait for connections.
@@ -138,7 +142,7 @@ Docker does not automatically restart unhealthy containers.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile guard.py deletion.py records.py orphans.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
+python3 -m py_compile guard.py deletion.py records.py orphans.py maintenance.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
 python3 scripts/release_notes.py
 ```
 

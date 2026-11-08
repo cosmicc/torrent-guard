@@ -230,6 +230,8 @@ class StatusHandler(BaseHTTPRequestHandler):
             from guard import removal_reference
             payload["removal_rules"] = removal_reference()
             if self.server.state_db is not None:
+                from maintenance import read_maintenance
+                payload["maintenance"] = read_maintenance(self.server.state_db)
                 from records import view
                 from status_report import journal_data, private_text
                 try:
