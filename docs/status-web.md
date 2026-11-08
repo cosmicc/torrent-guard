@@ -6,6 +6,12 @@ setup is in [INSTALL.md](../INSTALL.md#web-status-page).
 
 ## Isolation and data
 
+- Read `maintenance.json` beside STATE_DB for current host-maintenance status.
+  The HTTP path only reads this bounded marker; it never controls Docker or jobs.
+  Suppress expected Arr checks while active, show the host detail using safe
+  text rendering and reuse the approved palette. Missing means not installed;
+  malformed/unreadable existing markers keep Guard processing suspended.
+
 - Keep Guard polling and its SQLite logging handler on the main thread. HTTP
   reads combine cached diagnostics, current read-only bookkeeping and heartbeat.
   The sole POST route may insert a bounded archive request through its own SQLite

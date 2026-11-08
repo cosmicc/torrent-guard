@@ -1,8 +1,13 @@
 # Torrent Guard installation and operations
 
+For daily sync and Sunday scrub on a separate OMV/NFS server with Sonarr/Radarr
+stopped on the Docker server, see [OMV/SnapRAID maintenance](docs/maintenance.md).
+Restricted SSH coordinates the hosts; one OMV job replaces the two direct
+SnapRAID scheduled jobs. qBittorrent remains running.
+
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v1.3** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
+**v2.1** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
 
 Torrent Guard is a background service that examines new and completed movie/TV torrents and cleans up imported releases. It uses **qBittorrent's Web API** and **Sonarr/Radarr's v3 APIs**; no qBittorrent “Run external program on torrent completion” hook is required.
 

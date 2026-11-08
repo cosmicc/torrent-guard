@@ -31,7 +31,7 @@ from deletion import FileVerifier, metadata_manifest, validate_metadata_manifest
 
 LOG = logging.getLogger("torrent-guard")
 DISPLAY_TIMEZONE = ZoneInfo("America/New_York")
-VERSION = "2.0"
+VERSION = "2.1"
 METADATA_TIMEOUT_SECONDS = 600
 STALL_TIMEOUTS = {"inactive": 3 * 3600, "unconnected": 30 * 86400}
 SEEDLESS_BANDS = ((0.15, 3 * 3600), (0.50, 3 * 86400), (0.80, 7 * 86400))
@@ -916,6 +916,16 @@ class Guard:
 
     def poll(self, now: float | None = None):
         now = time.time() if now is None else now
+        from maintenance import read_maintenance
+        maintenance = read_maintenance(self.config.state_db)
+        if maintenance["active"]:
+            if not getattr(self, "maintenance_active", False):
+                LOG.info("MAINTENANCE processing suspended; %s", maintenance["detail"])
+            self.maintenance_active = True
+            return
+        if getattr(self, "maintenance_active", False):
+            LOG.info("MAINTENANCE complete; torrent processing resumed")
+            self.maintenance_active = False
         try:
             torrents = self.qbit.torrents()
             self._inventory_hashes(torrents)

@@ -19,6 +19,14 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
 
 ## Project structure
 
+- maintenance.py, tests/test_maintenance.py, tests/test_maintenance_remote.py —
+  OMV scheduler, restricted SSH agent on the separate Docker host, and read-only
+  container status. Read [maintenance workflow](docs/maintenance.md)
+  before changing schedules, Docker control, failure/restart handling or markers.
+  Never grant Guard Docker socket access or SSH credentials. Root controls run
+  independently of Guard dry run. OMV must receive session-matched SSH stop/NFS
+  flush acknowledgements before jobs; only its agent writes Guard's local marker.
+
 - guard.py — API, polling and journal orchestration:
   - Config, ArrInstance, required, boolean, api_url: environment/config parsing and validation.
   - Http: urllib requests, form/JSON handling, cookie jar, HTTP errors.
@@ -198,6 +206,11 @@ pending. Preserve deletion_evidence/deletion_audit tables during upgrades.
 
 Keep .env (qBittorrent password, Arr keys), state DB and logs outside version control. Logs contain download titles and paths; do not copy API keys into AGENTS, tests or issue templates. Retain restricted container privileges. Do not require Docker socket or root. Do not delete /state, use docker compose down -v, or auto-reinitialize existing journals during upgrades. When migrating a named Docker volume to a bind mount, data is not copied automatically.
 
+The optional maintenance command is installed separately on OMV and the Docker
+host. OMV runs SnapRAID; the restricted forced-command agent controls only the
+two named Docker containers. This grants Guard neither root nor Docker/SSH
+access. Keep job control outside HTTP routes and Guard's daemon.
+
 ## Configuration and operational controls
 
 Compose-only identity controls: `GUARD_UID`, `GUARD_GID` (default `1000`).
@@ -312,7 +325,7 @@ Treat docker compose config output as possibly containing secrets; sanitize befo
 - Preserve dry-run guarantees, cross-Arr category/tag isolation, defer-vs-reject distinction and explicit deletion with data through the qBittorrent API.
 - Test fail-closed behavior on unreachable Arr APIs, incomplete/late move, malformed paths, unknown file types, repeated HTTP errors, journal restarts, and multi-episode partial imports. Assert the ORDER and ABSENCE of destructive calls as well as expected calls.
 - Run: python3 -m unittest discover -s tests -v
-- Run: python3 -m py_compile guard.py deletion.py records.py orphans.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
+- Run: python3 -m py_compile guard.py deletion.py records.py orphans.py maintenance.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
 - Run: python3 scripts/release_notes.py (validates version consistency and changelog structure without publishing).
 - Run: docker compose config using safe dummy .env values when appropriate; NEVER commit secrets.
 - Update README, INSTALL.md and .env.example as appropriate when operator-facing flags or behavior change. Document state migrations and safety impact.

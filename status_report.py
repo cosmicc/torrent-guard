@@ -297,7 +297,10 @@ def collect_status() -> dict:
     from guard import ApiError, Config, Http, Qbit, VERSION, torrent_app
 
     config = Config.from_env()
+    from maintenance import read_maintenance
+    maintenance = read_maintenance(config.state_db)
     result = {"version": VERSION, "collected_at": time.time(), "services": [], "drives": [],
+              "maintenance": maintenance,
               "settings": {"dry_run": config.dry_run, "cleanup_leftovers": config.cleanup_leftovers,
                            "orphan_cleanup": config.orphan_cleanup,
                            "import_grace_minutes": config.import_grace_minutes, "poll_seconds": config.poll_seconds,
@@ -322,7 +325,9 @@ def collect_status() -> dict:
     for app in ("SONARR", "RADARR"):
         instance = config.instances.get(app)
         service = {"name": app.title(), "configured": instance is not None, "ok": None, "detail": "Not configured"}
-        if instance:
+        if instance and maintenance["active"]:
+            service.update(detail="Maintenance: Sonarr/Radarr intentionally unavailable")
+        elif instance:
             try:
                 data = Http().request("GET", instance.url + "/api/v3/system/status", headers={"X-Api-Key": instance.api_key})
                 if not isinstance(data, dict) or not isinstance(data.get("version"), str) or not data["version"]:
