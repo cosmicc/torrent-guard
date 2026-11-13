@@ -29,7 +29,7 @@ setup is in [INSTALL.md](../INSTALL.md#web-status-page).
 - Keep history at `<STATE_DB>.status.sqlite3`. The additive `activity` table
   retains up to 100 emitted decisions, not a synthetic torrent processing ledger.
   Preserve v1.6 tables/events and handle an older history lacking this table.
-  Retain seven days of metric events and twenty issues per severity. Counts are
+  Retain seven days of metric events and 1,000 issue events per severity. Counts are
   exact rolling emitted-event totals, overlap and include dry-run candidates;
   they are not unique downloads, imported episodes or reclaimed disk space.
 - Label partial history and recording failures; do not backfill guesses from
@@ -161,3 +161,25 @@ the browser so an aging/stale snapshot cannot display out-of-window records.
 Test exact time boundaries, future rows, retention/restart ordering, all four
 controls, page preservation/clamping, zero/one/partial/ten-page history, safe text
 rendering, desktop/mobile overflow and console/CSP health.
+
+## Warning groups (v2.2)
+
+Warnings/errors have independent ten-card pagination with the same four controls
+as recent activity. Keep valid page selection across refresh and clamp it after
+expiry/shrink. Backend and browser both enforce last-24-hours and exclude future
+events. SQL groups exact messages by severity with first/last timestamps and
+occurrence counts. Return the latest 100 groups of warnings and 100 of errors;
+retention is bounded to 1,000 events per severity. Older details pruned by prior
+versions cannot be recovered. Rolling metric counters still count emitted
+events, not unique problems or files; grouping never erases those counters.
+
+Cards separate type, file/download, reason, action, retry/attempt and recovery ID
+using the approved cyan/amber/green/purple palette and safe DOM text. Do not show
+full filesystem paths on warning cards. Keep exact paths in private audit logs
+and saved evidence. The reported orphan-quarantine warnings are real safety
+holds, not normal cleanup; repeated attempts on the same retained file can
+produce many warnings. Never weaken saved identity checks to silence them.
+
+Test grouping/counts, retained limits, expiry/future filtering, privacy redaction,
+reported filenames with spaces, all navigation boundaries, refresh/shrink,
+malicious strings as text, desktop/mobile overflow and clean browser console.

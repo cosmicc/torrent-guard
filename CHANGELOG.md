@@ -3,6 +3,43 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 2.2 - 11.13.2026
+
+### Added
+
+- Paginated warning/error cards with ten groups per page, all four navigation
+  controls, repeat counts, filenames, reasons, recovery IDs and next steps.
+  Retain up to 1,000 events per severity and show the latest 100 groups of each
+  warnings/errors in the last 24 hours; preserve independent rolling counters.
+- Quarantine mismatch diagnostics identify which saved file attributes changed,
+  retaining the same identity checks and manual-recovery safety hold.
+- Host uninstallers remove current and manually installed v2.1 maintenance setup,
+  with preview, active-job/hold protection, and fresh reinstall support.
+
+- Separate OMV and media Docker-host installers for maintenance setup steps 1–3.
+  Create missing helper/config/key/account files, verify existing restrictions,
+  pin a console-verified host key, and perform a read-only remote connection test.
+- Repeat-run tests verify existing contents, permissions and modification times
+  remain unchanged; partial installations resume without regenerating keys.
+
+### Changed
+
+- Shorten warning-card filesystem paths to filenames and reuse the approved
+  palette for category, file, reason, recovery and retry information.
+- Log normal delete requests, local cleanup attempts and dry-run previews at
+  INFO instead of WARNING; retain genuine blocked cleanup and rejection warnings.
+
+- Document the OMV → Docker → OMV verification sequence and preserve a separate
+  manual setup reference. Scheduling remains an explicit OMV step.
+- Isolate maintenance SSH from normal client config, default identities, SSH
+  agents, global host pins and multiplexed administrator connections.
+
+### Fixed
+
+- Refuse incompatible existing helpers, keys, accounts, permissions or settings
+  instead of overwriting or repairing them. Never edit/restart SSH or modify
+  ordinary administrator access during installation.
+
 ## 2.1 - 11.08.2026
 
 ### Added

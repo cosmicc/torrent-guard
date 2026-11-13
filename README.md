@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v2.1** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v2.2** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -27,6 +27,10 @@ grace interval has elapsed (15 minutes by default).
   for daily sync and Sunday scrub, then restores them when the jobs finish.
   OMV can be a separate NFS server: restricted SSH coordinates the Docker host.
   qBittorrent continues downloading; Docker control stays on that host.
+  [Host installers](docs/maintenance.md#1-prepare-omv) create missing setup and
+  verify repeat runs without overwriting files or changing normal SSH access.
+  [Uninstall/reset instructions](docs/maintenance.md#uninstall-or-reset-maintenance-setup)
+  also cover the manually installed v2.1 maintenance files.
 - The **save** tag exempts a live torrent from every Guard removal rule,
   including completed imports and bad releases. Tag matching ignores case.
 - Incomplete downloads with positive total seeders wait for connections.
@@ -85,6 +89,9 @@ container is needed. Your Nginx server supplies TLS/authentication; only configu
 proxy IPs may reach the backend. See [web status setup](INSTALL.md#web-status-page).
 Recent downloads show up to 100 recorded decisions, ten per page, with First,
 Backward, Forward and Last controls. Warnings/errors show only the last 24 hours.
+Warnings use the same navigation, group identical repeats, and show filenames,
+reasons and next steps in separate colors. Quarantine identity mismatches remain
+warnings; normal deletion requests and dry-run previews are activity messages.
 The v1.6 `--status` CLI is replaced by this page; existing history is preserved.
 
 Stale records retire automatically once the torrent and every saved file path
@@ -143,6 +150,7 @@ Docker does not automatically restart unhealthy containers.
 ```bash
 python3 -m unittest discover -s tests -v
 python3 -m py_compile guard.py deletion.py records.py orphans.py maintenance.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
+python3 -m py_compile scripts/maintenance_install.py scripts/install_maintenance_omv.py scripts/install_maintenance_docker.py
 python3 scripts/release_notes.py
 ```
 

@@ -295,11 +295,7 @@ class RemoteCoordinator(Coordinator):
         """Require strict host-key verification and an acknowledged matching session."""
         config = self.connection
         session = self.state["session"]
-        command = ["ssh", "-T", "-oBatchMode=yes", "-oIdentitiesOnly=yes", "-oStrictHostKeyChecking=yes",
-                   "-oUserKnownHostsFile=" + config["known_hosts_file"], "-oConnectTimeout=10",
-                   "-oServerAliveInterval=5", "-oServerAliveCountMax=3", "-i", config["identity_file"],
-                   "-p", str(config.get("port", 22)), "--",
-                   config.get("user", "guard-maintenance") + "@" + config["host"], action + " " + session]
+        command = ssh_command(config, action + " " + session)
         try:
             result = subprocess.run(command, check=True, text=True, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, timeout=360)
@@ -344,6 +340,18 @@ class RemoteCoordinator(Coordinator):
         super().tick(now)
         if self.state and self.state["active"]:
             self.remote("hold")
+
+
+def ssh_command(config: dict, request: str) -> list[str]:
+    """Isolate maintenance from normal SSH keys, config, agents and multiplexing."""
+    return ["ssh", "-F", "/dev/null", "-T", "-oBatchMode=yes", "-oIdentitiesOnly=yes",
+            "-oIdentityAgent=none", "-oControlMaster=no", "-oControlPath=none",
+            "-oGlobalKnownHostsFile=/dev/null", "-oUpdateHostKeys=no", "-oForwardAgent=no",
+            "-oClearAllForwardings=yes", "-oPermitLocalCommand=no", "-oStrictHostKeyChecking=yes",
+            "-oUserKnownHostsFile=" + config["known_hosts_file"], "-oConnectTimeout=10",
+            "-oServerAliveInterval=5", "-oServerAliveCountMax=3", "-i", config["identity_file"],
+            "-p", str(config.get("port", 22)), "--",
+            config.get("user", "guard-maintenance") + "@" + config["host"], request]
 
 
 def agent_request(request: str, directory: Path = AGENT_DIRECTORY, status_file: Path = DEFAULT_STATUS) -> dict:

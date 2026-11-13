@@ -592,8 +592,10 @@ class DeletionTests(unittest.TestCase):
             replacement.write_bytes(b"replacement during rename")
             os.replace(replacement, self.path)
             rename_exclusive(source_fd, source, target_fd, target)
-        with patch("deletion.rename_exclusive", side_effect=swap):
+        with patch("deletion.rename_exclusive", side_effect=swap), self.assertLogs("torrent-guard", level="WARNING") as logs:
             self.guard.poll(now=self.now + 120)
+        self.assertIn("quarantined object changed", "\n".join(logs.output))
+        self.assertIn("inode: saved=", "\n".join(logs.output))
         manifest = self.guard.store.evidence("abc123")[0]
         item = next(item for item in manifest["items"] if item.get("quarantine"))
         self.assertEqual((self.completed / item["quarantine"] / "payload").read_bytes(), b"replacement during rename")

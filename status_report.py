@@ -23,6 +23,84 @@ from scripts.watch_logs import safe_text
 RETENTION = 7 * 86400
 ACTIVITY_LIMIT = 100
 ISSUE_WINDOW_SECONDS = 24 * 3600
+ISSUE_EVENT_LIMIT = 1000
+ISSUE_GROUP_LIMIT = 100
+
+
+def filename_only(value: str) -> str:
+    """Keep the human filename while omitting filesystem directory prefixes."""
+    return value.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+
+
+def compact_paths(message: str) -> str:
+    """Shorten quoted and bare filesystem paths without interpreting log literals."""
+    quoted = re.compile(r"'([^']*)'|\"([^\"]*)\"")
+
+    def replace(match):
+        value = match[1] if match[1] is not None else match[2]
+        if value.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:[\\/]", value):
+            return "'" + filename_only(value) + "'"
+        return match[0]
+
+    message = quoted.sub(replace, message)
+    # Relative quarantine names are diagnostic tokens, not filesystem locations.
+    message = re.sub(r"[^\s;'\"]*/(\.torrent-guard-[0-9a-f]+)/payload", r"\1 (payload)", message)
+    return re.sub(r"(?<![\w:/])/(?:[^\s;'\"]*/)+([^/\s;'\"]+)", r"\1", message)
+
+
+def issue_details(message: str) -> dict:
+    """Translate known emitted decisions into bounded, safe operator explanations."""
+    from scripts.watch_logs import NAME
+    name = NAME.search(message)
+    download = name["value"][1:-1] if name else ""
+    filename = ""
+    reason = message
+    if message.startswith("ORPHAN deferred ") and "; timer reset:" in message:
+        path, reason = message[len("ORPHAN deferred "):].split("; timer reset:", 1)
+        filename = filename_only(path)
+    else:
+        reason_match = re.search(r"\breason=(.*)", message)
+        if reason_match:
+            reason = reason_match[1]
+        elif name:
+            reason = message[name.end():]
+            reason = re.sub(r"\b(?:paths|save_path|content_path|download_path)=('(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\")", "", reason)
+            reason = reason.lstrip(" :;") or message[:name.start()].strip()
+    category, title, action = "Other", "Operation needs attention", "Review the details; Guard preserves downloads when checks are inconclusive."
+    if "quarantined object changed" in message or "source reappeared after quarantine" in message:
+        category, title = "Quarantine", "Quarantined file retained for safety"
+        action = "The captured file no longer matches its saved identity. Keep the payload and journal; review the saved evidence before manual recovery."
+        reason = reason.split("; recover manually from", 1)[0]
+        reason = re.sub(r"(device|inode|size|mtime_ns): saved=\d+, observed=\d+", r"\1 changed", reason).replace("mtime_ns", "modification time")
+    elif message.startswith("ORPHAN deferred"):
+        category, title = "Orphan cleanup", "Unowned file cleanup deferred"
+        action = "Guard retained the file and reset its absence timer. It will retry after another 15 minutes of confirmed client absence."
+    elif message.startswith("DEFER validation"):
+        category, title = "File access", "File access check deferred"
+        action = "Check download mount access and permissions. Guard retains the file and retries automatically."
+    elif "conflicting Arr ownership" in message:
+        category, title = "Ownership", "Sonarr/Radarr ownership is ambiguous"
+        action = "Check the torrent category and tags. Guard skips it until ownership is unambiguous."
+    elif message.startswith("REJECT candidate"):
+        category, title = "Rejection", "Download rejected by a removal rule"
+        action = "Guard must confirm the Arr blocklist/replacement request before removing this download."
+    elif message.startswith("PENDING"):
+        category, title = "Cleanup", "Cleanup is waiting for verification"
+        action = "The operation is still pending. Guard must verify ownership, import evidence and file absence before reporting cleanup complete."
+        if "blocklist unconfirmed" in message or "queue match" in message:
+            category, title = "Arr", "Arr rejection is not confirmed"
+            action = "Check the matching Arr queue item. Guard keeps the download until rejection is confirmed."
+    elif message.startswith("Poll failed") or "HTTP " in message:
+        category, title = "Service", "A service request failed"
+        action = "Check service availability and configured API access. Guard will retry."
+    retry = re.search(r"\bretry_in=(\d+)s\b", reason)
+    attempt = re.search(r"\battempt=(\d+)\b", reason)
+    reason = re.split(r";?\s*retry_in=|;?\s*retry_at=", reason, maxsplit=1)[0].strip(" ;")
+    recovery = re.search(r"\.torrent-guard-[0-9a-f]+", message)
+    return {"category": category, "title": title, "download": private_text(filename_only(download)) if download else "",
+            "filename": private_text(filename), "reason": private_text(compact_paths(reason)), "action": action,
+            "retry_seconds": int(retry[1]) if retry else None, "attempt": int(attempt[1]) if attempt else None,
+            "recovery": recovery[0] if recovery else ""}
 
 class DiagnosticError(Exception):
     """An intentionally public diagnostic without remote response content."""
@@ -109,6 +187,7 @@ class StatusHistory(logging.Handler):
                 decision = next((label for prefix, label in (
                     ("ACCEPT completed ", "Validated"), ("CLEANED ", "Cleaned"),
                     ("ORPHAN removed ", "Orphan file removed"),
+                    ("DELETE requested ", "Deletion requested"), ("LEFTOVER cleanup attempted ", "Leftover cleanup attempted"),
                     ("RETIRED record:", "Record retired"), ("ARCHIVED record", "Record archived"),
                     ("WAIT import ", "Waiting for import"), ("CLEANUP scheduled ", "Cleanup scheduled"),
                     ("REJECT candidate ", "Rejection candidate"), ("DRY RUN:", "Dry run")
@@ -124,7 +203,7 @@ class StatusHistory(logging.Handler):
                                           (record.created, logging.getLevelName(record.levelno), private_text(message)[:2000]))
                     for level in ("WARNING", "ERROR", "CRITICAL"):
                         self.database.execute("DELETE FROM issues WHERE level=? AND rowid NOT IN "
-                                              "(SELECT rowid FROM issues WHERE level=? ORDER BY rowid DESC LIMIT 20)", (level, level))
+                                              "(SELECT rowid FROM issues WHERE level=? ORDER BY rowid DESC LIMIT ?)", (level, level, ISSUE_EVENT_LIMIT))
                 if message.startswith("STATUS "):
                     snapshot = dict(re.findall(r"(\w+)=(\d+)", message))
                     self.database.execute("INSERT OR REPLACE INTO metadata VALUES ('snapshot', ?)",
@@ -256,10 +335,13 @@ def history_data(path: Path, now: float) -> dict:
         issues = []
         # Preserve visibility of the last errors even during a warning burst.
         for condition in ("level='WARNING'", "level IN ('ERROR','CRITICAL')"):
-            issues.extend({"at": at, "level": level, "message": private_text(message)}
-                          for at, level, message in database.execute(
-                              f"SELECT at, level, message FROM issues WHERE {condition} AND at >= ? AND at <= ? ORDER BY rowid DESC LIMIT 4",
-                              (now - ISSUE_WINDOW_SECONDS, now)))
+            for level, message, first, last, count in database.execute(
+                    f"SELECT level, message, min(at), max(at), count(*) FROM issues WHERE {condition} AND at >= ? AND at <= ? "
+                    "GROUP BY level, message ORDER BY max(at) DESC, max(rowid) DESC LIMIT ?",
+                    (now - ISSUE_WINDOW_SECONDS, now, ISSUE_GROUP_LIMIT)):
+                details = issue_details(message)
+                issues.append({"at": last, "first_at": first, "occurrences": count, "level": level,
+                               "message": private_text(compact_paths(message)), **details})
         issues.sort(key=lambda item: item["at"], reverse=True)
         activity = []
         # v1.6 history remains readable before the daemon's additive migration.

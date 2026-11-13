@@ -150,6 +150,10 @@ class RemoteMaintenanceTests(unittest.TestCase):
         self.assertIn("-oStrictHostKeyChecking=yes", command)
         self.assertIn("-oIdentitiesOnly=yes", command)
         self.assertIn("-oBatchMode=yes", command)
+        self.assertEqual(command[:3], ["ssh", "-F", "/dev/null"])
+        self.assertIn("-oControlPath=none", command)
+        self.assertIn("-oIdentityAgent=none", command)
+        self.assertIn("-oUpdateHostKeys=no", command)
         self.assertIn("-oUserKnownHostsFile=/root/.ssh/known_hosts", command)
         self.assertIn("guard-maintenance@docker.example.invalid", command)
 
