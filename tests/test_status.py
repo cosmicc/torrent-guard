@@ -72,7 +72,7 @@ class HistoryTests(unittest.TestCase):
             self.assertNotIn("secret-token", json.dumps(data))
             self.assertNotIn("\x1b", json.dumps(data))
             with sqlite3.connect(path) as database:
-                self.assertEqual(database.execute("SELECT count(*) FROM issues").fetchone()[0], 21)
+                self.assertEqual(database.execute("SELECT count(*) FROM issues").fetchone()[0], 31)
 
     def test_orphan_removal_is_visible_without_counting_as_imported_torrent_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -15,6 +15,9 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
       - name: Syntax check
-        run: python -m py_compile guard.py deletion.py records.py orphans.py maintenance.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
+        run: python -m py_compile guard.py deletion.py records.py orphans.py maintenance.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py scripts/maintenance_install.py scripts/install_maintenance_omv.py scripts/install_maintenance_docker.py
       - name: Validate release metadata
-        run: python scripts/release_notes.py > /dev/null
+        # Host utilities are not installed into the non-root Guard runtime.
+        run: |
+          python -m py_compile scripts/maintenance_uninstall.py scripts/uninstall_maintenance_omv.py scripts/uninstall_maintenance_docker.py
+          python scripts/release_notes.py > /dev/null

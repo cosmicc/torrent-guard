@@ -26,6 +26,21 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
   Never grant Guard Docker socket access or SSH credentials. Root controls run
   independently of Guard dry run. OMV must receive session-matched SSH stop/NFS
   flush acknowledgements before jobs; only its agent writes Guard's local marker.
+- scripts/install_maintenance_omv.py, scripts/install_maintenance_docker.py and
+  scripts/maintenance_install.py — root-only, non-overwriting host installers.
+  Read [installer workflow](docs/maintenance.md#installer-behavior-and-prerequisites)
+  before changes. Preserve all existing files/accounts/permissions; create missing
+  app-owned paths only, verify repeat runs, and report conflicts without repair.
+  Never edit/restart SSH, touch administrator keys/config, enable jobs, or stop
+  containers. Tests must prove unchanged bytes/modes/mtimes on completed reruns.
+  Maintenance SSH ignores normal config/agents/multiplex sockets using the same
+  ssh_command() policy for the installer check and runtime coordinator.
+- scripts/uninstall_maintenance_omv.py, scripts/uninstall_maintenance_docker.py
+  and scripts/maintenance_uninstall.py — explicit maintenance-only reset of
+  current or manually installed v2.1 setup. Read the uninstall section of the
+  maintenance guide. Refuse active/unreadable holds, running jobs, busy locks,
+  enabled coordinator cron entries and unexpected directory contents. Never
+  remove Guard's main SQLite/logs, original SnapRAID scripts or normal SSH keys.
 
 - guard.py — API, polling and journal orchestration:
   - Config, ArrInstance, required, boolean, api_url: environment/config parsing and validation.
@@ -326,6 +341,8 @@ Treat docker compose config output as possibly containing secrets; sanitize befo
 - Test fail-closed behavior on unreachable Arr APIs, incomplete/late move, malformed paths, unknown file types, repeated HTTP errors, journal restarts, and multi-episode partial imports. Assert the ORDER and ABSENCE of destructive calls as well as expected calls.
 - Run: python3 -m unittest discover -s tests -v
 - Run: python3 -m py_compile guard.py deletion.py records.py orphans.py maintenance.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
+- Run: python3 -m py_compile scripts/maintenance_install.py scripts/install_maintenance_omv.py scripts/install_maintenance_docker.py
+- Run: python3 -m py_compile scripts/maintenance_uninstall.py scripts/uninstall_maintenance_omv.py scripts/uninstall_maintenance_docker.py
 - Run: python3 scripts/release_notes.py (validates version consistency and changelog structure without publishing).
 - Run: docker compose config using safe dummy .env values when appropriate; NEVER commit secrets.
 - Update README, INSTALL.md and .env.example as appropriate when operator-facing flags or behavior change. Document state migrations and safety impact.
@@ -410,3 +427,16 @@ on refresh and clamp it when fewer rows remain. Backend and browser both enforce
 the last-24-hour warning/error display window, excluding future events without
 changing rolling metrics or private audit retention. Follow docs/status-web.md
 and reuse the approved palette and spacing; browser-test all navigation states.
+
+### Warning cards and quarantine diagnostics (v2.2)
+
+Use the approved palette. Render ten warning/error groups per page with
+First/Backward/Forward/Last and preserve/clamp page selection on refresh.
+Retain 1,000 events per severity; group exact repeated messages only within the
+last 24 hours and return at most 100 warning plus 100 error groups. Rolling
+counters count emitted events, including repeats; do not rewrite old metrics.
+Structured cards show category, filename, reason, retry and recovery ID using
+textContent, without full filesystem paths. Full audit evidence stays intact.
+Quarantine mismatches remain warnings and keep all identity/unlink gates.
+Reporting which identity fields changed must not authorize cleanup. Routine
+delete requests, successful cleanup attempts and dry-run previews use INFO.

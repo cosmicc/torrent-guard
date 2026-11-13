@@ -44,6 +44,7 @@ let connectionError = false;
 let selectedRecord = null;
 let activeRequestId = null;
 let activityPage = 0;
+let issuesPage = 0;
 const ACTIVITY_PAGE_SIZE = 10;
 const ACTIVITY_LIMIT = 100;
 let actionRefreshTimer = null;
@@ -274,6 +275,42 @@ function renderRecentDownloads(history) {
     : "Recent history unavailable";
 }
 
+function recentIssues(history) {
+  const now = Date.now() / 1000;
+  return (history?.issues || []).filter((issue) => Number.isFinite(issue.at) && issue.at >= now - 24 * 3600 && issue.at <= now);
+}
+
+function renderIssues(history) {
+  const items = recentIssues(history);
+  const pages = Math.max(1, Math.ceil(items.length / ACTIVITY_PAGE_SIZE));
+  issuesPage = Math.max(0, Math.min(issuesPage, pages - 1));
+  $("issues").replaceChildren();
+  for (const issue of items.slice(issuesPage * ACTIVITY_PAGE_SIZE, (issuesPage + 1) * ACTIVITY_PAGE_SIZE)) {
+    const event = node("article", undefined, "event");
+    const head = node("div", undefined, "event-head");
+    head.append(stateText(issue.level, issue.level === "WARNING" ? "warn" : "bad"), stamp(issue.at));
+    event.append(head, node("h3", issue.title || "Operation needs attention", "issue-title"));
+    const fields = node("dl", undefined, "issue-fields");
+    for (const [label, value, color] of [
+      ["Type", issue.category, "issue-category"], ["Download", issue.download, "issue-filename"],
+      ["File", issue.filename, "issue-filename"], ["Reason", issue.reason || issue.message, "issue-reason"],
+      ["Next step", issue.action, "issue-action"], ["Recovery ID", issue.recovery, "issue-recovery"],
+      ["Retry", issue.retry_seconds == null ? null : `${duration(issue.retry_seconds)}${issue.attempt == null ? "" : " · attempt " + issue.attempt}`, "issue-retry"],
+      ["Repeated", issue.occurrences > 1 ? `${issue.occurrences} times · first seen ${fullTimestamp(new Date(issue.first_at * 1000))}` : null, "issue-retry"],
+    ]) {
+      if (value) fields.append(node("dt", label), node("dd", String(value), color));
+    }
+    event.append(fields);
+    $("issues").append(event);
+  }
+  if (!items.length) empty($("issues"), history?.available ? "No warnings or errors recorded in the last 24 hours." : "Warning and error history is not available yet.");
+  $("issues-first").disabled = $("issues-backward").disabled = issuesPage === 0;
+  $("issues-forward").disabled = $("issues-last").disabled = issuesPage === pages - 1;
+  const first = items.length ? issuesPage * ACTIVITY_PAGE_SIZE + 1 : 0;
+  const last = Math.min((issuesPage + 1) * ACTIVITY_PAGE_SIZE, items.length);
+  $("issues-page").textContent = history?.available ? `Page ${issuesPage + 1} of ${pages} · ${first}–${last} of ${items.length} groups` : "Warning history unavailable";
+}
+
 function render(data) {
   current = data;
   renderRecovery(data.record_actions);
@@ -408,26 +445,7 @@ function render(data) {
         .map(([state, count]) => `${state} ${count}`)
         .join(" · ") || "none")
     : "";
-  $("issues").replaceChildren();
-  const issueNow = Date.now() / 1000;
-  const recentIssues = (data.history?.issues || []).filter(
-    (issue) => Number.isFinite(issue.at) && issue.at >= issueNow - 24 * 3600 && issue.at <= issueNow,
-  );
-  for (const issue of recentIssues.slice(0, 8)) {
-    const event = node("article", undefined, "event");
-    const head = node("div", undefined, "event-head");
-    const color = issue.level === "WARNING" ? "warn" : "bad";
-    head.append(stateText(issue.level, color), stamp(issue.at));
-    event.append(head, node("p", issue.message));
-    $("issues").append(event);
-  }
-  if (!$("issues").children.length)
-    empty(
-      $("issues"),
-      data.history?.available
-        ? "No warnings or errors recorded in the last 24 hours."
-        : "Warning and error history is not available yet.",
-    );
+  renderIssues(data.history);
   $("drives").replaceChildren();
   for (const drive of drives) {
     const section = node("div", undefined, "drive");
@@ -561,6 +579,13 @@ for (const [id, destination] of [
   });
 }
 $("refresh").addEventListener("click", refresh);
+for (const [id, destination] of [
+  ["issues-first", () => 0], ["issues-backward", () => issuesPage - 1],
+  ["issues-forward", () => issuesPage + 1],
+  ["issues-last", () => Math.max(0, Math.ceil(recentIssues(current?.history).length / ACTIVITY_PAGE_SIZE) - 1)],
+]) {
+  $(id).addEventListener("click", () => { issuesPage = destination(); renderIssues(current?.history); });
+}
 $("forget-cancel").addEventListener("click", () => $("forget-dialog").close());
 $("forget-confirm").addEventListener("click", forgetRecord);
 render({ ready: false, poll: { healthy: false } });

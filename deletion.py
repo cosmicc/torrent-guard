@@ -292,7 +292,10 @@ class FileVerifier:
                     raise ValueError("source reappeared after quarantine; preserving both objects")
                 if quarantined is not None:
                     if quarantined != item["identity"]:
-                        raise ValueError(f"quarantined object changed; recover manually from {item['quarantine']}/payload")
+                        changes = "; ".join(f"{label}: saved={saved}, observed={current}" for label, saved, current in
+                                            zip(("device", "inode", "size", "mtime_ns"), item["identity"], quarantined)
+                                            if saved != current)
+                        raise ValueError(f"quarantined object changed ({changes}); recover manually from {item['quarantine']}/payload")
                     self.attached(parent, expected)
                     self.attached(quarantine_fd, expected / directory)
                     info = os.stat("payload", dir_fd=quarantine_fd, follow_symlinks=False)

@@ -338,3 +338,15 @@ Guard-stop provenance or manifests. Long-wait metadata records use version-2
 zero-target manifests with explicit timeout proof; retries cannot downgrade to
 an old reason. No payload unlink is authorized by zero-target evidence or old
 stall evidence. All original mount/identity/quarantine constraints remain.
+
+## Quarantine warning details (v2.2)
+
+A quarantined-object mismatch now reports which device/inode/size/modification
+time attributes differ, including saved and observed values in the private
+audit log. The web card shows the original filename, the changed attributes
+and the quarantine recovery ID, without the full path. This is diagnostic only:
+retain the captured payload and journal until the mismatch is understood. The
+check compares filesystem identity/data version; it does not alone prove the
+file contents changed. Filesystem identity behavior and concurrent writes need
+separate investigation on the actual server. Unchanged repeated events are
+grouped on the web page, while counters still include each emitted warning.

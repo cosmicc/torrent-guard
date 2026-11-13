@@ -674,12 +674,12 @@ footer {
   gap: 8px;
   margin-top: 14px;
 }
-#activity-page {
+#activity-page, #issues-page {
   text-align: center;
   flex: 1 1 140px;
 }
 @media (max-width: 600px) {
-  #activity-page {
+  #activity-page, #issues-page {
     order: -1;
     flex-basis: 100%;
   }
@@ -688,3 +688,13 @@ footer {
     padding-inline: 10px;
   }
 }
+
+.issue-title { margin: 10px 0; font-size: 15px; }
+.issue-fields { display: grid; grid-template-columns: minmax(70px, auto) minmax(0, 1fr); gap: 7px 12px; margin: 0; font-size: 13px; }
+.issue-fields dt { color: var(--muted); }
+.issue-fields dd { margin: 0; overflow-wrap: anywhere; }
+.issue-category { color: var(--amber); }
+.issue-filename { color: var(--cyan); }
+.issue-action { color: var(--green); }
+.issue-retry, .issue-recovery { color: var(--purple); }
+.issue-reason { color: var(--text); }

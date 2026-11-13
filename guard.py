@@ -31,7 +31,7 @@ from deletion import FileVerifier, metadata_manifest, validate_metadata_manifest
 
 LOG = logging.getLogger("torrent-guard")
 DISPLAY_TIMEZONE = ZoneInfo("America/New_York")
-VERSION = "2.1"
+VERSION = "2.2"
 METADATA_TIMEOUT_SECONDS = 600
 STALL_TIMEOUTS = {"inactive": 3 * 3600, "unconnected": 30 * 86400}
 SEEDLESS_BANDS = ((0.15, 3 * 3600), (0.50, 3 * 86400), (0.80, 7 * 86400))
@@ -1283,7 +1283,7 @@ class Guard:
             LOG.warning("REJECT candidate [%s] %s category=%r tags=%r reason=%s", app, self.log_context[h], torrent.get("category"), torrent.get("tags"), reason)
         if self.config.dry_run:
             if h not in self.logged_dry:
-                LOG.warning("DRY RUN: would stop, Arr-blocklist and delete torrent + tracked files: %s", self.log_context.get(h, download_context(torrent)))
+                LOG.info("DRY RUN: would stop, Arr-blocklist and delete torrent + tracked files: %s", self.log_context.get(h, download_context(torrent)))
             self.logged_dry.add(h)
         else:
             if kind == "metadata" and metadata_timeout is not None:
@@ -1679,7 +1679,7 @@ class Guard:
                     raise OSError(exc.errno, exc.strerror or str(exc), target) from exc
                 except ValueError as exc:
                     raise ValueError(f"leftover removal failed download={target!r}: {exc}") from exc
-                LOG.warning("LEFTOVER cleanup attempted %s download=%r", self.log_context.get(h), str(PurePosixPath(item["root"]) / item["path"]))
+                LOG.info("LEFTOVER cleanup attempted %s download=%r", self.log_context.get(h), str(PurePosixPath(item["root"]) / item["path"]))
             remaining = self.verifier.remaining(manifest)
         if remaining:
             paths = ", ".join(repr(str(PurePosixPath(item.get("root", "")) / item["path"])) for item in remaining[:4])
@@ -1817,7 +1817,7 @@ class Guard:
                         self._assert_not_saved(h)
                         self.qbit.stop(h)
                     self._request_deletion(h, torrent, now, metadata_only=kind == "metadata", kind=kind)
-                    LOG.warning("DELETE requested [%s] kind=%s %s deleteFiles=true", app, kind, self.log_context[h])
+                    LOG.info("DELETE requested [%s] kind=%s %s deleteFiles=true", app, kind, self.log_context[h])
                     continue
                 if phase == "verify":
                     if torrent is not None:

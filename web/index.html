@@ -84,10 +84,18 @@
         <section class="panel">
           <h2>Warnings &amp; errors</h2>
           <p class="note">
-            Last 24 hours only · latest warnings and errors. Archiving a record
-            clears active work; recent historical events remain until they age out.
+            Last 24 hours · 10 per page · identical events grouped with repeat counts.
+            Up to 100 warning groups and 100 error groups. Counts include repeats;
+            archiving a record does not erase historical events.
           </p>
           <div id="issues"></div>
+          <nav class="activity-pagination" aria-label="Warning and error pages">
+            <button id="issues-first" type="button" aria-label="First warning page" aria-controls="issues" disabled>First</button>
+            <button id="issues-backward" type="button" aria-label="Previous warning page" aria-controls="issues" disabled>Backward</button>
+            <span id="issues-page" class="note" role="status" aria-live="polite">Warning history unavailable</span>
+            <button id="issues-forward" type="button" aria-label="Next warning page" aria-controls="issues" disabled>Forward</button>
+            <button id="issues-last" type="button" aria-label="Last warning page" aria-controls="issues" disabled>Last</button>
+          </nav>
         </section>
         <section class="panel">
           <h2>Drive access</h2>
