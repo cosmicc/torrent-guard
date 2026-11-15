@@ -3,7 +3,7 @@
 Read AGENTS.md, deletion-verification.md and filesystem-retries.md first. This
 workflow covers `save_tagged`, `positive_total_seeders`, `stall_conditions`,
 metadata timers, pending authorization, `removal_reference` and their tests.
-Operator setup is in [INSTALL.md](../INSTALL.md#stalled-download-timeouts).
+Operator setup is in [INSTALL.md](../INSTALL_SUPPLEMENT.md#stalled-download-timeouts).
 
 ## Protection precedence
 

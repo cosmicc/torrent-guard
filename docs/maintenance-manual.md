@@ -1,9 +1,9 @@
 # Manual maintenance setup reference
 
-The preferred setup is the [non-overwriting host installers](maintenance.md#1-prepare-omv).
+The preferred setup is the [master installer on each host](../INSTALL.md).
 This reference is for auditing an existing manual installation and deliberate
-operator-managed upgrades. The installers never run these overwrite/repair
-commands against existing files.
+operator-managed setup. The legacy maintenance-only installers retain their
+non-overwriting verification behavior; the master installer upgrades app-owned code.
 
 ## 1. Install the command on both servers
 

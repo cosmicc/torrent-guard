@@ -290,7 +290,7 @@ class Installer:
             raise InstallError("Root-owned maintenance home/.ssh must permit the SSH user to traverse them; unchanged")
         return shadow[1].startswith("!")
 
-    def docker(self, supplied_key: str | None, state_dir: str | None) -> None:
+    def docker(self, supplied_key: str | None, state_dir: str | None, *, prepare_key: bool = False) -> None:
         """Install restricted SSH access without modifying sshd or administrator keys."""
         self.required(("docker", "ssh-keygen", "sshd", "visudo", "useradd", "getent"))
         if self.existing(self.paths.path(HELPER)):
@@ -332,12 +332,12 @@ class Installer:
             if supplied_key is not None and public_key(supplied_key) != key:
                 raise InstallError("Supplied OMV key differs from existing authorized key; unchanged")
         else:
-            key = public_key(supplied_key or self.ask("Paste the OMV maintenance PUBLIC key: ").strip())
+            key = None if prepare_key and supplied_key is None else public_key(supplied_key or self.ask("Paste the OMV maintenance PUBLIC key: ").strip())
         self.helper()
         hard_locked = self.account()
         self.directory(self.paths.path("/var/lib/torrent-guard-maintenance-agent"), private=True)
         self.json_file(agent_config, expected_config)
-        if not self.existing(authorized):
+        if key is not None and not self.existing(authorized):
             self.file(authorized, (FORCED + key + "\n").encode(), 0o644)
         sudo_file = self.paths.path("/etc/sudoers.d/torrent-guard-maintenance")
         if self.existing(sudo_file):
@@ -364,7 +364,10 @@ class Installer:
         host_public = self.paths.path("/etc/ssh/ssh_host_ed25519_key.pub")
         self.info(host_public)
         self.output("Docker host Ed25519 fingerprint (compare on OMV): " + fingerprint(host_public.read_text().strip()))
-        self.output("Docker setup verified. Rerun the OMV installer for its read-only SSH check. No SSH service restart was performed")
+        if prepare_key:
+            self.output("Media maintenance setup verified. OMV setup will enroll/verify its restricted key. No SSH restart was performed")
+        else:
+            self.output("Docker setup verified. Rerun the OMV installer for its read-only SSH check. No SSH service restart was performed")
 
 
 def main(role: str) -> int:
