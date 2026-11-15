@@ -102,7 +102,7 @@ file. Grant access only to intended download directories using appropriate group
 permissions or ACLs. Do not use root, a Docker socket, extra capabilities, a
 writable root filesystem, or world-writable download permissions as a shortcut.
 Permission failures are reported and remain pending. See the
-[container identity and state migration](../INSTALL.md#container-user-and-permissions)
+[container identity and state migration](../INSTALL_SUPPLEMENT.md#container-user-and-permissions)
 before changing users. Parent-directory write/execute access is required even
 when files are owned by that UID. qBittorrent API deletions use qBittorrent's own
 identity and mount permissions.
@@ -297,7 +297,7 @@ that work rather than being additional downloads.
 
 ## Stalled download failures (v1.5)
 
-See [timeout conditions and timers](../INSTALL.md#stalled-download-timeouts).
+See [timeout conditions and timers](../INSTALL_SUPPLEMENT.md#stalled-download-timeouts).
 Only explicitly media-tagged, unambiguously owned downloads qualify. The additive
 `stalled_wait` table persists observed conditions and Guard-owned stop intent;
 `kind=stalled` follows rejection phases without treating stalled video as malware.

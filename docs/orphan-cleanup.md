@@ -28,7 +28,7 @@ files as unowned. Live torrents of any category/state reserve their content
 directory and known complete/incomplete file variants in the meantime. Existing bad-release and
 metadata/stalled-download rejection rules remain in force; zero-byte metadata
 waits over ten minutes request an Arr replacement before client deletion. Incomplete-download timeouts follow the
-[percentage bands and protection rules](../INSTALL.md#stalled-download-timeouts), with
+[percentage bands and protection rules](../INSTALL_SUPPLEMENT.md#stalled-download-timeouts), with
 80% retention and intentional pause/queue exclusions. An exact save tag protects
 all files still owned by the live tagged torrent; after manual client removal,
 ordinary orphan cleanup may proceed. No permanent ignore is stored. Completed-import and

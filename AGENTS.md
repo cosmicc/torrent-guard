@@ -26,15 +26,26 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
   Never grant Guard Docker socket access or SSH credentials. Root controls run
   independently of Guard dry run. OMV must receive session-matched SSH stop/NFS
   flush acknowledgements before jobs; only its agent writes Guard's local marker.
+- install.py, scripts/host_setup.py, scripts/app_install.py,
+  scripts/enroll_maintenance_key.py, tests/test_host_setup.py — recommended
+  media-first then OMV installation/upgrade. Read INSTALL.md and
+  [installer workflow](docs/maintenance.md#installer-behavior-and-prerequisites).
+  Fast-forward as checkout owner without discarding edits; retain `.env`,
+  existing bind-mounted `/state`, runtime IDs, status port and standard Compose
+  overrides. Upgrade recognized root-owned helper code, never reset journals.
+  Only the dedicated service home's documented legacy ownership/bare-key/lock
+  migrations may be repaired. Do not change normal SSH settings or restart SSH.
+  OMV may use interactive administrator SSH/sudo once to enroll its dedicated
+  public key; never capture/store passwords. Require trusted host pins and
+  session-matched inactive check before enabling OMV's native coordinator job.
+  Preserve original direct job definitions in root-only setup.json and update
+  only the two exact guarded-script jobs plus the unique coordinator. Hold local
+  setup/runtime locks and refuse active maintenance. Guard gets no SSH/Docker access.
 - scripts/install_maintenance_omv.py, scripts/install_maintenance_docker.py and
-  scripts/maintenance_install.py — root-only, non-overwriting host installers.
-  Read [installer workflow](docs/maintenance.md#installer-behavior-and-prerequisites)
-  before changes. Preserve all existing files/accounts/permissions; create missing
-  app-owned paths only, verify repeat runs, and report conflicts without repair.
-  Never edit/restart SSH, touch administrator keys/config, enable jobs, or stop
-  containers. Tests must prove unchanged bytes/modes/mtimes on completed reruns.
-  Maintenance SSH ignores normal config/agents/multiplex sockets using the same
-  ssh_command() policy for the installer check and runtime coordinator.
+  scripts/maintenance_install.py — legacy maintenance-only, non-overwriting
+  installers. Keep their verify-only reruns compatible: unchanged bytes/modes/
+  mtimes, no scheduling or deployment. The new master installer adds upgrade
+  behavior explicitly; do not silently change these legacy entry points.
 - scripts/uninstall_maintenance_omv.py, scripts/uninstall_maintenance_docker.py
   and scripts/maintenance_uninstall.py — explicit maintenance-only reset of
   current or manually installed v2.1 setup. Read the uninstall section of the
@@ -72,7 +83,8 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
 - .env.example — nonsecret examples; real .env MUST stay untracked.
 - .gitignore and .dockerignore — ignore credentials, DBs, logs, caches and build artifacts.
 - README.md — concise user-facing overview and getting started.
-- INSTALL.md — detailed setup, configuration, upgrades and troubleshooting.
+- INSTALL.md — short master guide: clone and run one script on each host, also for upgrades.
+- INSTALL_SUPPLEMENT.md — preserved detailed manual setup, configuration and troubleshooting; keep section links here.
 - CHANGELOG.md, VERSION — version history/version; update together for application releases. Do not maintain RELEASE_NOTES.md or a separate user changelog.
 - scripts/release_notes.py — validate version consistency and extract the current changelog entry for release automation.
 - tests/test_cleanup_safety.py, tests/test_release.py — cleanup retry authorization and release metadata regression tests.
@@ -122,7 +134,7 @@ prior payload, missing counters/API failures retain the torrent for review.
 A v2 zero-payload audit has no filesystem targets and is never accepted by the
 ordinary file verifier or local unlink path. Its CLEANED label reports client
 absence only, explicitly without claiming filesystem absence. Preserve existing
-v1 file evidence, journals and audits. See INSTALL.md and the deletion guide.
+v1 file evidence, journals and audits. See INSTALL_SUPPLEMENT.md and the deletion guide.
 
 ### Removal protection and incomplete-download timeouts (v1.9)
 
@@ -196,7 +208,7 @@ An earlier operator report described successful qBittorrent authentication and f
 
 The current compose.yaml maps:
 
-    /config/torrent-guard:/state
+    ${STATE_HOST_PATH:-/config/torrent-guard}:/state
     host download root:/downloads:ro
 
 The host /config/torrent-guard tree stores the SQLite journal and rotating audit logs: /state/torrent-guard.sqlite3, /state/torrent-guard.log and rotated backups. The image defaults to UID/GID 1000:1000; Compose uses `GUARD_UID`/`GUARD_GID`
@@ -230,9 +242,11 @@ access. Keep job control outside HTTP routes and Guard's daemon.
 
 Compose-only identity controls: `GUARD_UID`, `GUARD_GID` (default `1000`).
 Changing these requires container recreation and host state ownership migration
-while stopped; see INSTALL.md. Keep the image non-root, mounts restricted and
+while stopped; see INSTALL_SUPPLEMENT.md. Keep the image non-root, mounts restricted and
 existing journals intact. qBittorrent API deletion uses qBittorrent's own process
 identity, not Guard's identity.
+
+Compose-only STATE_HOST_PATH preserves the existing state bind during upgrades.
 
 Key variables: QBIT_URL/USERNAME/PASSWORD, SONARR_URL/API_KEY/CATEGORY/TAG, RADARR_URL/API_KEY/CATEGORY/TAG, DOWNLOADS_HOST_PATH, QBIT_DOWNLOAD_ROOT, GUARD_DOWNLOAD_ROOT, QBIT_COMPLETE_DIR, QBIT_INCOMPLETE_DIR, VERIFY_VIDEO_CONTENT, COMPLETED_SETTLE_SECONDS, FFPROBE_TIMEOUT_SECONDS, POLL_SECONDS, MAX_AGE_HOURS, REJECT_NO_VIDEO, IMPORT_GRACE_MINUTES, IMPORT_CHECK_SECONDS, HISTORY_LOOKBACK_DAYS, DRY_RUN, STATE_DB, LOG_FILE, LOG_LEVEL, LOG_MAX_BYTES, LOG_BACKUP_COUNT, LOG_COLOR, HEALTHCHECK_MAX_AGE_SECONDS, STATUS_ENABLED, STATUS_PORT, STATUS_ALLOWED_CLIENTS, STATUS_PUBLIC_ORIGIN, ORPHAN_CLEANUP, and Compose-only STATUS_BIND_ADDRESS/STATUS_HOST_PORT.
 
@@ -301,7 +315,7 @@ inconclusive. Refresh state each scan; starting or resuming ends this exception.
 `LOG_COLOR=always` is the default for live Docker logs; `auto` requires a TTY
 and `never` disables colors. Keep the persistent audit file plain text, escape
 external terminal control characters in both outputs, and preserve readable
-decision labels without color. Use the approved palette linked above: bright ANSI 92/96/93/91/95 for success/activity/waiting/errors/dry runs. The SSH viewer colors headings only, sanitizes external controls and preserves details without API or journal access. Keep it standard-library-only and read-only; document host and container commands in INSTALL.md.
+decision labels without color. Use the approved palette linked above: bright ANSI 92/96/93/91/95 for success/activity/waiting/errors/dry runs. The SSH viewer colors headings only, sanitizes external controls and preserves details without API or journal access. Keep it standard-library-only and read-only; document host and container commands in INSTALL_SUPPLEMENT.md.
 
 The daemon writes `/tmp/torrent-guard-heartbeat` atomically using monotonic time
 only after `Guard.poll()` returns, including idle and dry-run polls. Clear the
@@ -317,7 +331,7 @@ work. The periodic INFO STATUS log uses existing observations only; background w
 `HEALTHCHECK_MAX_AGE_SECONDS`; document tuning for long polls. Handled Arr or
 per-torrent failures may coexist with healthy polling; health is not dependency
 readiness or proof of deletion. Unhealthy status alone does not trigger a Docker
-restart. See INSTALL.md for monitoring commands and operational limits.
+restart. See INSTALL_SUPPLEMENT.md for monitoring commands and operational limits.
 
 DRY_RUN=true means no stop, Arr blocklist or payload deletion. Verified record retirement, explicit archive-only requests, path observations and their audit bookkeeping may persist during dry run; ordinary cleanup scheduling/phase advancement and retry updates remain disabled. Changing environment values requires container recreation, not merely restart:
 
@@ -343,6 +357,7 @@ Treat docker compose config output as possibly containing secrets; sanitize befo
 - Run: python3 -m py_compile guard.py deletion.py records.py orphans.py maintenance.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
 - Run: python3 -m py_compile scripts/maintenance_install.py scripts/install_maintenance_omv.py scripts/install_maintenance_docker.py
 - Run: python3 -m py_compile scripts/maintenance_uninstall.py scripts/uninstall_maintenance_omv.py scripts/uninstall_maintenance_docker.py
+- Run: python3 -m py_compile install.py scripts/host_setup.py scripts/app_install.py scripts/enroll_maintenance_key.py
 - Run: python3 scripts/release_notes.py (validates version consistency and changelog structure without publishing).
 - Run: docker compose config using safe dummy .env values when appropriate; NEVER commit secrets.
 - Update README, INSTALL.md and .env.example as appropriate when operator-facing flags or behavior change. Document state migrations and safety impact.

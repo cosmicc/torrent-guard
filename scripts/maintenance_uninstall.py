@@ -246,9 +246,11 @@ class Uninstaller:
                          key, Path(str(key) + ".pub"), pins, config}:
                 self.add_file(path)
         self.add_file(self.paths.path(HELPER))
-        self.directory(private, {"state.json", "lock"})
+        self.directory(private, {"state.json", "lock", "setup.json"} if role == "omv" else {"state.json", "lock"})
         self.add_file(private / "state.json")
         self.add_file(private / "lock")
+        if role == "omv":
+            self.add_file(private / "setup.json")
         self.idle(marker, journals)
         return marker, journals
 

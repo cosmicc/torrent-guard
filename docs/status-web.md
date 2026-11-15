@@ -2,7 +2,7 @@
 
 Read `AGENTS.md` first. This focused workflow covers `status_report.py`,
 `status_web.py`, `web/`, Docker packaging and `tests/test_status.py`. Operator
-setup is in [INSTALL.md](../INSTALL.md#web-status-page).
+setup is in [INSTALL.md](../INSTALL_SUPPLEMENT.md#web-status-page).
 
 ## Isolation and data
 

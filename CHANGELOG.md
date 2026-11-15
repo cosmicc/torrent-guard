@@ -3,6 +3,31 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 2.3 - 11.15.2026
+
+### Added
+
+- One root installer with media and OMV modes for initial installation and
+  future upgrades, including one-time interactive SSH key enrollment and
+  automatic OMV coordinator scheduling.
+- Recovery of an existing Guard container's settings, state bind, runtime IDs,
+  status port and standard cleanup overrides when using a new checkout.
+
+### Changed
+
+- Replace the long installation guide with a short media-first, two-server
+  process; retain the detailed manual reference in INSTALL_SUPPLEMENT.md.
+- Update recognized installed maintenance helpers while preserving credentials,
+  dedicated keys, journals and unrelated SSH connections. Record original
+  guarded-script jobs before disabling their direct schedules through OMV.
+
+### Fixed
+
+- Remember cleanup Compose overrides for subsequent upgrades, preserve existing
+  state mounts, and refuse upgrades during active maintenance or unsafe conflicts.
+- Migrate known manual-install service-home restrictions and non-PAM account
+  locks without modifying administrator accounts or SSH service configuration.
+
 ## 2.2 - 11.13.2026
 
 ### Added

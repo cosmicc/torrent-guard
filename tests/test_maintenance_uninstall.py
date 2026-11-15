@@ -56,6 +56,15 @@ class UninstallTests(installer_tests.InstallerFixture):
         (private / "lock").touch()
         return private
 
+    def test_master_installer_schedule_receipt_is_removed(self):
+        self.install_omv()
+        private = self.inactive_journal("omv")
+        (private / "setup.json").write_text('{"schema": 1, "original_jobs": []}')
+        self.apply("omv")
+        self.assertFalse(private.exists())
+        for name, contents in self.normal.items():
+            self.assertEqual(self.snapshot(self.paths.key.parent)[name], contents)
+
     def test_omv_uninstall_then_fresh_install_has_a_new_key(self):
         self.install_omv()
         original = self.paths.key.read_bytes()
