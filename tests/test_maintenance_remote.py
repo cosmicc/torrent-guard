@@ -83,45 +83,119 @@ class RemoteMaintenanceTests(unittest.TestCase):
     def at(self, day, hour, minute=0):
         return datetime(2026, 11, day, hour, minute, tzinfo=ZONE)
 
-    def test_two_hosts_sunday_gap_jobs_and_independent_journals(self):
-        self.controller.tick(self.at(8, 2))
+    def test_two_hosts_monday_jobs_run_consecutively_with_independent_journals(self):
+        self.controller.tick(self.at(9, 2))
         self.assertFalse(self.jobs)
         self.assertFalse((self.omv / "maintenance.json").exists())
         self.assertEqual(json.loads((self.agent / "state.json").read_text())["role"], "docker")
         self.assertEqual(json.loads((self.omv / "state.json").read_text())["role"], "omv")
-        self.controller.tick(self.at(8, 2, 1))
-        self.assertEqual(self.jobs, [self.paths["sync"]])
         self.controller = RemoteCoordinator(self.omv, self.connection)
-        self.controller.tick(self.at(8, 4, 29))
-        self.assertEqual(len(self.jobs), 1)
-        self.assertFalse(any(row["State"]["Running"] for row in self.rows.values()))
-        self.controller.tick(self.at(8, 4, 30))
+        self.controller.tick(self.at(9, 2, 1))
         self.assertEqual(self.jobs, [self.paths["sync"], self.paths["scrub"]])
         self.assertFalse(self.controller.state["active"])
         self.assertFalse(json.loads(self.marker.read_text())["active"])
         self.assertTrue(all(row["State"]["Running"] for row in self.rows.values()))
+        actions = [command[-1].split()[0] for command in self.ssh]
+        self.assertEqual(actions[-3:], ["sync", "scrub", "finish"])
+        self.controller = RemoteCoordinator(self.omv, self.connection)
+        self.controller.tick(self.at(9, 3))
+        self.assertEqual(len(self.jobs), 2)
+
+    def test_sunday_restores_after_sync_without_scrub(self):
+        self.controller.tick(self.at(8, 2, 1))
+        self.assertEqual(self.jobs, [self.paths["sync"]])
+        self.assertFalse(self.controller.state["active"])
+        self.assertFalse(any(command[-1].startswith("scrub ") for command in self.ssh))
+        self.assertTrue(all(row["State"]["Running"] for row in self.rows.values()))
+
+    def test_failed_monday_sync_never_starts_scrub_or_restores_apps(self):
+        self.returncode = 23
+        with self.assertRaises(MaintenanceError):
+            self.controller.tick(self.at(9, 2, 1))
+        self.assertEqual(self.jobs, [self.paths["sync"]])
+        self.assertEqual(self.controller.state["jobs"], {"sync": "failed", "scrub": "pending"})
+        self.assertFalse(any(command[-1].startswith(("scrub ", "finish ")) for command in self.ssh))
+        self.assertFalse(any(row["State"]["Running"] for row in self.rows.values()))
+        self.assertTrue(json.loads(self.marker.read_text())["active"])
+
+    def test_lost_monday_finish_reply_does_not_repeat_either_job_or_restop_apps(self):
+        self.lose_finish = True
+        with self.assertRaises(MaintenanceError):
+            self.controller.tick(self.at(9, 2, 1))
+        self.assertEqual(self.jobs, [self.paths["sync"], self.paths["scrub"]])
+        self.assertFalse(json.loads(self.marker.read_text())["active"])
+        calls = len(self.calls)
+        self.controller = RemoteCoordinator(self.omv, self.connection)
+        self.controller.tick(self.at(9, 8))
+        self.assertFalse(self.controller.state["active"])
+        self.assertEqual(len(self.jobs), 2)
+        self.assertEqual(len(self.calls), calls)
+        self.assertTrue(self.ssh[-1][-1].startswith("finish "))
+
+    def test_monday_scrub_confirmation_failure_holds_then_resumes_without_sync_repeat(self):
+        process = self.process
+        def lose_scrub_ack(command, **kwargs):
+            if command[0] == "ssh" and command[-1].startswith("scrub "):
+                raise subprocess.CalledProcessError(255, command)
+            return process(command, **kwargs)
+        with patch("maintenance.subprocess.run", side_effect=lose_scrub_ack):
+            with self.assertRaises(MaintenanceError):
+                self.controller.tick(self.at(9, 2, 1))
+        self.assertEqual(self.jobs, [self.paths["sync"]])
+        self.assertTrue(json.loads(self.marker.read_text())["active"])
+        self.assertFalse(any(row["State"]["Running"] for row in self.rows.values()))
+        self.assertFalse(any(command[-1].startswith("finish ") for command in self.ssh))
+        self.controller = RemoteCoordinator(self.omv, self.connection)
+        self.controller.tick(self.at(9, 2, 2))
+        self.assertEqual(self.jobs, [self.paths["sync"], self.paths["scrub"]])
+        self.assertFalse(self.controller.state["active"])
+
+    def test_failed_monday_scrub_stays_held_and_retry_preserves_completed_sync(self):
+        process = self.process
+        def fail_scrub(command, **kwargs):
+            if command[0] == self.paths["scrub"]:
+                self.returncode = 23
+            return process(command, **kwargs)
+        with patch("maintenance.subprocess.run", side_effect=fail_scrub):
+            with self.assertRaises(MaintenanceError):
+                self.controller.tick(self.at(9, 2, 1))
+        self.assertEqual(self.controller.state["jobs"], {"sync": "complete", "scrub": "failed"})
+        self.controller = RemoteCoordinator(self.omv, self.connection)
+        with self.assertRaises(MaintenanceError):
+            self.controller.tick(self.at(9, 5))
+        self.assertEqual(len(self.jobs), 2)
+        self.assertTrue(json.loads(self.marker.read_text())["active"])
+        self.assertFalse(any(row["State"]["Running"] for row in self.rows.values()))
+        # Model the existing explicit retry after the operator confirms the job stopped.
+        self.controller.state["jobs"]["scrub"] = "pending"
+        self.controller.save()
+        self.returncode = 0
+        self.controller = RemoteCoordinator(self.omv, self.connection)
+        self.controller.tick(self.at(10, 7))
+        self.assertEqual(self.jobs, [self.paths["sync"], self.paths["scrub"], self.paths["scrub"]])
+        self.assertFalse(self.controller.state["active"])
 
     def test_ssh_failure_withholds_jobs_then_recovers_without_new_session(self):
         self.fail_ssh = True
         with self.assertRaises(MaintenanceError):
-            self.controller.tick(self.at(9, 2, 1))
+            self.controller.tick(self.at(10, 2, 1))
         session = self.controller.state["session"]
         self.assertFalse(self.jobs)
         self.fail_ssh = False
         self.controller = RemoteCoordinator(self.omv, self.connection)
-        self.controller.tick(self.at(9, 2, 2))
+        self.controller.tick(self.at(10, 2, 2))
         self.assertEqual(self.controller.state["session"], session)
         self.assertEqual(self.jobs, [self.paths["sync"]])
 
     def test_lost_finish_reply_retries_finish_without_restopping_or_rerunning_jobs(self):
         self.lose_finish = True
         with self.assertRaises(MaintenanceError):
-            self.controller.tick(self.at(9, 2, 1))
+            self.controller.tick(self.at(10, 2, 1))
         self.assertTrue(self.controller.state["active"])
         self.assertFalse(json.loads(self.marker.read_text())["active"])
         calls = len(self.calls)
         self.controller = RemoteCoordinator(self.omv, self.connection)
-        self.controller.tick(self.at(9, 8))
+        self.controller.tick(self.at(10, 8))
         self.assertFalse(self.controller.state["active"])
         self.assertEqual(len(self.jobs), 1)
         self.assertEqual(len(self.calls), calls)
@@ -130,9 +204,9 @@ class RemoteMaintenanceTests(unittest.TestCase):
     def test_failed_omv_job_never_requests_finish(self):
         self.returncode = 1
         with self.assertRaises(MaintenanceError):
-            self.controller.tick(self.at(9, 2, 1))
+            self.controller.tick(self.at(10, 2, 1))
         with self.assertRaises(MaintenanceError):
-            self.controller.tick(self.at(9, 9))
+            self.controller.tick(self.at(10, 9))
         self.assertEqual(len(self.jobs), 1)
         self.assertFalse(any(command[-1].startswith("finish ") for command in self.ssh))
         self.assertTrue(json.loads(self.marker.read_text())["active"])
@@ -141,11 +215,11 @@ class RemoteMaintenanceTests(unittest.TestCase):
         for reply in ({"session": "0" * 32}, {"ok": False}, {"active": False}, {"active": 1}):
             self.session_reply = reply
             with self.assertRaises(MaintenanceError):
-                self.controller.tick(self.at(9, 2, 1))
+                self.controller.tick(self.at(10, 2, 1))
         self.assertFalse(self.jobs)
 
     def test_strict_ssh_options_and_no_docker_host_in_source_defaults(self):
-        self.controller.tick(self.at(9, 2))
+        self.controller.tick(self.at(10, 2))
         command = self.ssh[0]
         self.assertIn("-oStrictHostKeyChecking=yes", command)
         self.assertIn("-oIdentitiesOnly=yes", command)
@@ -163,13 +237,13 @@ class RemoteMaintenanceTests(unittest.TestCase):
             with self.assertRaises((MaintenanceError, ValueError)):
                 agent_request(value, self.agent, self.marker)
         self.assertFalse(self.calls)
-        self.controller.tick(self.at(9, 2))
+        self.controller.tick(self.at(10, 2))
         with self.assertRaises(MaintenanceError):
             agent_request("finish " + "f" * 32, self.agent, self.marker)
         self.assertTrue(json.loads(self.marker.read_text())["active"])
 
     def test_completed_agent_session_cannot_be_reopened(self):
-        self.controller.tick(self.at(9, 2, 1))
+        self.controller.tick(self.at(10, 2, 1))
         session = self.controller.state["session"]
         with self.assertRaises(MaintenanceError):
             agent_request("begin " + session, self.agent, self.marker)

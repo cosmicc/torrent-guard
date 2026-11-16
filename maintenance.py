@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 ZONE = ZoneInfo("America/New_York")
 CONTAINERS = ("sonarr", "radarr")
+SCRUB_WEEKDAY = 0  # Monday in datetime.weekday(); applies to newly prepared sessions.
 JOBS = {"sync": "/usr/local/sbin/snapraid-guarded-sync",
         "scrub": "/usr/local/sbin/snapraid-guarded-scrub"}
 DEFAULT_STATUS = Path("/config/torrent-guard/maintenance.json")
@@ -84,7 +85,7 @@ class MaintenanceError(RuntimeError):
 
 
 class Coordinator:
-    """Run daily sync and Sunday scrub without overlapping media imports."""
+    """Run daily sync and an immediate Monday scrub without overlapping imports."""
 
     def __init__(self, directory: Path, status_file: Path):
         self.directory = directory
@@ -155,7 +156,7 @@ class Coordinator:
         self.state = {"schema": 1, "date": now.date().isoformat(), "active": True,
                       "containers": containers, "jobs": {"sync": "pending"},
                       "detail": "Preparing maintenance; stopping Sonarr and Radarr"}
-        if now.weekday() == 6:
+        if now.weekday() == SCRUB_WEEKDAY:
             self.state["jobs"]["scrub"] = "pending"
         if session is not None:
             # Only OMV tracks job execution; the agent owns container recovery.
@@ -216,8 +217,7 @@ class Coordinator:
         self.save()
 
     def tick(self, now: datetime | None = None) -> None:
-        """Reconcile one schedule tick; hold through overruns and Sunday job gaps."""
-        live_clock = now is None
+        """Run the saved job plan sequentially, retaining the hold through overruns."""
         now = (now or datetime.now(ZONE)).astimezone(ZONE)
         if self.state:
             # Repair a publication interrupted after its private journal commit.
@@ -236,16 +236,15 @@ class Coordinator:
         old_date = self.state["date"] != now.date().isoformat()
         if jobs["sync"] == "pending" and (old_date or (now.hour, now.minute) >= (2, 1)):
             self.run_job("sync")
-        # Re-read local time after long syncs, including runs past 06:00.
-        current = datetime.now(ZONE) if live_clock else now
-        if (jobs.get("scrub") == "pending" and jobs["sync"] == "complete"
-                and (self.state["date"] != current.date().isoformat()
-                     or (current.hour, current.minute) >= (4, 30))):
+        # The persisted plan belongs to the session's start date. A Monday
+        # scrub follows successful sync in this same tick, even after an overrun
+        # into another day. Existing journal plans remain intact across upgrades.
+        if jobs.get("scrub") == "pending" and jobs["sync"] == "complete":
             self.run_job("scrub")
         if all(value == "complete" for value in jobs.values()):
             self.restore()
         else:
-            self.state["detail"] = "Maintenance active; waiting for " + ("Sunday 04:30 scrub" if jobs["sync"] == "complete" else "02:01 sync")
+            self.state["detail"] = "Maintenance active; waiting for 02:01 sync"
             self.save()
 
 
@@ -313,7 +312,7 @@ class RemoteCoordinator(Coordinator):
         self.state = {"schema": 1, "role": "omv", "date": now.date().isoformat(), "active": True,
                       "session": uuid.uuid4().hex, "containers": {}, "jobs": {"sync": "pending"},
                       "detail": "Waiting for Docker-host stop confirmation"}
-        if now.weekday() == 6:
+        if now.weekday() == SCRUB_WEEKDAY:
             self.state["jobs"]["scrub"] = "pending"
         self.save()
 

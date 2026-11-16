@@ -35,12 +35,17 @@ sudo python3 install.py omv
 First setup asks for the media host address, SSH port, its trusted fingerprint,
 and a one-time administrator SSH login if key enrollment is needed. SSH/sudo may
 ask for your password; it is never saved. No manual key copying is required.
-Normal administrator SSH settings and connections remain unchanged.
+Normal administrator SSH settings and connections remain unchanged. Each prompt
+explains where to find its answer. For the fingerprint, run
+`sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256` in a trusted
+media-host session and paste only its `SHA256:...` value into the OMV prompt.
 
 The installer verifies restricted access, disables the two direct guarded-script
 jobs, and enables one coordinated OMV job. Sonarr/Radarr stop at 2am Eastern
-(with daylight saving time), stay stopped between Sunday jobs, and resume after
-the daily sync and, on Sundays, the 4:30am scrub succeed. qBittorrent keeps running.
+(with daylight saving time). Daily sync starts at 2:01am; on Mondays, scrub
+starts immediately after sync succeeds. The apps stay stopped through both
+Monday jobs and resume afterward; every other day they resume after sync.
+qBittorrent keeps running.
 **No further scheduling or installer pass is needed.**
 
 ## Future upgrades

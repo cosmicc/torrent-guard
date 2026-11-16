@@ -1,6 +1,6 @@
 # Installation supplement: manual setup and operations
 
-For daily sync and Sunday scrub on a separate OMV/NFS server with Sonarr/Radarr
+For daily sync and immediate Monday scrub on a separate OMV/NFS server with Sonarr/Radarr
 stopped on the Docker server, see [OMV/SnapRAID maintenance](docs/maintenance.md).
 Restricted SSH coordinates the hosts; one OMV job replaces the two direct
 SnapRAID scheduled jobs. qBittorrent remains running.
@@ -11,7 +11,7 @@ see the [maintenance reference](docs/maintenance.md).
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v2.3** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
+**v2.4** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
 
 Torrent Guard is a background service that examines new and completed movie/TV torrents and cleans up imported releases. It uses **qBittorrent's Web API** and **Sonarr/Radarr's v3 APIs**; no qBittorrent “Run external program on torrent completion” hook is required.
 
@@ -891,6 +891,11 @@ recreated. A bounded health wait reports unsuccessful startup.
 ### SSH enrollment and schedules
 
 Run media setup first and retain its displayed SHA256 Ed25519 host fingerprint.
+All installer questions explain the source server/app, the command or settings
+page to find the value, and what to paste. The fingerprint prompt directs you to
+run `sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256` on the media
+host through its local console or an already trusted administrator SSH session.
+Copy only the `SHA256:...` token from that command into OMV.
 OMV asks you to match it before trusting a new host key. A changed existing pin
 is refused. During first enrollment, the supplied administrator username uses
 normal default SSH identities/agent or password authentication, with config and
@@ -903,10 +908,14 @@ The account never joins Docker's group or receives general sudo access.
 OMV disables scheduled jobs whose command is exactly either guarded script path
 without arguments. It creates/reuses one root every-minute coordinator job and
 redeploys OMV's generated cron configuration. Unrelated jobs are unchanged.
+For a new coordinator, setup submits OMV’s native new-object identifier and
+verifies the assigned UUID while the job is disabled, before changing direct
+schedules. Existing IDs are used only to update existing jobs.
 An original-job recovery receipt is kept at
 `/var/lib/torrent-guard-maintenance/setup.json` (root-only). Custom wrapped commands,
 duplicate coordinator jobs and different existing keys stop installation for
-review. If setup is interrupted, rerun the same command; the receipt preserves
+review. A failure names the operation that stopped; some configuration may already have
+changed. If setup is interrupted, rerun the same command; the receipt preserves
 the original job definitions. Confirm the coordinated job is enabled and direct
 script jobs disabled in OMV before leaving a failed deployment unattended.
 
@@ -918,3 +927,38 @@ Disable the coordinator first; uninstall also removes its setup receipt, while
 leaving native OMV jobs untouched. Keep a copy of the receipt if you intend to
 restore the original direct schedules manually. A later master install reuses a
 matching disabled coordinator job.
+
+
+### v2.3 OMV coordinator creation failure
+
+If both `omv-confdbadm read conf.system.cron.job` and
+`omv-confdbadm read --defaults conf.system.cron.job` succeed but v2.3 setup fails
+at a database update, its new coordinator may have been given an invented UUID.
+OMV interprets a real UUID as an existing record; only its defaults' special
+new-object identifier requests creation. The next installer creates disabled,
+reads back OMV's assigned ID, and migrates direct schedules afterward.
+
+For v2.3 recovery, create one disabled root every-minute coordinator through
+OMV's native new-object defaults (or its Scheduled Jobs UI), with the command
+`/usr/local/sbin/torrent-guard-maintenance tick`. Then rerun the OMV installer:
+it recognizes the existing UUID, preserves its original-job receipt and handles
+the remaining migration and cron deployment. Creating the disabled entry does
+not start SnapRAID or enable a job. Do not replace configuration XML manually,
+reset journals or remove the original guarded scripts to work around this error.
+
+
+### Monday scrub schedule
+
+The coordinator stops Sonarr/Radarr at 02:00 Eastern and starts daily sync at
+02:01. On Monday, scrub starts immediately after successful sync in the same
+coordinator invocation; apps remain stopped until both jobs succeed. On Tuesday
+through Sunday, apps resume after sync succeeds. There is no 04:30 scrub delay.
+Eastern Time follows daylight saving time automatically. A Monday session that
+overruns into Tuesday keeps its saved scrub requirement; failed jobs keep the
+hold until recovery. Completed jobs are not repeated when retrying a session.
+
+Upgrade the installed helpers on both hosts using the normal master installers
+outside active maintenance. Keep the existing every-minute OMV coordinator job
+and both journals; do not add a separate Monday scrub job. New sessions use the
+new schedule, while an existing journal's planned/completed jobs are preserved.
+See the [maintenance schedule](docs/maintenance.md#schedule).

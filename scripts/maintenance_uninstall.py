@@ -18,8 +18,10 @@ import sys
 from typing import Callable
 
 if __package__:
+    from .install_prompts import ask_with_help
     from .maintenance_install import HELPER, USER, InstallError, Installer, Paths
 else:
+    from install_prompts import ask_with_help
     from maintenance_install import HELPER, USER, InstallError, Installer, Paths
 
 
@@ -334,7 +336,7 @@ def main(role: str) -> int:
             print("  dedicated group: " + USER)
         if args.dry_run:
             return 0
-        if not args.yes and input("Remove this maintenance setup? [y/N] ").strip().lower() != "y":
+        if not args.yes and ask_with_help("UNINSTALL", "Remove this maintenance setup? [y/N]: ", read=input, output=print).strip().lower() != "y":
             print("Nothing removed")
             return 0
         with uninstaller.locks(journals):

@@ -65,85 +65,128 @@ class MaintenanceTests(unittest.TestCase):
         self.controller.docker = self.docker
 
     def test_weekday_stops_at_two_then_runs_sync_and_restores_early(self):
-        self.tick(9, 1, 59)
+        self.tick(10, 1, 59)
         self.assertFalse(self.calls)
-        self.tick(9, 2)
+        self.tick(10, 2)
         self.assertTrue(read_maintenance(self.root / "db")["active"])
         self.assertFalse(any(row["State"]["Running"] for row in self.rows.values()))
         self.process.assert_not_called()
-        self.tick(9, 2, 1)
+        self.tick(10, 2, 1)
         self.process.assert_called_once_with([str(self.root / "sync")], check=False)
         self.assertFalse(self.controller.state["active"])
         self.assertTrue(all(row["State"]["Running"] for row in self.rows.values()))
         self.assertLess(self.calls.index(("update", "--restart=no", "sonarr-id")),
                         self.calls.index(("stop", "--timeout=120", "sonarr-id")))
         self.assertIn(("update", "--restart=unless-stopped", "sonarr-id"), self.calls)
-        self.tick(9, 4, 30)
+        self.tick(10, 4, 30)
         self.assertEqual(self.process.call_count, 1)
 
-    def test_sunday_holds_between_scripts_and_survives_restart(self):
-        self.tick(8, 2, 1)
-        self.assertTrue(self.controller.state["active"])
-        self.assertEqual(self.controller.state["jobs"], {"sync": "complete", "scrub": "pending"})
+    def test_monday_runs_sync_then_scrub_in_one_tick_before_restoring(self):
+        events = []
+        def run_job(command, **kwargs):
+            self.assertTrue(self.controller.state["active"])
+            self.assertFalse(any(row["State"]["Running"] for row in self.rows.values()))
+            events.append(Path(command[0]).name)
+            return subprocess.CompletedProcess(command, 0)
+        def docker(*args):
+            if args[0] == "start":
+                events.append("start " + args[-1])
+            return self.docker(*args)
+        self.process.side_effect = run_job
+        self.controller.docker = docker
+        self.tick(9, 2, 1)
+        self.assertEqual(events, ["sync", "scrub", "start sonarr-id", "start radarr-id"])
+        self.assertEqual(self.controller.state["jobs"], {"sync": "complete", "scrub": "complete"})
+        self.assertFalse(self.controller.state["active"])
+        self.assertTrue(all(row["State"]["Running"] for row in self.rows.values()))
+
+    def test_monday_plan_survives_restart_before_sync(self):
+        self.tick(9, 2)
+        self.assertEqual(self.controller.state["jobs"], {"sync": "pending", "scrub": "pending"})
+        self.process.assert_not_called()
         self.reload()
-        self.tick(8, 4, 29)
-        self.assertEqual(self.process.call_count, 1)
-        self.assertFalse(any(row["State"]["Running"] for row in self.rows.values()))
-        self.tick(8, 4, 30)
-        self.assertEqual(self.process.call_args.args[0], [str(self.root / "scrub")])
+        self.tick(9, 2, 1)
+        self.assertEqual([call.args[0] for call in self.process.call_args_list],
+                         [[str(self.root / "sync")], [str(self.root / "scrub")]])
         self.assertFalse(self.controller.state["active"])
 
-    def test_overrun_past_six_does_not_expire_maintenance(self):
-        self.tick(8, 2, 1)
+    def test_sunday_and_other_non_monday_days_run_only_sync(self):
+        for day in (8, 10, 11, 12, 13, 14, 15):
+            with self.subTest(day=day):
+                self.process.reset_mock()
+                self.tick(day, 2, 1)
+                self.process.assert_called_once_with([str(self.root / "sync")], check=False)
+                self.assertEqual(self.controller.state["jobs"], {"sync": "complete"})
+                self.assertFalse(self.controller.state["active"])
+
+    def test_overrun_past_six_does_not_expire_monday_maintenance(self):
+        self.tick(9, 2)
         self.reload()
-        self.tick(8, 8)
+        self.tick(9, 8)
         self.assertEqual(self.process.call_count, 2)
         self.assertFalse(self.controller.state["active"])
 
-    def test_live_clock_is_refreshed_after_long_sunday_sync(self):
+    def test_monday_plan_keeps_scrub_when_sync_finishes_on_tuesday(self):
         clock = Mock()
-        clock.now.side_effect = [self.at(8, 2, 1), self.at(8, 7)]
+        clock.now.return_value = self.at(9, 2, 1)
+        def run_job(command, **kwargs):
+            self.assertFalse(any(row["State"]["Running"] for row in self.rows.values()))
+            if command[0] == str(self.root / "sync"):
+                clock.now.return_value = self.at(10, 7)
+            return subprocess.CompletedProcess(command, 0)
+        self.process.side_effect = run_job
         with patch("maintenance.datetime", clock):
             self.controller.tick()
         self.assertEqual(self.process.call_count, 2)
+        self.assertEqual(self.controller.state["date"], "2026-11-09")
+        self.assertEqual(self.process.call_args.args[0], [str(self.root / "scrub")])
+        self.assertFalse(self.controller.state["active"])
+
+    def test_existing_sunday_journal_finishes_recorded_scrub_without_a_time_gap(self):
+        self.controller.prepare(self.at(8, 2))
+        self.controller.state["jobs"] = {"sync": "complete", "scrub": "pending"}
+        self.controller.save()
+        self.reload()
+        self.tick(8, 2, 2)
+        self.process.assert_called_once_with([str(self.root / "scrub")], check=False)
         self.assertFalse(self.controller.state["active"])
 
     def test_failed_job_keeps_apps_stopped_and_is_not_automatically_retried(self):
         self.process.return_value = subprocess.CompletedProcess([], 23)
         with self.assertRaises(MaintenanceError):
-            self.tick(9, 2, 1)
+            self.tick(10, 2, 1)
         self.reload()
         with self.assertRaises(MaintenanceError):
-            self.tick(9, 9)
+            self.tick(10, 9)
         self.assertEqual(self.process.call_count, 1)
         self.assertTrue(self.controller.state["active"])
         self.assertFalse(any(call[0] == "start" for call in self.calls))
 
     def test_interrupted_job_is_held_without_starting_another_copy(self):
-        self.tick(9, 2)
+        self.tick(10, 2)
         self.controller.state["jobs"]["sync"] = "running"
         self.controller.save()
         self.reload()
         with self.assertRaises(MaintenanceError):
-            self.tick(9, 7)
+            self.tick(10, 7)
         self.process.assert_not_called()
 
     def test_previously_stopped_container_is_not_started(self):
         self.rows["radarr"]["State"]["Running"] = False
-        self.tick(9, 2, 1)
+        self.tick(10, 2, 1)
         self.assertNotIn(("start", "radarr-id"), self.calls)
         self.assertFalse(self.rows["radarr"]["State"]["Running"])
 
     def test_container_replacement_blocks_job_and_restore(self):
-        self.tick(9, 2)
+        self.tick(10, 2)
         self.rows["sonarr"]["Id"] = "replacement-id"
         with self.assertRaises(MaintenanceError):
-            self.tick(9, 2, 1)
+            self.tick(10, 2, 1)
         self.process.assert_not_called()
         self.assertTrue(self.controller.state["active"])
 
     def test_stop_failure_never_runs_job(self):
-        self.controller.prepare(self.at(9, 2))
+        self.controller.prepare(self.at(10, 2))
 
         def fail_stop(*args):
             if args[0] == "stop":
@@ -152,7 +195,7 @@ class MaintenanceTests(unittest.TestCase):
 
         self.controller.docker = fail_stop
         with self.assertRaises(MaintenanceError):
-            self.tick(9, 2, 1)
+            self.tick(10, 2, 1)
         self.process.assert_not_called()
         self.assertTrue(self.controller.state["active"])
 
@@ -164,16 +207,16 @@ class MaintenanceTests(unittest.TestCase):
 
         self.controller.docker = fail_start
         with self.assertRaises(MaintenanceError):
-            self.tick(9, 2, 1)
+            self.tick(10, 2, 1)
         self.reload()
-        self.tick(9, 7)
+        self.tick(10, 7)
         self.assertFalse(self.controller.state["active"])
         self.assertEqual(self.process.call_count, 1)
 
     def test_writable_job_script_is_not_executed(self):
         (self.root / "sync").chmod(0o777)
         with self.assertRaises(MaintenanceError):
-            self.tick(9, 2, 1)
+            self.tick(10, 2, 1)
         self.process.assert_not_called()
         self.assertTrue(self.controller.state["active"])
 
@@ -183,11 +226,15 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(self.controller.state["jobs"]["sync"], "complete")
         self.assertEqual(spring.utcoffset().total_seconds(), -4 * 3600)
         self.controller.tick(datetime(2027, 3, 14, 4, 30, tzinfo=ZONE))
-        self.assertEqual(self.process.call_count, 2)
-        self.controller.tick(datetime(2027, 11, 7, 2, 1, tzinfo=ZONE))
+        self.assertEqual(self.process.call_count, 1)
+        self.controller.tick(datetime(2027, 3, 15, 2, 1, tzinfo=ZONE))
         self.assertEqual(self.process.call_count, 3)
         self.controller.tick(datetime(2027, 11, 7, 2, 1, tzinfo=ZONE))
-        self.assertEqual(self.process.call_count, 3)
+        self.assertEqual(self.process.call_count, 4)
+        self.controller.tick(datetime(2027, 11, 7, 2, 1, tzinfo=ZONE))
+        self.assertEqual(self.process.call_count, 4)
+        self.controller.tick(datetime(2027, 11, 8, 2, 1, tzinfo=ZONE))
+        self.assertEqual(self.process.call_count, 6)
 
     def test_missing_corrupt_symlink_and_oversized_status(self):
         database = self.root / "db"
@@ -203,7 +250,7 @@ class MaintenanceTests(unittest.TestCase):
         target = self.root / "keep"
         target.write_text("keep")
         self.status.symlink_to(target)
-        atomic_json(self.status, {"schema": 1, "active": True, "detail": "Waiting for Sunday scrub"}, 0o644)
+        atomic_json(self.status, {"schema": 1, "active": True, "detail": "Running Monday scrub"}, 0o644)
         self.assertEqual(target.read_text(), "keep")
         self.assertTrue(read_maintenance(self.root / "db")["active"])
 
@@ -221,10 +268,10 @@ class MaintenanceTests(unittest.TestCase):
         client.torrents.assert_called_once()
 
     def test_completed_session_repairs_stale_active_publication(self):
-        self.tick(9, 2, 1)
+        self.tick(10, 2, 1)
         atomic_json(self.status, {"schema": 1, "active": True, "detail": "Old marker"}, 0o644)
         self.reload()
-        self.tick(9, 7)
+        self.tick(10, 7)
         self.assertFalse(read_maintenance(self.root / "db")["active"])
         self.assertEqual(self.process.call_count, 1)
 

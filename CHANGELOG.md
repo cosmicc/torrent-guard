@@ -3,6 +3,34 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 2.4 - 11.15.2026
+
+### Added
+
+- Shared guidance before every installer/uninstaller question, identifying the
+  source host/app, command or settings page, expected input and choice effects.
+
+### Changed
+
+- Move the weekly scrub from Sunday at 04:30 to Monday immediately after the
+  daily 02:01 Eastern sync succeeds. Keep Sonarr/Radarr stopped through both
+  Monday jobs; on every other day restore them after sync. Preserve recorded
+  sessions through restarts, failures, midnight overruns and upgrades.
+- Explain SSH/sudo authentication sources before the one-time administrator
+  session while retaining hidden password/API-key entry and existing prompt defaults.
+
+### Fixed
+
+- Create new OMV scheduled jobs using OMV's native new-object identifier, read
+  back its assigned UUID while disabled, and only then migrate direct schedules.
+  Recover interrupted creation without duplicate jobs or lost original settings.
+- Identify the failed OMV scheduling operation instead of hiding the stage behind
+  a generic command error or claiming partially updated settings were unchanged.
+- Explain how to obtain the media Docker host's SHA256 fingerprint from a trusted
+  session and paste only its SHA256 token into OMV's waiting verification prompt.
+- Tell legacy setup users where to get the OMV public key and to copy its single
+  key line without Markdown code-block markers.
+
 ## 2.3 - 11.15.2026
 
 ### Added

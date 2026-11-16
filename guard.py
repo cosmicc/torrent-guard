@@ -31,7 +31,7 @@ from deletion import FileVerifier, metadata_manifest, validate_metadata_manifest
 
 LOG = logging.getLogger("torrent-guard")
 DISPLAY_TIMEZONE = ZoneInfo("America/New_York")
-VERSION = "2.3"
+VERSION = "2.4"
 METADATA_TIMEOUT_SECONDS = 600
 STALL_TIMEOUTS = {"inactive": 3 * 3600, "unconnected": 30 * 86400}
 SEEDLESS_BANDS = ((0.15, 3 * 3600), (0.50, 3 * 86400), (0.80, 7 * 86400))

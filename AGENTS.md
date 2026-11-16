@@ -26,6 +26,12 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
   Never grant Guard Docker socket access or SSH credentials. Root controls run
   independently of Guard dry run. OMV must receive session-matched SSH stop/NFS
   flush acknowledgements before jobs; only its agent writes Guard's local marker.
+  Daily sync starts at 02:01 Eastern after the 02:00 hold. New Monday sessions
+  include scrub immediately after successful sync in the same invocation;
+  other days restore after sync. Preserve recorded job plans across restarts,
+  day overruns and upgrades. Never restore between Monday jobs or on failure.
+  Update host-installed helpers on both hosts outside active maintenance; the
+  every-minute OMV cron job does not need a separate weekly schedule.
 - install.py, scripts/host_setup.py, scripts/app_install.py,
   scripts/enroll_maintenance_key.py, tests/test_host_setup.py — recommended
   media-first then OMV installation/upgrade. Read INSTALL.md and
@@ -41,6 +47,17 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
   Preserve original direct job definitions in root-only setup.json and update
   only the two exact guarded-script jobs plus the unique coordinator. Hold local
   setup/runtime locks and refuse active maintenance. Guard gets no SSH/Docker access.
+  New OMV cron objects must use the new-object identifier returned by native
+  defaults, never an invented UUID. Create disabled, read back OMV's assigned
+  UUID and persist it before disabling direct jobs or enabling the coordinator.
+  Tests must model OMV's missing-record update refusal and interrupted creation.
+- scripts/install_prompts.py, tests/test_install_prompts.py — shared guidance
+  for every installer/uninstaller question. Identify which host/app provides the
+  value, the command or settings page to find it, accepted copy format and any
+  default/choice consequences before reading input. Register all new questions
+  here and use ask_with_help()/Installer.question(); keep secret readers hidden.
+  Fingerprints must come from the media host's console or an already trusted
+  administrator session. Never show a scanned fingerprint as an answer to copy.
 - scripts/install_maintenance_omv.py, scripts/install_maintenance_docker.py and
   scripts/maintenance_install.py — legacy maintenance-only, non-overwriting
   installers. Keep their verify-only reruns compatible: unchanged bytes/modes/
@@ -357,7 +374,7 @@ Treat docker compose config output as possibly containing secrets; sanitize befo
 - Run: python3 -m py_compile guard.py deletion.py records.py orphans.py maintenance.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
 - Run: python3 -m py_compile scripts/maintenance_install.py scripts/install_maintenance_omv.py scripts/install_maintenance_docker.py
 - Run: python3 -m py_compile scripts/maintenance_uninstall.py scripts/uninstall_maintenance_omv.py scripts/uninstall_maintenance_docker.py
-- Run: python3 -m py_compile install.py scripts/host_setup.py scripts/app_install.py scripts/enroll_maintenance_key.py
+- Run: python3 -m py_compile install.py scripts/host_setup.py scripts/app_install.py scripts/enroll_maintenance_key.py scripts/install_prompts.py
 - Run: python3 scripts/release_notes.py (validates version consistency and changelog structure without publishing).
 - Run: docker compose config using safe dummy .env values when appropriate; NEVER commit secrets.
 - Update README, INSTALL.md and .env.example as appropriate when operator-facing flags or behavior change. Document state migrations and safety impact.
