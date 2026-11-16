@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from scripts.app_install import AppInstall, dotenv_value, read_values, save_env
+from scripts.install_prompts import PROMPT_HELP
 from scripts.enroll_maintenance_key import enroll
 from scripts.maintenance_install import FORCED
 from scripts.host_setup import MODEL, SCHEDULE, UpgradeInstaller, configure_omv_schedule, install_omv, update_checkout
@@ -130,6 +131,27 @@ class ApplicationSetupTests(unittest.TestCase):
         self.assertEqual(values['ORPHAN_CLEANUP'], 'false')
         self.assertEqual(self.ask.call_count, 2)
 
+    def test_fresh_install_explains_every_setting_and_choice_without_echoing_secrets(self):
+        self.values.update(QBIT_PASSWORD='REPLACE_ME', SONARR_API_KEY='REPLACE_ME',
+                           RADARR_API_KEY='REPLACE_ME', DOWNLOADS_HOST_PATH='/EDIT/downloads',
+                           CLEANUP_COMPLETE_HOST_PATH='/EDIT/complete')
+        (self.root / '.env.example').write_text(''.join(k+'='+v+'\n' for k,v in self.values.items()))
+        self.ask.side_effect = ['http://qbit.invalid:8080', 'operator', 'http://sonarr.invalid:8989', '',
+                                'http://radarr.invalid:7878', '', str(self.downloads), '', '', '', '', '']
+        self.app.secret = Mock(side_effect=['fixture-password', 'fixture-sonarr-key', 'fixture-radarr-key'])
+        self.app.configure(None)
+        rendered = '\n'.join(call.args[0] for call in self.app.output.call_args_list)
+        settings = ('QBIT_URL', 'QBIT_USERNAME', 'QBIT_PASSWORD', 'SONARR_URL', 'SONARR_API_KEY',
+                    'SONARR_CATEGORY', 'RADARR_URL', 'RADARR_API_KEY', 'RADARR_CATEGORY',
+                    'DOWNLOADS_HOST_PATH', 'QBIT_DOWNLOAD_ROOT', 'QBIT_COMPLETE_DIR', 'QBIT_INCOMPLETE_DIR',
+                    'ENABLE_REMOVAL', 'ENABLE_CLEANUP')
+        for setting in settings:
+            self.assertIn(PROMPT_HELP[setting], rendered)
+        for secret in ('fixture-password', 'fixture-sonarr-key', 'fixture-radarr-key'):
+            self.assertNotIn(secret, rendered)
+        self.assertEqual(self.ask.call_count, 12)
+        self.assertEqual(self.app.secret.call_count, 3)
+
     def test_new_credential_quote_round_trip_and_atomic_conflict(self):
         value = 'dollar$HOME${VALUE}"back\\slash\nline'
         self.assertEqual(read_values('QBIT_PASSWORD='+dotenv_value(value))['QBIT_PASSWORD'], value)
@@ -154,13 +176,20 @@ class ScheduleTests(unittest.TestCase):
         self.jobs = [{'uuid': 'sync', 'enable': True, 'command': '/usr/local/sbin/snapraid-guarded-sync'},
                      {'uuid': 'scrub', 'enable': True, 'command': '/usr/local/sbin/snapraid-guarded-scrub'},
                      {'uuid': 'unrelated', 'enable': True, 'command': 'echo keep unchanged'}]
+        self.new_identifier = '00000000-0000-4000-8000-000000000000'
+        self.created_uuid = 'eebf3bee-16d8-4e1e-84dc-092975446e82'
         self.execute = Mock(side_effect=self.command)
 
     def command(self, args, **kwargs):
         if args[:2] == ['omv-confdbadm', 'read']:
-            return '{}' if '--defaults' in args else json.dumps(self.jobs)
+            return json.dumps({'uuid': self.new_identifier}) if '--defaults' in args else json.dumps(self.jobs)
         if args[:2] == ['omv-confdbadm', 'update']:
             value = json.loads(kwargs['data'])
+            if value['uuid'] == self.new_identifier:
+                value['uuid'] = self.created_uuid  # OMV assigns the durable ID.
+            elif value['uuid'] not in {job['uuid'] for job in self.jobs}:
+                # Native OMV update is not an upsert for an arbitrary UUID.
+                raise InstallError('No such object: ' + value['uuid'])
             self.jobs = [job for job in self.jobs if job['uuid'] != value['uuid']] + [value]
         return ''
 
@@ -180,6 +209,76 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(self.receipt.read_text(), saved)
         self.assertFalse(any(c.args[0][1:2] == ['update'] for c in self.execute.call_args_list))
         self.assertTrue(json.loads(saved)['original_jobs'][0]['enable'])
+
+    def test_native_creation_uses_defaults_id_and_disabled_readback_before_migration(self):
+        with self.assertRaisesRegex(InstallError, 'No such object'):
+            self.command(['omv-confdbadm', 'update', MODEL, '-'],
+                         data=json.dumps({**SCHEDULE, 'uuid': 'invented-existing-id'}))
+        configure_omv_schedule(self.installer, self.execute)
+        updates = [(index, json.loads(call.kwargs['data']))
+                   for index, call in enumerate(self.execute.call_args_list)
+                   if call.args[0][:2] == ['omv-confdbadm', 'update']]
+        self.assertEqual(updates[0][1]['uuid'], self.new_identifier)
+        self.assertFalse(updates[0][1]['enable'])
+        self.assertEqual(updates[-1][1]['uuid'], self.created_uuid)
+        self.assertTrue(updates[-1][1]['enable'])
+        self.assertEqual(json.loads(self.receipt.read_text())['coordinator_uuid'], self.created_uuid)
+        reads = [index for index, call in enumerate(self.execute.call_args_list)
+                 if call.args[0] == ['omv-confdbadm', 'read', MODEL]]
+        self.assertLess(updates[0][0], reads[1])
+        self.assertLess(reads[1], updates[1][0])
+
+    def test_creation_failure_does_not_disable_direct_jobs_or_deploy(self):
+        original = json.loads(json.dumps(self.jobs))
+        def fail(args, **kwargs):
+            if args[:2] == ['omv-confdbadm', 'update']:
+                raise InstallError('sensitive command payload must not be shown')
+            return self.command(args, **kwargs)
+        with self.assertRaisesRegex(InstallError, 'creating a disabled coordinator job') as caught:
+            configure_omv_schedule(self.installer, fail)
+        self.assertEqual(self.jobs, original)
+        self.assertNotIn('sensitive command payload', str(caught.exception))
+        self.assertTrue(json.loads(self.receipt.read_text())['original_jobs'][0]['enable'])
+
+    def test_interrupted_creation_recovers_disabled_job_without_creating_duplicate(self):
+        reads = 0
+        def fail_readback(args, **kwargs):
+            nonlocal reads
+            if args == ['omv-confdbadm', 'read', MODEL]:
+                reads += 1
+                if reads == 2:
+                    raise InstallError('connection/read failure after creation')
+            return self.command(args, **kwargs)
+        with self.assertRaisesRegex(InstallError, 'verifying the new disabled coordinator'):
+            configure_omv_schedule(self.installer, fail_readback)
+        self.assertTrue(all(job['enable'] for job in self.jobs if job['uuid'] in ('sync', 'scrub')))
+        self.assertFalse(next(job for job in self.jobs if job['uuid'] == self.created_uuid)['enable'])
+        configure_omv_schedule(self.installer, self.execute)
+        self.assertEqual(len(self.jobs), 4)
+        self.assertTrue(next(job for job in self.jobs if job['uuid'] == self.created_uuid)['enable'])
+        self.assertEqual(json.loads(self.receipt.read_text())['coordinator_uuid'], self.created_uuid)
+
+    def test_unconfirmed_created_job_leaves_original_schedules_unchanged(self):
+        original = json.loads(json.dumps(self.jobs))
+        def missing_readback(args, **kwargs):
+            if args[:2] == ['omv-confdbadm', 'update']:
+                return ''  # Model a lost or ignored create operation.
+            return self.command(args, **kwargs)
+        with self.assertRaisesRegex(InstallError, 'Could not identify one new disabled'):
+            configure_omv_schedule(self.installer, missing_readback)
+        self.assertEqual(self.jobs, original)
+
+    def test_legacy_partial_migration_preserves_originals_and_recovers_old_receipt_id(self):
+        originals = json.loads(json.dumps(self.jobs[:2]))
+        self.receipt.write_text(json.dumps({'schema': 1, 'original_jobs': originals,
+                                          'coordinator_uuid': 'old-uncreated-id'}))
+        for job in self.jobs[:2]:
+            job['enable'] = False
+        configure_omv_schedule(self.installer, self.execute)
+        receipt = json.loads(self.receipt.read_text())
+        self.assertEqual(receipt['original_jobs'], originals)
+        self.assertEqual(receipt['coordinator_uuid'], self.created_uuid)
+        self.assertEqual(len(self.jobs), 4)
 
     def test_custom_wrapped_job_and_duplicate_coordinators_refuse_no_writes(self):
         for commands in (['sh /usr/local/sbin/snapraid-guarded-sync'], [HELPER+' tick', HELPER+' tick']):

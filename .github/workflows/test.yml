@@ -20,5 +20,5 @@ jobs:
         # Host utilities are not installed into the non-root Guard runtime.
         run: |
           python -m py_compile scripts/maintenance_uninstall.py scripts/uninstall_maintenance_omv.py scripts/uninstall_maintenance_docker.py
-          python -m py_compile install.py scripts/host_setup.py scripts/app_install.py scripts/enroll_maintenance_key.py
+          python -m py_compile install.py scripts/host_setup.py scripts/app_install.py scripts/enroll_maintenance_key.py scripts/install_prompts.py
           python scripts/release_notes.py > /dev/null

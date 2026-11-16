@@ -19,16 +19,20 @@ The SSH host address is operator configuration, never a production default.
   policies, disable automatic restarts, stop both apps and verify they stopped.
 - At or after 02:01, run `/usr/local/sbin/snapraid-guarded-sync` on **OMV**, with
   no arguments, only after the Docker host confirms the hold and flushes NFS writes.
-- Sundays, keep both apps stopped between scripts and run
-  `/usr/local/sbin/snapraid-guarded-scrub` on **OMV** at or after 04:30.
+- On Mondays, run `/usr/local/sbin/snapraid-guarded-scrub` on **OMV** immediately
+  after the daily sync succeeds, in the same coordinator invocation. Keep both
+  apps stopped throughout sync and scrub, with fresh remote hold/NFS-flush
+  confirmation before each script. There is no separate scrub start time.
 - Restore original policies and start only previously running apps once all jobs
-  succeed. Weekdays can finish after sync; Sundays finish after scrub. 06:00 is
-  an expected end time, never a forced restart deadline.
+  succeed: Monday sessions finish after scrub; every other day, including Sunday,
+  finishes after sync. 06:00 is an expected end time, never a forced restart deadline.
 
 The coordinator catches up missed ticks during 02:00–06:00, including the spring
 DST jump. An active session continues through overruns and across dates. It does
-not start a wholly missed new session after 06:00. Long syncs delay scrub until
-sync finishes. Failed/interrupted jobs hold maintenance for operator review.
+not start a wholly missed new session after 06:00. The saved start date determines
+whether scrub is part of the session: a Monday sync finishing Tuesday still runs
+its scrub immediately afterward. Failed/interrupted jobs hold maintenance for
+operator review; completed sync is preserved when retrying a failed scrub.
 
 The guarded scripts must run synchronously and return zero only after work has
 finished. They must not background SnapRAID and exit early. Keep their existing
@@ -69,18 +73,32 @@ with isolated host pins and multiplexing disabled.
 
 After a session-matched inactive remote check, OMV uses `omv-confdbadm` and
 `omv-salt deploy run cron` to disable the exact two direct guarded-script jobs
-and create/reuse one root every-minute coordinator job. Unrelated jobs remain
+and create/reuse one root every-minute coordinator job. A new job is created
+disabled using OMV’s new-object identifier, then read back with its assigned
+UUID before direct jobs are disabled and the coordinator enabled. Unrelated jobs remain
 unchanged. Original job definitions are saved in the root-only
 `/var/lib/torrent-guard-maintenance/setup.json`; repeat upgrades preserve this
 recovery record. Custom wrapped commands and duplicate coordinator jobs require
 manual review. A failed deployment can be resumed by rerunning the installer;
-verify OMV Scheduled Jobs before leaving an interrupted installation unattended.
+verify OMV Scheduled Jobs before leaving an interrupted installation unattended. Failed operations identify
+the database read, disabled-job creation, job update or cron deployment stage.
+An error may leave partial configuration; the installer does not claim all
+settings are unchanged. Repeating setup reuses a verified disabled coordinator.
+The new-object behavior follows the [OMV database API](https://github.com/openmediavault/openmediavault/blob/7.x/deb/openmediavault/usr/lib/python3/dist-packages/openmediavault/config/database.py).
 
 Both hosts refuse upgrades during observed maintenance or busy journal locks.
 The helper is installed outside Guard; rebuilding the container alone does not
 upgrade it. Run both host commands. Required packages, custom Compose layouts,
 permissions and recovery details are in the
 [installation supplement](../INSTALL_SUPPLEMENT.md#unified-installer-reference).
+
+All interactive setup and uninstall questions show their guidance before asking:
+which host/app to use, a command or settings page to locate the value, the exact
+copy format and the effect of defaults/choices. This also covers legacy installers.
+Passwords and API keys use hidden input. SSH/sudo handle their own authentication;
+setup explains which account/password they are asking for before starting them.
+The fingerprint prompt prints the media-host console command and asks for only
+its SHA256 token; it never offers an unauthenticated scanned token for copying.
 
 ## Legacy maintenance-only installers
 
@@ -97,6 +115,19 @@ while active. An unreadable/malformed existing marker suspends processing for
 safety. The heartbeat remains live. Host controls stop apps even with Guard
 `DRY_RUN=true`. Do not run `tick` manually during the window unless ready for
 actual stops and SnapRAID work.
+
+## Schedule upgrades
+
+The weekly scrub moved from Sunday at 04:30 to Monday immediately after sync.
+The daily sync remains at 02:01 Eastern, with writers stopped from 02:00. Run the
+normal master installers on both hosts outside active maintenance to update
+both installed helpers. The single every-minute OMV coordinator job stays in
+place; no separate scrub job or manual cron-time change is needed.
+
+New sessions follow the Monday schedule. Existing journal job lists remain
+intact so an upgrade/recovery preserves already planned and completed work.
+A recorded pending scrub follows its successful sync without the old time gap;
+completed sessions are not reopened to add or repeat work. Keep both journals.
 
 ## Failure and interrupted-job recovery
 

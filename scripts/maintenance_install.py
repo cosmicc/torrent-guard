@@ -26,6 +26,7 @@ from typing import Callable
 # The installers run from a checkout, not inside the Guard container.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from maintenance import ssh_command
+from scripts.install_prompts import ask_with_help
 
 
 USER = "guard-maintenance"
@@ -95,6 +96,10 @@ class Installer:
 
     def __init__(self, paths: Paths = Paths(), ask: Callable = input, output: Callable = print):
         self.paths, self.ask, self.output = paths, ask, output
+
+    def question(self, setting: str, prompt: str) -> str:
+        """Show the value's source before an interactive setup question."""
+        return ask_with_help(setting, prompt, read=self.ask, output=self.output)
 
     def run(self, command: list[str], *, data: str | None = None, timeout: int = 30) -> str:
         """Run trusted argv without a shell or printing potentially sensitive output."""
@@ -223,7 +228,7 @@ class Installer:
         key = keys.pop()
         actual = fingerprint(key)
         if not self.existing(path):
-            expected = expected or self.ask("Docker host SHA256 fingerprint from its trusted console: ").strip()
+            expected = expected or self.question("HOST_FINGERPRINT", "Docker host SHA256 fingerprint from its trusted console: ").strip()
         if expected is not None and expected.strip() != actual:
             raise InstallError("Docker host fingerprint mismatch; host key was not changed")
         if not self.existing(path):
@@ -242,7 +247,7 @@ class Installer:
             if host is not None and config.get("host") != host or port is not None and config.get("port") != port:
                 raise InstallError("Requested host/port differs from existing configuration; unchanged")
         else:
-            config = {"host": host if host is not None else self.ask("Docker host IP or hostname: ").strip(), "user": USER,
+            config = {"host": host if host is not None else self.question("MEDIA_HOST", "Docker host IP or hostname: ").strip(), "user": USER,
                       "port": port if port is not None else 22, "identity_file": str(self.paths.key), "known_hosts_file": str(self.paths.hosts)}
         if (not isinstance(config.get("host"), str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]*", config["host"])
                 or type(config.get("port")) is not int or not 1 <= config["port"] <= 65535
@@ -332,7 +337,7 @@ class Installer:
             if supplied_key is not None and public_key(supplied_key) != key:
                 raise InstallError("Supplied OMV key differs from existing authorized key; unchanged")
         else:
-            key = None if prepare_key and supplied_key is None else public_key(supplied_key or self.ask("Paste the OMV maintenance PUBLIC key: ").strip())
+            key = None if prepare_key and supplied_key is None else public_key(supplied_key or self.question("OMV_PUBLIC_KEY", "Paste the OMV maintenance PUBLIC key: ").strip())
         self.helper()
         hard_locked = self.account()
         self.directory(self.paths.path("/var/lib/torrent-guard-maintenance-agent"), private=True)

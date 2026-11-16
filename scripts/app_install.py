@@ -9,6 +9,7 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 
+from scripts.install_prompts import ask_with_help
 from scripts.maintenance_install import InstallError
 
 
@@ -80,12 +81,15 @@ class AppInstall:
         """Recognize only absent/default placeholders, not a real saved setting."""
         return value is None or value in ("", "REPLACE_ME") or value.startswith("/EDIT/")
 
-    def prompt(self, label: str, default: str = "", *, hidden: bool = False) -> str:
-        """Ask only for information not available from existing configuration."""
+    def prompt(self, label: str, default: str = "", *, setting: str, hidden: bool = False) -> str:
+        """Explain where to find missing settings and preserve hidden input."""
         if hidden:
-            value = self.secret(label + ": ")
+            value = ask_with_help(setting, label + ": ", read=self.secret, output=self.output)
         else:
-            value = self.ask(label + (f" [{default}]" if default else "") + ": ").strip()
+            value = ask_with_help(
+                setting, label + (f" [{default}]" if default else "") + ": ",
+                read=self.ask, output=self.output,
+            ).strip()
         value = value or default
         if not value:
             raise InstallError(label + " is required")
@@ -145,31 +149,31 @@ class AppInstall:
         values.update(saved)
         changes = {}
         if self.missing(values.get("QBIT_PASSWORD")):
-            values["QBIT_URL"] = self.prompt("qBittorrent API URL reachable from Guard", values.get("QBIT_URL", ""))
-            values["QBIT_USERNAME"] = self.prompt("qBittorrent username", values.get("QBIT_USERNAME", "admin"))
-            values["QBIT_PASSWORD"] = self.prompt("qBittorrent password", hidden=True)
+            values["QBIT_URL"] = self.prompt("qBittorrent API URL reachable from Guard", values.get("QBIT_URL", ""), setting="QBIT_URL")
+            values["QBIT_USERNAME"] = self.prompt("qBittorrent username", values.get("QBIT_USERNAME", "admin"), setting="QBIT_USERNAME")
+            values["QBIT_PASSWORD"] = self.prompt("qBittorrent password", setting="QBIT_PASSWORD", hidden=True)
             changes.update({key: values[key] for key in ("QBIT_URL", "QBIT_USERNAME", "QBIT_PASSWORD")})
         for app in ("SONARR", "RADARR"):
             if self.missing(values.get(app + "_API_KEY")):
                 container = self.inspect(app.lower())
                 key, url = self.arr_defaults(app.lower(), container)
-                values[app + "_URL"] = url if key else self.prompt(app.title() + " API URL", values.get(app + "_URL", url))
-                values[app + "_API_KEY"] = key or self.prompt(app.title() + " API key", hidden=True)
-                values[app + "_CATEGORY"] = self.prompt(app.title() + " qBittorrent category", values.get(app + "_CATEGORY", ""))
+                values[app + "_URL"] = url if key else self.prompt(app.title() + " API URL", values.get(app + "_URL", url), setting=app + "_URL")
+                values[app + "_API_KEY"] = key or self.prompt(app.title() + " API key", setting=app + "_API_KEY", hidden=True)
+                values[app + "_CATEGORY"] = self.prompt(app.title() + " qBittorrent category", values.get(app + "_CATEGORY", ""), setting=app + "_CATEGORY")
                 changes.update({app + suffix: values[app + suffix] for suffix in ("_URL", "_API_KEY", "_CATEGORY")})
         if self.missing(values.get("DOWNLOADS_HOST_PATH")):
-            values["DOWNLOADS_HOST_PATH"] = self.prompt("Host download folder containing complete/ and incomplete/")
-            values["QBIT_DOWNLOAD_ROOT"] = self.prompt("Download root seen inside qBittorrent", values["QBIT_DOWNLOAD_ROOT"])
-            values["QBIT_COMPLETE_DIR"] = self.prompt("Completed directory inside qBittorrent", values["QBIT_DOWNLOAD_ROOT"] + "/complete")
-            values["QBIT_INCOMPLETE_DIR"] = self.prompt("Incomplete directory inside qBittorrent", values["QBIT_DOWNLOAD_ROOT"] + "/incomplete")
+            values["DOWNLOADS_HOST_PATH"] = self.prompt("Host download folder containing complete/ and incomplete/", setting="DOWNLOADS_HOST_PATH")
+            values["QBIT_DOWNLOAD_ROOT"] = self.prompt("Download root seen inside qBittorrent", values["QBIT_DOWNLOAD_ROOT"], setting="QBIT_DOWNLOAD_ROOT")
+            values["QBIT_COMPLETE_DIR"] = self.prompt("Completed directory inside qBittorrent", values["QBIT_DOWNLOAD_ROOT"] + "/complete", setting="QBIT_COMPLETE_DIR")
+            values["QBIT_INCOMPLETE_DIR"] = self.prompt("Incomplete directory inside qBittorrent", values["QBIT_DOWNLOAD_ROOT"] + "/incomplete", setting="QBIT_INCOMPLETE_DIR")
             changes.update({key: values[key] for key in ("DOWNLOADS_HOST_PATH", "QBIT_DOWNLOAD_ROOT", "QBIT_COMPLETE_DIR", "QBIT_INCOMPLETE_DIR")})
         if self.missing(values.get("CLEANUP_COMPLETE_HOST_PATH")):
             relative = PurePosixPath(values["QBIT_COMPLETE_DIR"]).relative_to(values["QBIT_DOWNLOAD_ROOT"])
             values["CLEANUP_COMPLETE_HOST_PATH"] = str(Path(values["DOWNLOADS_HOST_PATH"]) / str(relative))
             changes["CLEANUP_COMPLETE_HOST_PATH"] = values["CLEANUP_COMPLETE_HOST_PATH"]
         if existing is None and running is None:
-            live = self.ask("Enable real torrent removal now? Otherwise start in dry run [y/N]: ").strip().lower() in {"y", "yes"}
-            cleanup = self.ask("Enable automatic download-folder leftover/orphan cleanup [y/N]: ").strip().lower() in {"y", "yes"}
+            live = ask_with_help("ENABLE_REMOVAL", "Enable real torrent removal now? Otherwise start in dry run [y/N]: ", read=self.ask, output=self.output).strip().lower() in {"y", "yes"}
+            cleanup = ask_with_help("ENABLE_CLEANUP", "Enable automatic download-folder leftover/orphan cleanup [y/N]: ", read=self.ask, output=self.output).strip().lower() in {"y", "yes"}
             values.update(DRY_RUN="false" if live else "true", CLEANUP_LEFTOVERS=str(cleanup).lower(), ORPHAN_CLEANUP=str(cleanup).lower())
         if running:
             state = next(row["Source"] for row in running["Mounts"] if row.get("Destination") == "/state")

@@ -14,7 +14,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import uuid
 
 from maintenance import ssh_command
 from scripts.app_install import AppInstall
@@ -38,7 +37,7 @@ def run(command: list[str], *, data: str | None = None, stream: bool = False, ti
                                 stderr=None if stream else subprocess.PIPE)
         return result.stdout or ""
     except (OSError, subprocess.SubprocessError) as exc:
-        raise InstallError(command[0] + " failed. Existing data/settings were preserved; see INSTALL_SUPPLEMENT.md") from exc
+        raise InstallError(command[0] + " failed. Setup may be partially complete; see INSTALL_SUPPLEMENT.md") from exc
 
 
 def update_checkout(root: Path, execute=run) -> bool:
@@ -174,18 +173,46 @@ def idle_setup(role: str):
 
 
 def configure_omv_schedule(installer: Installer, execute=run) -> None:
-    """Use OMV's native config API; touch only the exact guarded-script jobs."""
+    """Create through OMV's new-object ID, then migrate only the exact jobs.
+
+    OMV assigns the durable UUID when its defaults' new-object identifier is
+    submitted. Supplying an invented UUID asks OMV to update a missing record.
+    Create disabled and read back the actual object before touching direct jobs.
+    """
     installer.required(("omv-confdbadm", "omv-salt"))
-    jobs = json.loads(execute(["omv-confdbadm", "read", MODEL]))
-    if not isinstance(jobs, list) or any(not isinstance(job, dict) or "uuid" not in job for job in jobs):
-        raise InstallError("Unexpected OMV scheduled-job data; no schedule was changed")
+
+    def call(stage: str, command: list[str], **kwargs) -> str:
+        """Identify the failed operation without exposing cron payloads/secrets."""
+        installer.output("OMV schedule: " + stage)
+        try:
+            return execute(command, **kwargs)
+        except InstallError as exc:
+            raise InstallError(
+                "OMV schedule setup failed while " + stage
+                + ". Check OMV Scheduled Jobs; setup may be partially complete. "
+                "Original job definitions are retained in setup.json when migration has begun."
+            ) from exc
+
+    def read_jobs(stage: str) -> list[dict]:
+        """Validate database reads before selecting or updating any job."""
+        jobs = json.loads(call(stage, ["omv-confdbadm", "read", MODEL]))
+        if (not isinstance(jobs, list) or any(not isinstance(job, dict)
+                or not isinstance(job.get("uuid"), str) or not isinstance(job.get("command"), str)
+                for job in jobs) or len({job["uuid"] for job in jobs}) != len(jobs)):
+            raise InstallError("Unexpected OMV scheduled-job data; no further schedule changes were made")
+        return jobs
+
+    jobs = read_jobs("reading scheduled jobs")
     receipt = installer.paths.path("/var/lib/torrent-guard-maintenance/setup.json")
     saved = json.loads(receipt.read_text()) if receipt.exists() else {"schema": 1, "original_jobs": []}
-    if not isinstance(saved, dict) or saved.get("schema") != 1 or not isinstance(saved.get("original_jobs"), list):
+    if (not isinstance(saved, dict) or saved.get("schema") != 1
+            or not isinstance(saved.get("original_jobs"), list)
+            or any(not isinstance(job, dict) or not isinstance(job.get("uuid"), str)
+                   for job in saved["original_jobs"])):
         raise InstallError("Invalid schedule recovery record; preserve it for review")
     coordinated, direct = [], []
     for job in jobs:
-        command = job.get("command", "").strip()
+        command = job["command"].strip()
         if not any(program in command for program in (HELPER, "snapraid-guarded-sync", "snapraid-guarded-scrub")):
             continue
         tokens = shlex.split(command)
@@ -199,36 +226,53 @@ def configure_omv_schedule(installer: Installer, execute=run) -> None:
             raise InstallError("A guarded SnapRAID job has custom arguments/wrapping; review it in the supplement before automatic replacement")
     if len(coordinated) > 1:
         raise InstallError("Duplicate coordinator jobs exist; review the duplicates before upgrading")
-    if any(type(job.get("enable")) is not bool for job in direct):
+    if any(type(job.get("enable")) is not bool for job in direct + coordinated):
         raise InstallError("Unsupported OMV job enable state; no schedule was changed")
-    defaults = coordinated[0] if coordinated else json.loads(execute(["omv-confdbadm", "read", "--defaults", MODEL]))
-    if not isinstance(defaults, dict):
-        raise InstallError("Could not read OMV cron defaults")
+    defaults = coordinated[0] if coordinated else json.loads(call(
+        "reading new-job defaults", ["omv-confdbadm", "read", "--defaults", MODEL]))
+    if not isinstance(defaults, dict) or not isinstance(defaults.get("uuid"), str) or not defaults["uuid"]:
+        raise InstallError("Could not read OMV's new-job identifier; no schedule was changed")
+    if not coordinated and defaults["uuid"] in {job["uuid"] for job in jobs}:
+        raise InstallError("OMV new-job defaults identify an existing job; no schedule was changed")
     desired = {**defaults, **SCHEDULE}
-    desired["uuid"] = defaults.get("uuid") if coordinated else str(uuid.uuid4())
     if not coordinated:
         desired.update(comment="Torrent Guard coordinated SnapRAID maintenance", sendemail=True)
     originals = {job["uuid"]: job for job in saved["original_jobs"]}
     for job in direct:
         originals.setdefault(job["uuid"], job)
-    saved.update(original_jobs=list(originals.values()), coordinator_uuid=desired["uuid"])
-    # Keep the pre-install job states for explicit recovery/uninstall; never
-    # replace them with already-disabled states on subsequent upgrades.
+    saved.update(original_jobs=list(originals.values()),
+                 coordinator_uuid=coordinated[0]["uuid"] if coordinated else None)
+    # Save original states before the first write. Interrupted creation can be
+    # recovered by finding the unique disabled coordinator on the next run.
     from maintenance import atomic_json
     atomic_json(receipt, saved, 0o600)
+    current = coordinated[0] if coordinated else None
+    if current is None:
+        disabled = {**desired, "enable": False}
+        call("creating a disabled coordinator job", ["omv-confdbadm", "update", MODEL, "-"], data=json.dumps(disabled))
+        old_ids = {job["uuid"] for job in jobs}
+        created = [job for job in read_jobs("verifying the new disabled coordinator")
+                   if job["uuid"] not in old_ids and job["uuid"] != defaults["uuid"]
+                   and all(job.get(key) == value for key, value in disabled.items() if key != "uuid")]
+        if len(created) != 1:
+            raise InstallError("Could not identify one new disabled OMV coordinator; direct jobs were left unchanged")
+        current = created[0]
+        desired["uuid"] = current["uuid"]
+    saved["coordinator_uuid"] = desired["uuid"]
+    atomic_json(receipt, saved, 0o600)
     for job in direct:
-        if job.get("enable"):
-            execute(["omv-confdbadm", "update", MODEL, "-"], data=json.dumps({**job, "enable": False}))
-    if not coordinated or desired != coordinated[0]:
-        execute(["omv-confdbadm", "update", MODEL, "-"], data=json.dumps(desired))
-    # Also redeploy on rerun: it repairs an interrupted previous deployment and
-    # uses OMV's generated configuration, never hand-edits its cron files.
-    execute(["omv-salt", "deploy", "run", "cron"], stream=True)
-    verified = json.loads(execute(["omv-confdbadm", "read", MODEL]))
-    by_id = {job["uuid"]: job for job in verified}
+        if job["enable"]:
+            call("disabling the direct guarded-script job " + job["uuid"],
+                 ["omv-confdbadm", "update", MODEL, "-"], data=json.dumps({**job, "enable": False}))
+    if desired != current:
+        call("enabling the verified coordinator job", ["omv-confdbadm", "update", MODEL, "-"], data=json.dumps(desired))
+    # Redeploy on rerun to finish interrupted migrations using OMV's generated
+    # configuration. Never hand-edit its generated cron files.
+    call("deploying OMV cron configuration", ["omv-salt", "deploy", "run", "cron"], stream=True)
+    by_id = {job["uuid"]: job for job in read_jobs("verifying the deployed schedule")}
     if any(by_id.get(desired["uuid"], {}).get(key) != value for key, value in desired.items()) or any(by_id.get(job["uuid"], {}).get("enable") is not False for job in direct):
         raise InstallError("OMV schedule verification failed; rerun after inspecting OMV jobs")
-    installer.output("OMV schedule is configured: daily 02:01 sync, Sunday 04:30 scrub, coordinated from 02:00 Eastern.")
+    installer.output("OMV schedule is configured: daily 02:01 sync; Monday scrub immediately after successful sync; coordinated from 02:00 Eastern.")
 
 
 def install_omv(installer: UpgradeInstaller, execute=run) -> None:
@@ -245,8 +289,8 @@ def install_omv(installer: UpgradeInstaller, execute=run) -> None:
         installer.info(path, private=True)
         config = json.loads(path.read_text())
     else:
-        host = installer.ask("Media Docker host IP/hostname: ").strip()
-        port = installer.ask("Media Docker host SSH port [22]: ").strip() or "22"
+        host = installer.question("MEDIA_HOST", "Media Docker host IP/hostname: ").strip()
+        port = installer.question("SSH_PORT", "Media Docker host SSH port [22]: ").strip() or "22"
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]*", host) or not port.isdigit() or not 1 <= int(port) <= 65535:
             raise InstallError("Invalid media host or SSH port")
         config = {"host": host, "user": USER, "port": int(port), "identity_file": str(installer.paths.key),
@@ -271,7 +315,7 @@ def install_omv(installer: UpgradeInstaller, execute=run) -> None:
     try:
         result = check()
     except (InstallError, ValueError):
-        admin = installer.ask("One-time administrator SSH username on the media host: ").strip()
+        admin = installer.question("ADMIN_USERNAME", "One-time administrator SSH username on the media host: ").strip()
         if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_-]*", admin):
             raise InstallError("Invalid administrator SSH username")
         admin_config = {**config, "user": admin}
@@ -284,7 +328,11 @@ def install_omv(installer: UpgradeInstaller, execute=run) -> None:
         command[command.index("-T")] = "-tt"
         payload = (ROOT / "scripts/enroll_maintenance_key.py").read_text()
         command.append(shlex.join(["sudo", "-H", "python3", "-c", payload, key]))
-        installer.output("Authenticate to the media host once. The administrator password is not saved.")
+        installer.output(
+            "Authenticate to the media host once. SSH asks for that administrator account's "
+            "password or key passphrase; sudo may ask for its sudo password on the media host. "
+            "Enter these directly at the SSH/sudo prompts. Passwords are not saved."
+        )
         execute(command, stream=True)
         result = check()
     if result["active"]:
