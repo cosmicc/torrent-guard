@@ -84,7 +84,7 @@ class HistoryTests(unittest.TestCase):
                 "levelno": logging.INFO, "created": now}))
             handler.close()
             data = history_data(path, now)
-            self.assertEqual(data["activity"][0]["decision"], "Orphan file removed")
+            self.assertEqual(data["activity"][0]["decision"], "Orphan removed")
             self.assertIn("episode.mkv", data["activity"][0]["detail"])
             self.assertEqual(data["windows"]["6"]["cleaned"], 0)
 

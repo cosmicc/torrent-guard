@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v2.4** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v2.5** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -18,6 +18,7 @@ grace interval has elapsed (15 minutes by default).
   completion, media, and import evidence; uncertainty preserves the download.
 - Optional automatic orphan cleanup removes unowned files from the four
   `complete`/`incomplete` `tv`/`movies` folders after 15 observed minutes.
+  Empty child directories receive the same wait; the four scope roots remain.
   Includes old leftovers without journal records; no button clicks are needed.
   See [enable orphan cleanup](docs/orphan-cleanup.md#deployment).
 - Runs without root privileges, Docker socket access, or a writable media mount.
@@ -86,7 +87,11 @@ Recent downloads show up to 100 recorded decisions, ten per page, with First,
 Backward, Forward and Last controls. Warnings/errors show only the last 24 hours.
 Warnings use the same navigation, group identical repeats, and show filenames,
 reasons and next steps in separate colors. Quarantine identity mismatches remain
-warnings; normal deletion requests and dry-run previews are activity messages.
+warnings; unchanged orphan failures notify once across retries and restarts.
+Routine cleanup, rejections and dry-run previews are activity messages.
+Current orphan safety holds stay visible in retry details until resolved.
+Page counts distinguish groups from repeated events; all navigation buttons are
+unavailable when the groups fit on one page, without a spinning cursor.
 The v1.6 `--status` CLI is replaced by this page; existing history is preserved.
 
 Stale records retire automatically once the torrent and every saved file path

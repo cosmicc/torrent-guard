@@ -4,6 +4,10 @@ v1.9 adds a separate [orphan policy](orphan-cleanup.md) for unowned files in the
 four dedicated complete/incomplete tv/movies folders. The restrictions below
 continue to apply to the original evidence-based cleanup path; orphan cleanup
 has its own explicit authorization and narrowly scoped mounts.
+Starting in v2.5, orphan cleanup also removes empty child directories after a
+separate 15-minute observation period. It may retire its own verified-empty,
+identity-matched quarantine after a successful file removal. These changes do
+not authorize sweeping historical quarantines or changing evidence-based holds.
 
 Available starting with v0.6. Installations on v0.5 or earlier must upgrade
 before using the settings or Compose override below.
@@ -150,8 +154,10 @@ period inside quarantine. A changed object captured during a
 race is preserved in quarantine and reported for manual recovery. Starting with v1.3, unsupported-operation errors can use the guarded private
 quarantine fallback described below. Other errors still retain files.
 
-Quarantine progress survives restarts. Empty quarantine directories are retained;
-Guard does not recursively delete directories. A source path reappearing alongside
+Quarantine progress survives restarts. The original evidence-based fallback
+retains empty quarantine directories. v2.5 orphan cleanup may retire only its own
+verified-empty quarantine as described above. Guard never recursively deletes
+directories. A source path reappearing alongside
 its quarantine payload stops automatic removal and preserves both objects.
 Inspect saved `quarantine` paths in `deletion_evidence` when recovery is required.
 Never erase the journal or blindly delete quarantine contents to force cleanup.

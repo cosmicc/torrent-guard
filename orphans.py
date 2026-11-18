@@ -5,10 +5,11 @@ Live torrents of every category/state protect their paths. No library, symlink,
 private quarantine, or file outside the four configured scopes is discovered.
 """
 from dataclasses import replace
+import errno
 import json
 import logging
 import os
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import stat
 import urllib.error
 
@@ -27,6 +28,9 @@ class OrphanCleaner:
         self.guard = guard
         self.last_scan = None
         self.rows = None
+        # Persist incident notification state separately from deletion evidence.
+        # Retrying a safety hold must not emit a fresh warning every 15 minutes.
+        self.failures = {}
         guard.store.db.executescript("""
             CREATE TABLE IF NOT EXISTS orphan_candidates (
                 path TEXT PRIMARY KEY, first_seen REAL NOT NULL,
@@ -34,7 +38,29 @@ class OrphanCleaner:
             CREATE TABLE IF NOT EXISTS orphan_audit (
                 id INTEGER PRIMARY KEY, path TEXT NOT NULL,
                 removed_at REAL NOT NULL, manifest TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS orphan_failures (
+                path TEXT PRIMARY KEY, reason TEXT NOT NULL);
         """)
+        self.failures = dict(guard.store.db.execute("SELECT path, reason FROM orphan_failures"))
+
+    def report_failure(self, path: str, reason: str) -> None:
+        """Notify once per changed blocking incident, including across restarts."""
+        if self.failures.get(path) == reason:
+            LOG.debug("ORPHAN retry retained %s: %s", path, reason)
+            return
+        self.failures[path] = reason
+        if not self.guard.config.dry_run:
+            with self.guard.store.db:
+                self.guard.store.db.execute("INSERT OR REPLACE INTO orphan_failures VALUES (?,?)", (path, reason))
+        LOG.warning("ORPHAN deferred %s; timer reset: %s", path, reason)
+
+    def clear_failures(self, active: set[str]) -> None:
+        """Allow a new warning only after recovery or an incident's disappearance."""
+        for path in set(self.failures) - active:
+            del self.failures[path]
+            if not self.guard.config.dry_run:
+                with self.guard.store.db:
+                    self.guard.store.db.execute("DELETE FROM orphan_failures WHERE path=?", (path,))
 
     def scopes(self):
         """Map only complete/incomplete tv/movies to four independent write binds."""
@@ -118,13 +144,24 @@ class OrphanCleaner:
                     if "\\" in name:
                         raise ValueError("Ambiguous backslash in orphan filename")
                     path = str(PurePosixPath(prefix) / name)
-                    info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    try:
+                        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue  # Import/move removed this name after listdir.
                     if stat.S_ISDIR(info.st_mode):
-                        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                        try:
+                            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                        except FileNotFoundError:
+                            continue
                         try:
                             if identity(os.fstat(child))[:2] != identity(info)[:2]:
                                 raise ValueError("Directory changed during orphan scan")
                             walk(child, path, depth + 1)
+                            if not os.listdir(child):
+                                item = {"root": qroot, "path": path,
+                                        "identity": identity(os.fstat(child)), "kind": "directory"}
+                                result[str(PurePosixPath(qroot) / path)] = {
+                                    "version": 1, "roots": anchor, "items": [item]}
                         finally:
                             os.close(child)
                     elif stat.S_ISREG(info.st_mode):
@@ -137,6 +174,94 @@ class OrphanCleaner:
                         raise ValueError(f"Symlink or special file in orphan scope: {qroot}/{path}")
             walk(descriptor, "", 0)
         return result
+
+    @staticmethod
+    def remove_directory(verifier: FileVerifier, manifest: dict, item: dict) -> bool:
+        """Remove only a saved, unchanged empty child directory on matching roots.
+
+        This intentionally uses rmdir rather than recursive deletion. A newly
+        created file, replacement directory, or attachment change prevents it.
+        The caller has already refreshed all live-client ownership reservations.
+        """
+        if (verifier.config.dry_run or not verifier.config.cleanup_leftovers
+                or item["root"] != verifier.config.qbit_complete_dir
+                or item.get("kind") != "directory"):
+            raise ValueError("Empty-directory cleanup is not authorized")
+        root = Path(verifier.config.cleanup_write_root)
+        anchor = manifest["roots"][item["root"]]["identity"]
+        with verifier.parent(verifier.roots[item["root"]], item["path"], anchor) as (parent, name):
+            if parent is not None:
+                try:
+                    current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    current = None
+                if current is not None and (not stat.S_ISDIR(current.st_mode) or identity(current) != item["identity"]):
+                    return False
+        with verifier.parent(root, item["path"], anchor) as (parent, name):
+            if parent is None:
+                return True
+            expected = root / PurePosixPath(item["path"]).parent
+            verifier.attached(parent, expected)
+            try:
+                info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                return True
+            if not stat.S_ISDIR(info.st_mode) or identity(info) != item["identity"]:
+                return False
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            try:
+                if identity(os.fstat(child)) != item["identity"] or os.listdir(child):
+                    return False
+                verifier.attached(child, expected / name)
+                verifier.attached(parent, expected)
+                if identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != item["identity"]:
+                    return False
+                try:
+                    os.rmdir(name, dir_fd=parent)
+                except OSError as exc:
+                    if exc.errno in {errno.ENOTEMPTY, errno.EEXIST}:
+                        return False
+                    if exc.errno != errno.ENOENT:
+                        raise
+            finally:
+                os.close(child)
+        # Check absence independently through the read mapping, not the alias.
+        with verifier.parent(verifier.roots[item["root"]], item["path"], anchor) as (parent, name):
+            if parent is not None:
+                try:
+                    os.stat(name, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    return True
+                raise ValueError("Directory reappeared after cleanup; preserving replacement")
+        return True
+
+    @staticmethod
+    def remove_empty_quarantine(verifier: FileVerifier, manifest: dict, item: dict) -> None:
+        """Retire only this candidate's verified-empty, identity-matched capture."""
+        if not item.get("quarantine"):
+            return
+        if (verifier.config.dry_run or not verifier.config.cleanup_leftovers
+                or item["root"] != verifier.config.qbit_complete_dir):
+            raise ValueError("Empty-quarantine cleanup is not authorized")
+        quarantine = PurePosixPath(item["quarantine"])
+        if (not quarantine.name.startswith(".torrent-guard-")
+                or quarantine.parent != PurePosixPath(item["path"]).parent):
+            raise ValueError("Invalid saved quarantine location; preserving directory")
+        root = Path(verifier.config.cleanup_write_root)
+        anchor = manifest["roots"][item["root"]]["identity"]
+        with verifier.parent(root, item["quarantine"], anchor) as (parent, name):
+            if parent is None:
+                return
+            verifier.attached(parent, root / PurePosixPath(item["quarantine"]).parent)
+            try:
+                info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) != 0o700
+                    or [info.st_dev, info.st_ino] != item["quarantine_identity"]):
+                raise ValueError("Quarantine identity/permissions changed; preserving directory")
+            os.rmdir(name, dir_fd=parent)  # Refuses even one unexpected child.
 
     def save(self, path: str | None = None) -> None:
         """Checkpoint all observations; dry-run state is exclusively in memory."""
@@ -224,14 +349,18 @@ class OrphanCleaner:
                 # snapshot and persists quarantine before rename. A replacement
                 # captured in a race remains quarantined for manual review.
                 try:
-                    verifier.remove(manifest, item, lambda _: self.save(path))
-                    if verifier.remaining(manifest):
-                        raise ValueError(f"Orphan remains after cleanup: {path}")
+                    if item.get("kind") == "directory":
+                        if not self.remove_directory(verifier, manifest, item):
+                            self.rows[path] = (now, now, manifest)
+                            self.save(path)
+                            continue
+                    else:
+                        self.remove_file(verifier, manifest, item, path)
                 except (OSError, ValueError) as exc:
                     # One inaccessible/replaced file must not starve other work.
                     self.rows[path] = (now, now, manifest)
                     self.save(path)
-                    LOG.warning("ORPHAN deferred %s; timer reset: %s", path, exc)
+                    self.report_failure(path, str(exc))
                     continue
                 with self.guard.store.db:
                     self.guard.store.db.execute("INSERT INTO orphan_audit(path,removed_at,manifest) VALUES (?,?,?)",
@@ -240,9 +369,25 @@ class OrphanCleaner:
                 del self.rows[path]
                 removed += 1
                 LOG.info("ORPHAN removed %s; no qBittorrent ownership for 15 minutes", path)
-            LOG.info("ORPHAN scan candidates=%d removed=%d dry_run=%s", len(self.rows), removed, self.guard.config.dry_run)
+            self.clear_failures(set(self.rows))
+            LOG.debug("ORPHAN scan candidates=%d removed=%d dry_run=%s", len(self.rows), removed, self.guard.config.dry_run)
         except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError) as exc:
             # Preserve capture progress but require a new uninterrupted wait.
             self.rows = {path: (now, now, manifest) for path, (_, _, manifest) in self.rows.items()}
             self.save()
-            LOG.warning("ORPHAN deferred; absence timer reset: %s", exc)
+            if str(exc) == "Client inventory changed during orphan ownership check":
+                LOG.debug("ORPHAN observation reset during client update: %s", exc)
+            else:
+                self.report_failure("scan", str(exc))
+
+    def remove_file(self, verifier: FileVerifier, manifest: dict, item: dict, path: str) -> None:
+        """Remove a captured file and its own empty recovery directory safely."""
+        try:
+            verifier.remove(manifest, item, lambda _: self.save(path))
+        except FileNotFoundError:
+            # Import/removal is normal only after same-root absence checks.
+            if verifier.remaining(manifest):
+                raise
+        if verifier.remaining(manifest):
+            raise ValueError(f"Orphan remains after cleanup: {path}")
+        self.remove_empty_quarantine(verifier, manifest, item)

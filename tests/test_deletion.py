@@ -3,6 +3,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import errno
 import json
+import logging
 import os
 from pathlib import Path
 import sqlite3
@@ -90,9 +91,10 @@ class DeletionTests(unittest.TestCase):
 
     def test_leftovers_remain_pending_during_settle_then_are_removed(self):
         self.request()
-        with self.assertLogs("torrent-guard", level="WARNING") as logs:
+        with self.assertLogs("torrent-guard", level="INFO") as logs:
             self.guard.poll(now=self.now + 5)
         self.assertTrue(any("waiting for qBittorrent deletion settle period until" in line for line in logs.output))
+        self.assertFalse(any(record.levelno >= logging.WARNING for record in logs.records))
         self.assertFalse(any("cleanup disabled" in line for line in logs.output))
         self.assertTrue(self.path.exists())
         self.assertTrue(self.guard.store.entries())
@@ -536,12 +538,13 @@ class DeletionTests(unittest.TestCase):
 
     def test_nfs_unsupported_rename_uses_guarded_fallback_and_finishes(self):
         self.request()
-        with patch("deletion.rename_exclusive", side_effect=OSError(errno.EINVAL, "Invalid argument")), self.assertLogs("torrent-guard", level="WARNING") as logs:
+        with patch("deletion.rename_exclusive", side_effect=OSError(errno.EINVAL, "Invalid argument")), self.assertLogs("torrent-guard", level="INFO") as logs:
             self.guard.poll(now=self.now + 120)
         self.assertFalse(self.path.exists())
         self.assertFalse(self.sidecar.exists())
         self.assertFalse(self.guard.store.entries())
         self.assertTrue(any("CLEANUP NFS compatibility" in line for line in logs.output))
+        self.assertFalse(any(record.levelno >= logging.WARNING for record in logs.records))
 
     def test_nfs_fallback_interrupted_unlink_resumes_from_saved_quarantine(self):
         self.request()

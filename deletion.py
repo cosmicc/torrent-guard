@@ -285,7 +285,7 @@ class FileVerifier:
                     self.attached(parent, expected)
                     fallback = rename_to_quarantine(parent, name, quarantine_fd)
                     if fallback:
-                        LOG.warning("CLEANUP NFS compatibility: protected rename flag unsupported; "
+                        LOG.info("CLEANUP NFS compatibility: protected rename flag unsupported; "
                                     "used atomic rename into private quarantine for download=%r", item["path"])
                     quarantined = identity(os.stat("payload", dir_fd=quarantine_fd, follow_symlinks=False))
                 elif quarantined is not None and original is not None:
