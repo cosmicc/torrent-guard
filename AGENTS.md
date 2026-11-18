@@ -472,3 +472,19 @@ textContent, without full filesystem paths. Full audit evidence stays intact.
 Quarantine mismatches remain warnings and keep all identity/unlink gates.
 Reporting which identity fields changed must not authorize cleanup. Routine
 delete requests, successful cleanup attempts and dry-run previews use INFO.
+v2.5 also reports ordinary rejection candidates, deletion settle waits and
+successful NFS rename compatibility as INFO. Routine orphan scans are DEBUG.
+Persist orphan incident notification state in the additive `orphan_failures`
+table; warn once per changed blocking failure, clear after recovery/disappearance,
+and keep retries and saved root/quarantine identity gates unchanged. Dry-run
+incident updates remain memory-only. Normal concurrent import disappearance is
+silent only after independent same-root saved-name absence verification.
+Empty orphan child directories have `kind=directory` candidate manifests and
+their own 15-minute observation timer. Preserve all four scope roots; recheck
+ownership, root/directory identity, attachment and emptiness before `rmdir`.
+Never recursively remove directories. Only a successfully verified file's own
+empty, identity-matched owner-only quarantine may be retired; never sweep old
+or foreign quarantines. Keep active orphan incidents visible in cached journal
+details even when the original warning ages out of the 24-hour window.
+Pagination labels distinguish groups from repeated events and explain single-page
+states. Disabled page buttons must not use a waiting cursor; refresh may.

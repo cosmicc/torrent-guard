@@ -18,7 +18,9 @@ once no qBittorrent torrent owns it for 15 continuously observed minutes. This
 also covers old leftovers without a Guard record. Import history is **not**
 required for orphan files: the operator explicitly accepts deleting these files
 even if they were never imported. Keep personal files and libraries outside
-these folders. Empty directories are retained.
+these folders. v2.5 also removes empty child directories after 15 observed
+minutes without client ownership. The four scope roots are always retained.
+Each newly empty parent starts its own wait; no recursive deletion is used.
 
 Seeding uses the same successful-import cleanup as completed torrents, with
 no additional seeding retention. Once each selected video has confirmed Arr
@@ -94,6 +96,10 @@ Its existing NFS fallback and same-UID/root concurrency limitations apply.
 Retain changed captured objects for manual recovery. Interrupted captures resume
 from the saved candidate only, after renewed ownership/absence checks. Library
 hardlinks survive because only the download name is removed.
+After verified file absence, remove only that candidate's matching, owner-only,
+empty quarantine directory using `rmdir`. Foreign and unresolved quarantines
+are never swept. Empty ordinary directories use saved root/directory identity,
+fresh ownership and attachment checks, and `rmdir`; new contents block removal.
 
 `orphan_audit` records independently verified absence after the operation; this
 is separate from imported-torrent evidence and archive-only bookkeeping.
@@ -108,3 +114,27 @@ changed files/mounts, symlinks, library hardlinks, dry run and out-of-scope file
 These checks do not validate live server APIs, permissions, NFS behavior or Arr
 replacement availability. Validate a dry run and disposable downloads on the
 actual media server before enabling deletion.
+
+## Quiet routine cleanup (v2.5)
+
+Normal absence observation, moved/imported files and successful cleanup are not
+warnings. Scans use DEBUG; successful removal remains INFO activity. A name that
+disappears during cleanup is accepted only after independently checking every
+saved original/quarantine name on the unchanged root. Missing mounts, access
+failures and ambiguous identity remain blocking failures, never proof of absence.
+
+The additive `orphan_failures(path, reason)` table records already-notified
+incidents separately from cleanup evidence. Emit one warning per changed failure,
+including across daemon restarts; retries remain scheduled normally. Clear the
+notification when cleanup succeeds, ownership returns or the candidate disappears
+through normal verified discovery. Dry-run changes are memory-only. Never reset
+the journal or replace captured evidence to stop notifications.
+Current blocking incidents remain visible under Deletion & retry details and
+the Orphan cleanup holds counter after historical warnings age out.
+
+`download mount/root identity changed` on a saved capture is a real safety hold:
+the current device/inode differs from its recorded root. Another 15-minute timer
+does not authorize rebasing that evidence. Check host/container/NFS mount mappings
+and preserve the quarantine and journal for recovery. The UI explains this
+separately from ordinary deferred cleanup. Pre-upgrade warnings age out of the
+24-hour window; their historical counters are not rewritten.

@@ -103,8 +103,9 @@ in view after closing the dialog. Forget record remains archive-only; it never
 triggers the independent orphan policy. Preserve Host including its port at the
 proxy; retain the strict Origin/Host and action-token checks.
 
-Include `ORPHAN removed` in recent activity as an orphan file removal, without
-counting individual orphan files as imported-torrent cleanup metrics.
+Include `ORPHAN removed` in recent activity without counting individual orphan
+items as imported-torrent cleanup metrics. In v2.5 this activity can also
+describe an empty directory; keep the label "Orphan removed" neutral.
 
 ## Removal policy reference
 
@@ -178,7 +179,20 @@ using the approved cyan/amber/green/purple palette and safe DOM text. Do not sho
 full filesystem paths on warning cards. Keep exact paths in private audit logs
 and saved evidence. The reported orphan-quarantine warnings are real safety
 holds, not normal cleanup; repeated attempts on the same retained file can
-produce many warnings. Never weaken saved identity checks to silence them.
+produce many warnings in versions before v2.5. Never weaken saved identity
+checks to silence them. In v2.5 an unchanged orphan incident warns once across
+retries and restarts; a changed reason or recurrence after recovery warns again.
+Historical events and rolling counters remain intact and expire normally.
+Routine rejection candidates, successful NFS compatibility and deletion settle
+waits are INFO rather than warnings. Routine orphan scans are DEBUG.
+Read current `orphan_failures` without modifying them; display a bounded list in
+retry details and its count. Handle older journals without that table. Notification
+deduplication must not hide ongoing safety holds after history expires.
+
+The pager counts groups separately from their repeated events and explains when
+all groups fit on one page. Disabled pagination controls use a non-wait cursor;
+only an actual refresh displays a waiting cursor. Test real clicks across several
+pages; a large event count alone need not create a second page.
 
 Test grouping/counts, retained limits, expiry/future filtering, privacy redaction,
 reported filenames with spaces, all navigation boundaries, refresh/shrink,

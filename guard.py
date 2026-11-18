@@ -31,7 +31,7 @@ from deletion import FileVerifier, metadata_manifest, validate_metadata_manifest
 
 LOG = logging.getLogger("torrent-guard")
 DISPLAY_TIMEZONE = ZoneInfo("America/New_York")
-VERSION = "2.4"
+VERSION = "2.5"
 METADATA_TIMEOUT_SECONDS = 600
 STALL_TIMEOUTS = {"inactive": 3 * 3600, "unconnected": 30 * 86400}
 SEEDLESS_BANDS = ((0.15, 3 * 3600), (0.50, 3 * 86400), (0.80, 7 * 86400))
@@ -519,7 +519,7 @@ def removal_reference() -> dict:
          "action": "Reject when confirmed; retain files if access or evidence is inconclusive. Applies regardless of percentage."},
         {"condition": "Completed or seeding; every selected video imported into Sonarr/Radarr",
          "action": "Remove with download files after the configured import grace (15 minutes by default). No replacement requested."},
-        {"condition": "Orphan files in complete/incomplete TV/movie folders; orphan cleanup enabled",
+        {"condition": "Orphan files and empty child directories in complete/incomplete TV/movie folders; orphan cleanup enabled",
          "action": f"Remove after {ABSENCE_SECONDS // 60} observed minutes without any qBittorrent ownership."},
     ])
     rows.insert(0, {"condition": "Exact save tag on a torrent (case-insensitive)",
@@ -1076,7 +1076,7 @@ class Guard:
             self.orphan_cleaner.poll(now)
         except ApiError as exc:
             self.orphan_cleaner.invalidate(now)
-            LOG.warning("ORPHAN deferred; client unavailable: %s", exc)
+            self.orphan_cleaner.report_failure("client", f"client unavailable: {exc}")
         self.import_candidates = set(candidates) - self.store.hashes() - self.logged_import_dry
         self.import_grace_waits.intersection_update(self.import_candidates)
 
@@ -1280,7 +1280,7 @@ class Guard:
         if h in self.filesystem_retries:
             return  # An unresolved access failure overrides filename-based rejection.
         if h not in self.logged_dry:
-            LOG.warning("REJECT candidate [%s] %s category=%r tags=%r reason=%s", app, self.log_context[h], torrent.get("category"), torrent.get("tags"), reason)
+            LOG.info("REJECT candidate [%s] %s category=%r tags=%r reason=%s", app, self.log_context[h], torrent.get("category"), torrent.get("tags"), reason)
         if self.config.dry_run:
             if h not in self.logged_dry:
                 LOG.info("DRY RUN: would stop, Arr-blocklist and delete torrent + tracked files: %s", self.log_context.get(h, download_context(torrent)))
@@ -1683,11 +1683,13 @@ class Guard:
             remaining = self.verifier.remaining(manifest)
         if remaining:
             paths = ", ".join(repr(str(PurePosixPath(item.get("root", "")) / item["path"])) for item in remaining[:4])
+            settling = (allow_cleanup and self.config.cleanup_leftovers
+                        and now - requested_at < self.config.delete_settle_seconds)
             if not allow_cleanup:
                 blocker = "paths changed during read-only retirement verification; no local cleanup was attempted"
             elif not self.config.cleanup_leftovers:
                 blocker = "automatic leftover cleanup disabled (CLEANUP_LEFTOVERS=false); enable compose.cleanup.yaml with the completed-directory write bind"
-            elif now - requested_at < self.config.delete_settle_seconds:
+            elif settling:
                 deadline = display_time(requested_at + self.config.delete_settle_seconds)
                 blocker = f"waiting for qBittorrent deletion settle period until {deadline}"
             elif kind == "stalled" or all(item["root"] != self.config.qbit_complete_dir for item in remaining):
@@ -1696,7 +1698,8 @@ class Guard:
                            "or stalled download paths after verifying ownership; Guard will verify absence automatically")
             else:
                 blocker = "automatic cleanup ran but the filesystem still reports saved paths; review LEFTOVER messages and filesystem errors"
-            self._cleanup_status(h, f"{len(remaining)} recorded file(s) remain: {paths}; {blocker}", now)
+            level = logging.INFO if settling else logging.WARNING
+            self._cleanup_status(h, f"{len(remaining)} recorded file(s) remain: {paths}; {blocker}", now, level)
             self._clear_filesystem(h)
             return False
         self._clear_filesystem(h)

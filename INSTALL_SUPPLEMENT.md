@@ -11,7 +11,14 @@ see the [maintenance reference](docs/maintenance.md).
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v2.4** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
+**v2.5** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr · `ffprobe` video checks
+
+The v2.5 upgrade preserves your state and cleanup overrides. It adds empty child
+directory cleanup to enabled orphan scopes and persists once-per-incident warning
+notifications. Keep the existing journal; no manual database migration is needed.
+Old warning counts age out normally over 24 hours. Current orphan holds remain
+in Deletion & retry details. A changed-mount/quarantine hold still requires safe
+investigation; upgrading does not rebase or discard its recorded identities.
 
 Torrent Guard is a background service that examines new and completed movie/TV torrents and cleans up imported releases. It uses **qBittorrent's Web API** and **Sonarr/Radarr's v3 APIs**; no qBittorrent “Run external program on torrent completion” hook is required.
 

@@ -106,8 +106,11 @@ summary:focus-visible {
   outline-offset: 4px;
 }
 button:disabled {
-  cursor: wait;
+  cursor: not-allowed;
   opacity: 0.65;
+}
+#refresh:disabled {
+  cursor: wait;
 }
 .header {
   display: flex;

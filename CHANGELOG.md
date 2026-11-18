@@ -3,6 +3,37 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 2.5 - 11.17.2026
+
+### Added
+
+- Safely remove empty orphan child directories after their own 15-minute
+  observation period, preserving scope roots and live-torrent directories.
+- Show current orphan cleanup holds in retry details without emitting repeated
+  warnings. Retire only each completed candidate's verified-empty quarantine.
+- Explain the number of warning groups versus repeated events beside pagination,
+  including when every group fits on one page.
+- Persist orphan-cleanup incident notifications across retries and restarts;
+  notify again if the failure changes or recurs after recovery.
+
+### Changed
+
+- Keep routine rejections, successful NFS compatibility fallback and the normal
+  deletion settle wait at INFO. Routine orphan scans are DEBUG; successful file
+  removal remains activity, without a warning.
+- Keep real permission, access, mount-identity and quarantine safety failures
+  visible once per unchanged orphan incident while continuing safe retries.
+
+### Fixed
+
+- Stop showing a spinning cursor on unavailable pagination controls; reserve the
+  waiting cursor for an active refresh and retain boundary/page-clamping behavior.
+- Treat concurrent import/move disappearance as normal only after independently
+  verifying saved names are absent on unchanged roots.
+- Remove saved-path lists from cleanup warning reasons, simplify stale NFS handle
+  details and explain service/import-history failures and mount-identity holds.
+- Stop promising that another absence timer will resolve a changed-mount hold.
+
 ## 2.4 - 11.15.2026
 
 ### Added

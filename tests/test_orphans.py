@@ -1,6 +1,7 @@
 """Real-file and SQLite coverage of the v1.9 independent orphan policy."""
 from dataclasses import replace
 import errno
+import logging
 from pathlib import Path
 import tempfile
 import unittest
@@ -276,6 +277,138 @@ class OrphanTests(unittest.TestCase):
         self.tick()
         self.assertTrue(self.path.exists())
         self.qbit.torrents.assert_not_called()
+
+    def test_successful_orphan_cleanup_has_no_warnings(self):
+        with self.assertLogs('torrent-guard', level='DEBUG') as logs:
+            self.tick()
+        self.assertFalse(self.path.exists())
+        self.assertFalse(any(record.levelno >= logging.WARNING for record in logs.records))
+
+    def test_empty_directory_cleanup_waits_and_preserves_scope_roots(self):
+        self.path.unlink()
+        self.tick(end=840)
+        self.assertTrue(self.path.parent.is_dir())
+        self.cleaner.poll(self.now + 900)
+        self.assertFalse(self.path.parent.exists())
+        for kind in ('complete', 'incomplete'):
+            for media in ('tv', 'movies'):
+                self.assertTrue((self.root / kind / media).is_dir())
+
+    def test_file_cleanup_retires_own_empty_quarantine_then_directory_waits(self):
+        self.tick()
+        self.assertTrue(self.path.parent.is_dir())
+        self.assertEqual(list(self.path.parent.iterdir()), [])
+        self.tick(start=960, end=1800)
+        self.assertTrue(self.path.parent.is_dir())
+        self.cleaner.poll(self.now + 1860)
+        self.assertFalse(self.path.parent.exists())
+
+    def test_empty_directory_owned_by_saved_torrent_is_protected(self):
+        self.path.unlink()
+        self.qbit.files.return_value = []
+        self.qbit.torrents.return_value = [self.torrent('metaDL', tags='save', progress=0, downloaded=0, completed=0, completion_on=0)]
+        self.tick()
+        self.assertTrue(self.path.parent.is_dir())
+
+    def test_new_file_before_directory_removal_prevents_rmdir(self):
+        self.path.unlink()
+        self.tick(end=840)
+        original = self.cleaner.protected
+        calls = 0
+        def create_payload():
+            nonlocal calls
+            calls += 1
+            result = original()
+            if calls == 2:
+                self.path.write_bytes(b'new data')
+            return result
+        with patch.object(self.cleaner, 'protected', side_effect=create_payload):
+            self.cleaner.poll(self.now + 900)
+        self.assertEqual(self.path.read_bytes(), b'new data')
+        self.assertFalse(self.cleaner.failures)
+
+    def test_empty_directory_mismatched_write_mount_is_never_removed(self):
+        self.path.unlink()
+        self.tick(end=840)
+        self.guard.config = replace(self.config, orphan_write_root=str(self.root / 'other'))
+        self.cleaner.poll(self.now + 900)
+        self.assertTrue(self.path.parent.is_dir())
+
+    def test_directory_new_content_during_rmdir_is_retained_without_warning(self):
+        self.path.unlink()
+        self.tick(end=840)
+        import os
+        original = os.rmdir
+        def add_file(name, *, dir_fd):
+            self.path.write_bytes(b'new arrival')
+            return original(name, dir_fd=dir_fd)
+        with patch('orphans.os.rmdir', side_effect=add_file), self.assertNoLogs('torrent-guard', level='WARNING'):
+            self.cleaner.poll(self.now + 900)
+        self.assertEqual(self.path.read_bytes(), b'new arrival')
+
+    def test_empty_directory_dry_run_and_restart_keep_safe_timer(self):
+        self.path.unlink()
+        self.tick(end=840)
+        guard = Guard(replace(self.config, dry_run=True), self.qbit, {'SONARR': self.arr})
+        self.addCleanup(guard.store.db.close)
+        guard.orphan_cleaner.poll(self.now + 900)
+        self.assertTrue(self.path.parent.is_dir())
+        guard = Guard(self.config, self.qbit, {'SONARR': self.arr})
+        self.addCleanup(guard.store.db.close)
+        guard.orphan_cleaner.poll(self.now + 900)
+        self.assertFalse(self.path.parent.exists())
+
+    def test_same_failure_warns_once_across_retries_and_restart_then_recovers(self):
+        self.tick(end=840)
+        with patch('deletion.FileVerifier.remove', side_effect=PermissionError('denied')):
+            with self.assertLogs('torrent-guard', level='DEBUG') as logs:
+                self.tick(start=900, end=1800)
+                guard = Guard(self.config, self.qbit, {'SONARR': self.arr})
+                self.addCleanup(guard.store.db.close)
+                for seconds in range(1860, 2761, 60):
+                    guard.orphan_cleaner.poll(self.now + seconds)
+        self.assertEqual(sum(record.levelno >= logging.WARNING for record in logs.records), 1)
+        self.assertTrue(self.path.exists())
+        self.assertEqual(guard.store.db.execute('SELECT count(*) FROM orphan_failures').fetchone()[0], 1)
+        for seconds in range(2820, 3661, 60):
+            guard.orphan_cleaner.poll(self.now + seconds)
+        self.assertFalse(self.path.exists())
+        self.assertEqual(guard.store.db.execute('SELECT count(*) FROM orphan_failures').fetchone()[0], 0)
+
+    def test_changed_failure_emits_new_warning_and_dry_run_does_not_persist_it(self):
+        with self.assertLogs('torrent-guard', level='WARNING') as logs:
+            self.cleaner.report_failure('scan', 'denied')
+            self.cleaner.report_failure('scan', 'denied')
+            self.cleaner.report_failure('scan', 'stale handle')
+        self.assertEqual(len(logs.records), 2)
+        self.guard.config = replace(self.config, dry_run=True)
+        self.cleaner.report_failure('other', 'dry run denied')
+        self.assertEqual(self.guard.store.db.execute('SELECT count(*) FROM orphan_failures').fetchone()[0], 1)
+
+    def test_concurrent_import_disappearance_is_silent_after_verified_absence(self):
+        self.tick(end=840)
+        def imported(*args):
+            self.path.unlink()
+            raise FileNotFoundError('already moved')
+        with patch('deletion.FileVerifier.remove', side_effect=imported), self.assertLogs('torrent-guard', level='INFO') as logs:
+            self.cleaner.poll(self.now + 900)
+        self.assertFalse(any(record.levelno >= logging.WARNING for record in logs.records))
+        self.assertFalse(self.cleaner.rows)
+
+    def test_mount_mismatch_warns_once_and_never_rebases_capture_or_deletes(self):
+        self.tick(end=840)
+        # Captures belong to their saved roots even when discovery sees a new
+        # mount; unlike an uncaptured file, they cannot be safely adopted.
+        path, (first, last, manifest) = next(iter(self.cleaner.rows.items()))
+        manifest['items'][0]['quarantine'] = 'Show/.torrent-guard-abc'
+        manifest['items'][0]['quarantine_identity'] = [1, 2]
+        manifest['roots']['/downloads/incomplete/tv']['identity'] = [-1, -1]
+        self.cleaner.save(path)
+        with self.assertLogs('torrent-guard', level='DEBUG') as logs:
+            self.tick(start=900, end=1800)
+        self.assertEqual(sum(record.levelno >= logging.WARNING for record in logs.records), 1)
+        self.assertTrue(self.path.exists())
+        self.assertEqual(self.cleaner.rows[path][2]['roots']['/downloads/incomplete/tv']['identity'], [-1, -1])
 
     def test_seeding_states_are_complete_but_moving_and_checking_are_not(self):
         torrent = dict(progress=1, amount_left=0, completion_on=self.now - 3600)

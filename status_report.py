@@ -64,7 +64,9 @@ def issue_details(message: str) -> dict:
             reason = reason_match[1]
         elif name:
             reason = message[name.end():]
-            reason = re.sub(r"\b(?:paths|save_path|content_path|download_path)=('(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\")", "", reason)
+            quoted_path = r"(?:'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\")"
+            reason = re.sub(r"\bpaths=" + quoted_path + r"(?:, " + quoted_path + r")*(?: \(\+\d+ more recorded paths\))?", "", reason)
+            reason = re.sub(r"\b(?:save_path|content_path|download_path)=" + quoted_path, "", reason)
             reason = reason.lstrip(" :;") or message[:name.start()].strip()
     category, title, action = "Other", "Operation needs attention", "Review the details; Guard preserves downloads when checks are inconclusive."
     if "quarantined object changed" in message or "source reappeared after quarantine" in message:
@@ -75,9 +77,17 @@ def issue_details(message: str) -> dict:
     elif message.startswith("ORPHAN deferred"):
         category, title = "Orphan cleanup", "Unowned file cleanup deferred"
         action = "Guard retained the file and reset its absence timer. It will retry after another 15 minutes of confirmed client absence."
+        if "root identity changed" in message or "mapping changed" in message:
+            title = "Cleanup blocked by a changed download mount"
+            action = "Check the download mounts and saved quarantine evidence. Guard cannot safely reuse the old root identity; repeated retries do not authorize deletion. Keep the journal and captured payload."
     elif message.startswith("DEFER validation"):
         category, title = "File access", "File access check deferred"
         action = "Check download mount access and permissions. Guard retains the file and retries automatically."
+        if "ESTALE" in reason or "Stale file handle" in reason:
+            files = re.findall(r"'([^']+)'", reason)
+            filename = filename_only(files[-1]) if files else ""
+            reason = "The download share returned a stale NFS file handle (ESTALE). Guard could not read the file."
+            action = "Check the NFS server and the media host's download mount. Guard retains the download and retries automatically."
     elif "conflicting Arr ownership" in message:
         category, title = "Ownership", "Sonarr/Radarr ownership is ambiguous"
         action = "Check the torrent category and tags. Guard skips it until ownership is unambiguous."
@@ -90,11 +100,14 @@ def issue_details(message: str) -> dict:
         if "blocklist unconfirmed" in message or "queue match" in message:
             category, title = "Arr", "Arr rejection is not confirmed"
             action = "Check the matching Arr queue item. Guard keeps the download until rejection is confirmed."
-    elif message.startswith("Poll failed") or "HTTP " in message:
+    elif message.startswith(("Poll failed", "Import history failed")) or "HTTP " in message:
         category, title = "Service", "A service request failed"
         action = "Check service availability and configured API access. Guard will retry."
-    retry = re.search(r"\bretry_in=(\d+)s\b", reason)
-    attempt = re.search(r"\battempt=(\d+)\b", reason)
+        if message.startswith("Import history failed"):
+            title = "Import history could not be checked"
+            action = "Check the Arr service and maintenance status. Guard preserves downloads until import history is available; confirmed maintenance suspends processing automatically."
+    retry = re.search(r"\bretry_in=(\d+)s\b", message)
+    attempt = re.search(r"\battempt=(\d+)\b", message)
     reason = re.split(r";?\s*retry_in=|;?\s*retry_at=", reason, maxsplit=1)[0].strip(" ;")
     recovery = re.search(r"\.torrent-guard-[0-9a-f]+", message)
     return {"category": category, "title": title, "download": private_text(filename_only(download)) if download else "",
@@ -186,7 +199,7 @@ class StatusHistory(logging.Handler):
             with self.database:
                 decision = next((label for prefix, label in (
                     ("ACCEPT completed ", "Validated"), ("CLEANED ", "Cleaned"),
-                    ("ORPHAN removed ", "Orphan file removed"),
+                    ("ORPHAN removed ", "Orphan removed"),
                     ("DELETE requested ", "Deletion requested"), ("LEFTOVER cleanup attempted ", "Leftover cleanup attempted"),
                     ("RETIRED record:", "Record retired"), ("ARCHIVED record", "Record archived"),
                     ("WAIT import ", "Waiting for import"), ("CLEANUP scheduled ", "Cleanup scheduled"),
@@ -371,7 +384,13 @@ def journal_data(path: Path, names: dict) -> dict:
                     f"SELECT r.hash, p.name, r.attempts, r.next_at, r.reason FROM {table} r LEFT JOIN pending p ON r.hash=p.hash ORDER BY r.next_at LIMIT 25"):
                 holds.append({"name": private_text(name or names.get(h) or "Retained download"), "type": label,
                               "attempt": attempt, "next_at": next_at, "reason": private_text(reason)})
-        return {"available": True, "counts": counts, "pending": pending, "holds": holds}
+        orphan_holds = []
+        # Older journals remain readable without running migrations from HTTP.
+        if database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='orphan_failures'").fetchone():
+            counts["orphan_failures"] = database.execute("SELECT count(*) FROM orphan_failures").fetchone()[0]
+            for path, reason in database.execute("SELECT path, reason FROM orphan_failures ORDER BY path LIMIT 25"):
+                orphan_holds.append(issue_details(f"ORPHAN deferred {path}; timer reset: {reason}"))
+        return {"available": True, "counts": counts, "pending": pending, "holds": holds, "orphan_holds": orphan_holds}
 
 
 def collect_status() -> dict:

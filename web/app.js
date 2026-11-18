@@ -308,7 +308,10 @@ function renderIssues(history) {
   $("issues-forward").disabled = $("issues-last").disabled = issuesPage === pages - 1;
   const first = items.length ? issuesPage * ACTIVITY_PAGE_SIZE + 1 : 0;
   const last = Math.min((issuesPage + 1) * ACTIVITY_PAGE_SIZE, items.length);
-  $("issues-page").textContent = history?.available ? `Page ${issuesPage + 1} of ${pages} · ${first}–${last} of ${items.length} groups` : "Warning history unavailable";
+  const events = items.reduce((total, item) => total + (item.occurrences || 1), 0);
+  $("issues-page").textContent = history?.available
+    ? `Page ${issuesPage + 1} of ${pages} · ${first}–${last} of ${items.length} groups · ${events} events${pages === 1 ? " · All groups fit on this page" : ""}`
+    : "Warning history unavailable";
 }
 
 function render(data) {
@@ -418,6 +421,7 @@ function render(data) {
     ["Import grace", observed.import_grace],
     ["Filesystem holds", persisted.filesystem_retry],
     ["Cleanup retries", persisted.cleanup_retry],
+    ["Orphan cleanup holds", persisted.orphan_failures],
     ["Metadata waits (persisted)", persisted.metadata_wait],
     ["Stalled timers (persisted)", persisted.stalled_wait],
   ];
@@ -515,6 +519,13 @@ function render(data) {
           "note",
         ),
       );
+      $("work-details").append(work);
+    }
+    for (const item of data.journal.orphan_holds || []) {
+      const work = node("article", undefined, "work");
+      const head = node("div", undefined, "work-head");
+      head.append(node("strong", item.filename || "Orphan cleanup"), node("span", item.title, "warn"));
+      work.append(head, node("p", item.reason, "note"), node("p", item.action, "issue-action"));
       $("work-details").append(work);
     }
     if (!$("work-details").children.length)

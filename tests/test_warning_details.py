@@ -6,10 +6,53 @@ import tempfile
 import time
 import unittest
 
-from status_report import ISSUE_EVENT_LIMIT, StatusHistory, history_data, issue_details
+from status_report import ISSUE_EVENT_LIMIT, StatusHistory, history_data, issue_details, journal_data
+from guard import PendingStore
 
 
 class WarningDetailsTests(unittest.TestCase):
+    def test_active_orphan_holds_remain_visible_without_creating_or_migrating_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'journal.sqlite3'
+            store = PendingStore(str(path))
+            self.addCleanup(store.db.close)
+            self.assertEqual(journal_data(path, {})['orphan_holds'], [])
+            store.db.execute('CREATE TABLE orphan_failures (path TEXT PRIMARY KEY, reason TEXT NOT NULL)')
+            for index in range(30):
+                store.db.execute('INSERT INTO orphan_failures VALUES (?,?)',
+                                 (f'/downloads/incomplete/tv/show/file{index}.txt', 'download mount/root identity changed; manual review required'))
+            store.db.commit()
+            data = journal_data(path, {})
+            self.assertEqual(data['counts']['orphan_failures'], 30)
+            self.assertEqual(len(data['orphan_holds']), 25)
+            self.assertNotIn('/downloads', str(data['orphan_holds']))
+            self.assertEqual(store.db.execute('SELECT count(*) FROM orphan_failures').fetchone()[0], 30)
+
+    def test_mount_change_requires_review_instead_of_promising_timer_recovery(self):
+        data = issue_details("ORPHAN deferred /downloads/incomplete/tv/show/extra.txt; timer reset: download mount/root identity changed; manual review required")
+        self.assertEqual(data["filename"], "extra.txt")
+        self.assertIn("changed download mount", data["title"])
+        self.assertIn("cannot safely reuse", data["action"])
+        self.assertNotIn("retry after another", data["action"])
+
+    def test_multiple_saved_paths_do_not_leak_into_cleanup_reason(self):
+        data = issue_details("PENDING name='Movie' paths='/downloads/complete/Movie/video.mp4', '/downloads/complete/Movie/video.srt', '/downloads/complete/Movie/extra.txt', '/downloads/complete/Movie/poster.jpg' (+2 more recorded paths): cleanup failed [RADARR] kind=imported phase=delete: torrent moved or changed before deletion; retry_in=60s attempt=1")
+        self.assertEqual(data["reason"], "cleanup failed [RADARR] kind=imported phase=delete: torrent moved or changed before deletion")
+        self.assertEqual(data["retry_seconds"], 60)
+
+    def test_stale_handle_card_is_concise_and_keeps_filename_and_retry(self):
+        data = issue_details("DEFER validation name='Movie' paths='/downloads/Movie/video.mp4' reason=video not readable at Movie/video.mp4; filesystem/validation unavailable (ESTALE) for Movie/video.mp4: [Errno 116] Stale file handle: 'video.mp4'; retry_in=30s attempt=1")
+        self.assertEqual(data["filename"], "video.mp4")
+        self.assertNotIn("Movie/", data["reason"])
+        self.assertIn("ESTALE", data["reason"])
+        self.assertEqual(data["retry_seconds"], 30)
+        self.assertEqual(data["attempt"], 1)
+
+    def test_import_history_failure_is_a_service_problem(self):
+        data = issue_details("Import history failed [RADARR]; preserving downloads: <urlopen error [Errno 111] Connection refused>")
+        self.assertEqual(data["category"], "Service")
+        self.assertIn("maintenance", data["action"])
+
     def test_reported_orphan_examples_keep_filename_and_explain_safety_hold(self):
         folder = "Example.Series.S19E11.720p[Group]"
         for filename in ("[Group]Downloaded from tracker.example .txt", "NEW upcoming releases by Example.txt", folder + ".mkv.nfo", folder + ".mkv.!qB"):
