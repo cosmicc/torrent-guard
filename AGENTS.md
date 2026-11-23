@@ -42,7 +42,10 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
   output. Read-only session-matched agent status may include identity-checked
   app states; old/unreachable agents mean unknown. No status call controls jobs.
   Deduplicate failed-job alerts per attempt; keep recovery guidance ahead of
-  bounded status summaries. Never bypass an active hold to install an upgrade.
+  bounded status summaries. Status collection defaults to 120 seconds; optional
+  OMV snapraid_status_timeout_seconds is an integer from 10 to 600. Preserve a
+  bounded partial report on timeout and distinguish launch/output errors without
+  sending private exception text. Never bypass an active hold to install an upgrade.
 - install.py, scripts/host_setup.py, scripts/app_install.py,
   scripts/enroll_maintenance_key.py, tests/test_host_setup.py — recommended
   media-first then OMV installation/upgrade. Read INSTALL.md and

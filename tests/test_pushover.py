@@ -23,7 +23,7 @@ class NotificationSequenceTests(remote.RemoteMaintenanceTests):
             return True
 
         for target, replacement in (('maintenance.send_pushover', deliver),
-                                    ('maintenance.snapraid_status', lambda config_path='': 'SnapRAID status:\nNo errors.')):
+                                    ('maintenance.snapraid_status', lambda config_path='', timeout_seconds=120: 'SnapRAID status:\nNo errors.')):
             context = patch(target, replacement)
             context.start()
             self.addCleanup(context.stop)
@@ -175,6 +175,21 @@ class NotificationSequenceTests(remote.RemoteMaintenanceTests):
         self.controller.tick(self.at(8, 3))
         self.assertFalse(self.alerts)
 
+    def test_status_timeout_configuration_is_bounded_and_used_by_alerts(self):
+        for value in (10, 120, 300, 600):
+            controller = maintenance.RemoteCoordinator(self.omv, {**self.connection,
+                'snapraid_status_timeout_seconds': value})
+            self.assertEqual(controller.snapraid_status_timeout, value)
+        for value in (True, 0, 9, 601, '300', None, float('inf')):
+            with self.assertLogs('maintenance'):
+                controller = maintenance.RemoteCoordinator(self.omv, {**self.connection,
+                    'snapraid_status_timeout_seconds': value})
+            self.assertEqual(controller.snapraid_status_timeout, 120)
+        self.controller.snapraid_status_timeout = 300
+        with patch('maintenance.snapraid_status', return_value='SnapRAID status: healthy') as status:
+            self.controller.tick(self.at(8, 2, 1))
+        status.assert_called_once_with('', 300)
+
     def test_disabled_and_invalid_credentials_do_not_block_jobs(self):
         for settings in ({}, {'app_token': 'bad'}, {'user_key': 123}, 'bad'):
             with self.subTest(settings=settings):
@@ -226,7 +241,7 @@ class DeliveryTests(unittest.TestCase):
     def test_status_output_timeout_and_nonzero_are_informational(self):
         def status(command, **kwargs):
             self.assertEqual(command, ['/usr/bin/snapraid', 'status'])
-            self.assertEqual(kwargs['timeout'], 20)
+            self.assertEqual(kwargs['timeout'], 120)
             kwargs['stdout'].write(b'x'*9000 + b'\nNo errors.\n')
             return subprocess.CompletedProcess(command, 2)
         with patch('maintenance.subprocess.run', side_effect=status):
@@ -234,9 +249,31 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn('exit 2', text)
         self.assertTrue(text.endswith('No errors.'))
         self.assertLess(len(text), 750)
-        for error in (FileNotFoundError(), subprocess.TimeoutExpired('snapraid', 20)):
+        for error, expected in ((FileNotFoundError(2, 'private-path'), 'could not start'),
+                                (PermissionError(13, 'private-path'), 'permission denied')):
             with patch('maintenance.subprocess.run', side_effect=error):
-                self.assertIn('unavailable', maintenance.snapraid_status())
+                text = maintenance.snapraid_status()
+                self.assertIn(expected, text)
+                self.assertNotIn('private-path', text)
+
+
+    def test_timeout_preserves_partial_report_and_identifies_actual_limit(self):
+        def slow_status(command, **kwargs):
+            self.assertEqual(kwargs['timeout'], 300)
+            kwargs['stdout'].write(b'Loading state...\nDisk report still loading.\n')
+            raise subprocess.TimeoutExpired(command, 300)
+        with patch('maintenance.subprocess.run', side_effect=slow_status):
+            text = maintenance.snapraid_status(timeout_seconds=300)
+        self.assertIn('timed out after 300 seconds (partial report)', text)
+        self.assertIn('Disk report still loading.', text)
+        self.assertNotIn('could not start', text)
+
+    def test_temporary_storage_error_is_distinct_from_launch_or_timeout(self):
+        with patch('maintenance.tempfile.TemporaryFile', side_effect=OSError(28, 'private-path')):
+            text = maintenance.snapraid_status()
+        self.assertIn('OS error 28', text)
+        self.assertIn('temporary storage', text)
+        self.assertNotIn('private-path', text)
 
     def test_optional_setup_uses_hidden_readers_and_validates_pairs(self):
         ask, secret, output = Mock(return_value='y'), Mock(side_effect=['a'*30, 'b'*30]), Mock()

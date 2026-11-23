@@ -7,6 +7,7 @@ only calls read_maintenance(). Each host preserves its own durable journal.
 """
 import argparse
 from datetime import datetime
+import errno
 import fcntl
 import hashlib
 import http.client
@@ -73,23 +74,34 @@ def send_pushover(token: str, user: str, title: str, message: str) -> bool:
         connection.close()
 
 
-def snapraid_status(config_path: str = "") -> str:
+def snapraid_status(config_path: str = "", timeout_seconds: int = 120) -> str:
     """Collect read-only array status with a deadline and bounded output read."""
     try:
         with tempfile.TemporaryFile() as output:
             command = ["/usr/bin/snapraid"] + (["-c", config_path] if config_path else []) + ["status"]
-            result = subprocess.run(command, stdout=output,
-                                    stderr=subprocess.STDOUT, timeout=20, check=False)
+            try:
+                result = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT,
+                                        timeout=timeout_seconds, check=False)
+                label = "SnapRAID status" + (f" (exit {result.returncode})" if result.returncode else "")
+            except subprocess.TimeoutExpired:
+                # run() kills and waits for this read-only child on timeout.
+                # Keep its partial report: loading large content files can be
+                # slow even when the binary and array configuration are valid.
+                label = f"SnapRAID status timed out after {timeout_seconds} seconds (partial report)"
+            except OSError as error:
+                reason = {errno.ENOENT: "executable or required loader missing",
+                          errno.EACCES: "execution permission denied"}.get(
+                    error.errno, f"OS error {error.errno}")
+                return "SnapRAID status could not start: " + reason + "; check /usr/bin/snapraid on OMV."
             output.seek(0, os.SEEK_END)
             length = output.tell()
             output.seek(max(0, length - 8192))
             text = output.read(8192).decode("utf-8", errors="replace")
         # Keep the tail containing SnapRAID's summary, avoiding terminal controls.
         text = "".join(char for char in text if char in "\n\t" or char.isprintable()).strip()
-        label = "SnapRAID status" + (f" (exit {result.returncode})" if result.returncode else "")
         return label + ":\n" + (text[-700:] or "No output returned.")
-    except (OSError, subprocess.SubprocessError):
-        return "SnapRAID status unavailable; check /usr/bin/snapraid and its default configuration on OMV."
+    except OSError as error:
+        return f"SnapRAID status output unavailable (OS error {error.errno}); check OMV temporary storage."
 
 
 def read_maintenance(state_db: str | Path) -> dict:
@@ -369,6 +381,10 @@ class RemoteCoordinator(Coordinator):
         if not isinstance(self.snapraid_config, str) or (self.snapraid_config and not Path(self.snapraid_config).is_absolute()):
             LOG.warning("Invalid SnapRAID status configuration; using default configuration")
             self.snapraid_config = ""
+        self.snapraid_status_timeout = connection.get("snapraid_status_timeout_seconds", 120)
+        if type(self.snapraid_status_timeout) is not int or not 10 <= self.snapraid_status_timeout <= 600:
+            LOG.warning("Invalid SnapRAID status timeout; using 120 seconds (allowed: 10-600)")
+            self.snapraid_status_timeout = 120
         for name in ("identity_file", "known_hosts_file"):
             value = connection.get(name)
             if not isinstance(value, str) or not Path(value).is_absolute():
@@ -396,7 +412,7 @@ class RemoteCoordinator(Coordinator):
         stamp = datetime.now(ZONE).strftime("%m.%d.%Y %H:%M %Z%z")
         message = stamp + "\n" + message
         if status:
-            summary = snapraid_status(self.snapraid_config)
+            summary = snapraid_status(self.snapraid_config, self.snapraid_status_timeout)
             budget = max(0, 1024 - len(message) - 2)
             if len(summary) > budget:
                 # Retain the status header/exit code and final summary rather
