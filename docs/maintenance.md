@@ -73,8 +73,18 @@ sync/scrub complete after confirmed restoration. Completion/transition messages
 include a bounded tail of SnapRAID status. Apps that were already stopped remain
 stopped; completion messages describe restoration of their original states.
 
-Failures also alert, preserving the maintenance hold for review. Changed failure
-reasons can alert again. Messages use normal Pushover priority/device settings
+Failures also alert, preserving the maintenance hold for review. Alerts show
+session/date, job phases, the original script exit code (when recorded), current
+Sonarr/Radarr state, the upgrade hold and the safe OMV retry instructions. They
+include a bounded SnapRAID status summary. A read-only session-matched status
+request checks saved container identities; SSH failure, changed containers or an
+older agent yields unknown state. Lost finish acknowledgements may leave apps
+running, so an active OMV journal alone is never described as proof of shutdown.
+The root failure is stored separately from the changing generic journal detail;
+raw script output and exceptions are never sent to Pushover. Old journals cannot
+recover an exit code they never recorded. Repeated ticks deduplicate the same
+job failure; a failed explicitly authorized retry alerts again. Other changed
+failure reasons can also alert again. Messages use normal Pushover priority/device settings
 and Eastern timestamps. Status output is sent to Pushover, so it may include
 array names/details. Its collection is read-only, limited to 20 seconds; missing
 SnapRAID, nonzero status and timeouts are reported without affecting maintenance.
@@ -190,8 +200,22 @@ Restart policies remain disabled until a successful finish acknowledgement.
 If the finish response is lost after apps already restarted, retry only confirms
 that same completed session; it does not restart jobs or reopen the hold.
 
+An installer message saying maintenance is active or needs recovery means a
+host journal is still active; it is not permission to delete the journal, clear
+the marker or restart apps manually. On media, inspect the read-only agent state
+with `sudo cat /var/lib/torrent-guard-maintenance-agent/state.json`. Matching
+session IDs on both hosts confirm which session must recover. An old failed
+session retains its original job plan, even across a Monday/date boundary.
+
+The `status` command reports phases and recorded failures; it cannot reconstruct
+script errors or exit codes missing from older journals. Inspect the guarded
+script's own logs/OMV job output to find the underlying cause. A failed sync may
+have made partial progress; a zero process count means it stopped, not that the
+underlying issue was fixed.
+
 Fix the underlying problem and verify on OMV that **no SnapRAID or guarded-script
-process remains running**. Only then authorize a failed/interrupted-job retry:
+process remains running** using `pgrep -af 'snapraid|snapraid-guarded'`. Only then
+authorize a failed/interrupted-job retry:
 
 ```bash
 sudo /usr/local/sbin/torrent-guard-maintenance retry --confirm-jobs-stopped
@@ -199,7 +223,11 @@ sudo /usr/local/sbin/torrent-guard-maintenance retry --confirm-jobs-stopped
 
 The next tick retries only failed/interrupted phases; completed jobs remain
 complete. SSH failures before job launch recover automatically once connectivity
-returns. Never delete either journal or rewrite container IDs to bypass safety.
+returns. Once status shows `active: false` on OMV and the media agent journal
+also shows `active: false`, rerun `sudo python3 install.py media` on media, then
+`sudo python3 install.py omv` on OMV to upgrade/configure notifications. New
+notification code cannot alert for a failure on an older, not-yet-upgraded host.
+Never delete either journal or rewrite container IDs to bypass safety.
 
 Repository tests use isolated fixtures and temporary files. Disposable Docker
 checks validate stop/restore behavior, not your NFS mounts, script internals,

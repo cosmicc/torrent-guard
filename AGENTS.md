@@ -37,6 +37,12 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
   Persist attempts before bounded HTTPS delivery; never let notification/status
   failures change job authorization, holds or restoration. Alert success only
   after session-matched finish acknowledgement. Keep keys out of journals/logs.
+  Preserve structured job failures and attempt counts across polls/restarts.
+  Failure alerts use fixed reason labels/exit codes, not raw exception/script
+  output. Read-only session-matched agent status may include identity-checked
+  app states; old/unreachable agents mean unknown. No status call controls jobs.
+  Deduplicate failed-job alerts per attempt; keep recovery guidance ahead of
+  bounded status summaries. Never bypass an active hold to install an upgrade.
 - install.py, scripts/host_setup.py, scripts/app_install.py,
   scripts/enroll_maintenance_key.py, tests/test_host_setup.py — recommended
   media-first then OMV installation/upgrade. Read INSTALL.md and
