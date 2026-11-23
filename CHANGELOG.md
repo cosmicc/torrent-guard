@@ -3,6 +3,26 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 2.8 - 11.23.2026
+
+### Added
+
+- Optional OMV `snapraid_status_timeout_seconds` setting (10–600 seconds) for
+  notification status collection, with a 120-second default for larger arrays.
+- Preserve bounded partial SnapRAID status output when the deadline expires.
+
+### Changed
+
+- Give read-only SnapRAID status reporting more time to load large content files;
+  notification deadlines remain independent of job authorization and recovery.
+
+### Fixed
+
+- Report the actual timeout and limit instead of suggesting a missing executable
+  or incorrect configuration when an otherwise working status command is slow.
+- Distinguish process launch/permission failures from temporary-output storage
+  errors without including private exception details in notifications.
+
 ## 2.7 - 11.23.2026
 
 ### Added

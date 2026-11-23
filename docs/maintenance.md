@@ -86,8 +86,21 @@ recover an exit code they never recorded. Repeated ticks deduplicate the same
 job failure; a failed explicitly authorized retry alerts again. Other changed
 failure reasons can also alert again. Messages use normal Pushover priority/device settings
 and Eastern timestamps. Status output is sent to Pushover, so it may include
-array names/details. Its collection is read-only, limited to 20 seconds; missing
-SnapRAID, nonzero status and timeouts are reported without affecting maintenance.
+array names/details. Its collection is read-only and defaults to a 120-second
+limit so larger content files have time to load. Optional top-level
+`snapraid_status_timeout_seconds` in OMV's private configuration accepts an
+integer from 10 to 600; for example, `"snapraid_status_timeout_seconds": 300`.
+Existing configurations automatically use the new default after upgrading the
+OMV helper. Invalid values warn and fall back to 120 seconds. This setting
+changes only notification status collection, not sync/scrub execution.
+
+A timeout explicitly reports its limit and retains a bounded partial report.
+Missing executable/loader or execution permission failures identify a launch
+problem; temporary-output errors identify local storage. Nonzero status exits
+retain their exit code and output. Status problems never change maintenance
+success, authorize restoration or trigger a retry of sync/scrub. The notification
+may wait up to this limit for its status summary; final app restoration happens
+before collecting the final completion summary.
 
 Delivery follows the [Pushover HTTPS API](https://pushover.net/api), with a
 10-second timeout, verified TLS, no redirects and no secrets in URLs or logs.
