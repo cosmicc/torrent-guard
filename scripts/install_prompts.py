@@ -8,6 +8,29 @@ from collections.abc import Callable
 
 
 PROMPT_HELP = {
+    "SNAPRAID_CONFIG": (
+        "On OMV, inspect your existing /usr/local/sbin/snapraid-guarded-sync script for the "
+        "SnapRAID -c/--conf configuration path. OMV commonly keeps array configuration files "
+        "under /etc/snapraid/. Enter the absolute file path used by your scripts, without "
+        "quotes or command options, or Enter if snapraid status already works with its default "
+        "configuration. This affects read-only status summaries only; guarded jobs remain unchanged."
+    ),
+    "PUSHOVER_ENABLE": (
+        "Optional: send daily sync, Monday scrub and maintenance failure notifications through "
+        "Pushover. Enter y to configure keys, or Enter to disable. On media, keys are Docker .env "
+        "variables; on OMV, enter the same keys in its private coordinator configuration. "
+        "OMV sends notifications and needs outbound HTTPS; delivery failures never stop maintenance."
+    ),
+    "PUSHOVER_APP_TOKEN": (
+        "Sign in at https://pushover.net, create/select your Torrent Guard application under "
+        "Your Applications, and copy its API Token/Key. Paste the 30-character token only. "
+        "Input is hidden; use the same token on media and OMV."
+    ),
+    "PUSHOVER_USER_KEY": (
+        "Sign in at https://pushover.net and copy Your User Key from the dashboard. "
+        "Paste the 30-character user key only, with no quotes or spaces. Input is hidden. "
+        "Use the same key on media and OMV; notifications follow your Pushover device settings."
+    ),
     "MEDIA_HOST": (
         "On the media Docker server, run hostname -I and choose its LAN IP, or use a hostname "
         "that OMV can resolve. Enter the address of the server running sonarr/radarr, without "

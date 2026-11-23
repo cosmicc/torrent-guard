@@ -46,6 +46,53 @@ Docker commands require separate coordination. This controls these two apps,
 not every NFS client. Guard state and download storage must remain outside the
 protected array. Keep updates/recreation outside active maintenance.
 
+## Pushover notifications
+
+Run the normal media and OMV installers outside maintenance to upgrade both
+helpers. Setup offers optional notifications once on each host; Enter disables
+these alerts. Copy the application's **API Token/Key** and **Your User Key** from
+your [Pushover dashboard](https://pushover.net). Both are entered with hidden input.
+Use the same pair on both hosts:
+
+- Media Docker `.env`: `PUSHOVER_APP_TOKEN` and `PUSHOVER_USER_KEY` (both blank
+  disables). Compose passes these variables through its existing `env_file`.
+- OMV: a `pushover` object with `app_token` and `user_key` in the existing
+  root-owned, mode-0600 `/etc/torrent-guard-maintenance.json`. An empty object
+  disables notifications. OMV sends alerts; changing Docker variables alone
+  does not reconfigure OMV. No keys are transferred over the maintenance protocol.
+
+When enabled, OMV setup also asks for the SnapRAID configuration file used by
+your guarded scripts. Enter its absolute path (often under `/etc/snapraid/` on
+OMV), or Enter for SnapRAID's default. The optional top-level `snapraid_config`
+setting affects only `/usr/bin/snapraid [-c CONFIG] status`, never job commands.
+
+Daily sessions send two alerts: sync starting after confirmed app shutdown, then
+sync complete after the Docker host confirms restoration. Monday sessions send
+three: sync starting, sync complete/scrub starting while apps stay stopped, and
+sync/scrub complete after confirmed restoration. Completion/transition messages
+include a bounded tail of SnapRAID status. Apps that were already stopped remain
+stopped; completion messages describe restoration of their original states.
+
+Failures also alert, preserving the maintenance hold for review. Changed failure
+reasons can alert again. Messages use normal Pushover priority/device settings
+and Eastern timestamps. Status output is sent to Pushover, so it may include
+array names/details. Its collection is read-only, limited to 20 seconds; missing
+SnapRAID, nonzero status and timeouts are reported without affecting maintenance.
+
+Delivery follows the [Pushover HTTPS API](https://pushover.net/api), with a
+10-second timeout, verified TLS, no redirects and no secrets in URLs or logs.
+Attempts are recorded in the existing session journal before sending, including
+failures; they are not retried automatically. This prevents repeated cron alerts
+but means a crash or delivery outage can lose an alert. Do not use notifications
+as proof of array health; inspect the coordinator and job logs when needed.
+Invalid notification credentials disable alerts with a warning at runtime.
+
+For later key changes/enabling/disabling, edit both the private media `.env` and
+OMV JSON outside active maintenance (preserve all SSH settings), then rerun the
+media installer to recreate Guard. The OMV coordinator reads its configuration
+on each cron invocation. Installer reruns preserve existing notification choices.
+Rebuilding Guard alone never upgrades either host's maintenance helper.
+
 ## Installer behavior and prerequisites
 
 The normal setup is [INSTALL.md](../INSTALL.md): `sudo python3 install.py media`

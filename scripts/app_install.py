@@ -9,6 +9,7 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 
+from maintenance import pushover_keys
 from scripts.install_prompts import ask_with_help
 from scripts.maintenance_install import InstallError
 
@@ -57,6 +58,25 @@ def save_env(path: Path, content: str, expected: str | None, owner: tuple[int, i
             os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def prompt_pushover(ask, secret, output) -> dict:
+    """Offer optional notifications and read both credentials with hidden input."""
+    enabled = ask_with_help("PUSHOVER_ENABLE", "Enable Pushover maintenance notifications [y/N]: ",
+                            read=ask, output=output).strip().lower() in {"y", "yes"}
+    if not enabled:
+        return {}
+    settings = {
+        "app_token": ask_with_help("PUSHOVER_APP_TOKEN", "Pushover application token: ", read=secret, output=output).strip(),
+        "user_key": ask_with_help("PUSHOVER_USER_KEY", "Pushover user key: ", read=secret, output=output).strip(),
+    }
+    try:
+        token, user = pushover_keys(settings)
+        if not token or not user:
+            raise ValueError("Both Pushover credentials are required when enabled")
+    except ValueError as exc:
+        raise InstallError(str(exc)) from exc
+    return settings
 
 
 class AppInstall:
@@ -148,6 +168,19 @@ class AppInstall:
         saved = read_values(existing) if existing is not None else {}
         values.update(saved)
         changes = {}
+        keys = ("PUSHOVER_APP_TOKEN", "PUSHOVER_USER_KEY")
+        runtime_keys = {field.partition("=")[0] for field in (running or {}).get("Config", {}).get("Env", [])}
+        if not all(key in saved or key in runtime_keys for key in keys):
+            settings = prompt_pushover(self.ask, self.secret, self.output)
+            for key, name in zip(keys, ("app_token", "user_key")):
+                # Preserve an already supplied credential while filling its pair.
+                if self.missing(values.get(key)):
+                    values[key] = settings.get(name, "")
+                    changes[key] = values[key]
+        try:
+            pushover_keys({"app_token": values.get(keys[0], ""), "user_key": values.get(keys[1], "")})
+        except ValueError as exc:
+            raise InstallError(str(exc)) from exc
         if self.missing(values.get("QBIT_PASSWORD")):
             values["QBIT_URL"] = self.prompt("qBittorrent API URL reachable from Guard", values.get("QBIT_URL", ""), setting="QBIT_URL")
             values["QBIT_USERNAME"] = self.prompt("qBittorrent username", values.get("QBIT_USERNAME", "admin"), setting="QBIT_USERNAME")

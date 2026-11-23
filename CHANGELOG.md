@@ -3,6 +3,29 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 2.6 - 11.22.2026
+
+### Added
+
+- Optional Pushover application token and user key in Docker environment settings
+  and hidden credential entry during media/OMV setup.
+- Daily sync start and completion alerts, a Monday sync-complete/scrub-start alert,
+  and a final scrub-complete alert after confirmed restoration of Sonarr/Radarr.
+- SnapRAID status summaries in completion alerts and optional OMV array
+  configuration selection. Maintenance failure alerts identify held job phases.
+
+### Changed
+
+- Keep notification credentials in private configuration and notification attempts
+  in the existing OMV session journal to avoid repeated alerts after restarts.
+- Use bounded, verified HTTPS delivery and timed read-only status collection;
+  unavailable Pushover or status output never authorizes or prevents maintenance.
+
+### Fixed
+
+- Preserve successful job phases and original app running states when notification
+  delivery fails or a remote finish acknowledgement must be retried.
+
 ## 2.5 - 11.17.2026
 
 ### Added

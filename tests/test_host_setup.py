@@ -124,19 +124,19 @@ class ApplicationSetupTests(unittest.TestCase):
 
     def test_first_install_retains_dry_run_unless_authorized(self):
         self.present = False
-        self.ask.side_effect = ['', '']
+        self.ask.side_effect = ['', '', '']
         self.app.deploy()
         values = read_values((self.root / '.env').read_text())
         self.assertEqual(values['DRY_RUN'], 'true')
         self.assertEqual(values['ORPHAN_CLEANUP'], 'false')
-        self.assertEqual(self.ask.call_count, 2)
+        self.assertEqual(self.ask.call_count, 3)
 
     def test_fresh_install_explains_every_setting_and_choice_without_echoing_secrets(self):
         self.values.update(QBIT_PASSWORD='REPLACE_ME', SONARR_API_KEY='REPLACE_ME',
                            RADARR_API_KEY='REPLACE_ME', DOWNLOADS_HOST_PATH='/EDIT/downloads',
                            CLEANUP_COMPLETE_HOST_PATH='/EDIT/complete')
         (self.root / '.env.example').write_text(''.join(k+'='+v+'\n' for k,v in self.values.items()))
-        self.ask.side_effect = ['http://qbit.invalid:8080', 'operator', 'http://sonarr.invalid:8989', '',
+        self.ask.side_effect = ['', 'http://qbit.invalid:8080', 'operator', 'http://sonarr.invalid:8989', '',
                                 'http://radarr.invalid:7878', '', str(self.downloads), '', '', '', '', '']
         self.app.secret = Mock(side_effect=['fixture-password', 'fixture-sonarr-key', 'fixture-radarr-key'])
         self.app.configure(None)
@@ -144,13 +144,30 @@ class ApplicationSetupTests(unittest.TestCase):
         settings = ('QBIT_URL', 'QBIT_USERNAME', 'QBIT_PASSWORD', 'SONARR_URL', 'SONARR_API_KEY',
                     'SONARR_CATEGORY', 'RADARR_URL', 'RADARR_API_KEY', 'RADARR_CATEGORY',
                     'DOWNLOADS_HOST_PATH', 'QBIT_DOWNLOAD_ROOT', 'QBIT_COMPLETE_DIR', 'QBIT_INCOMPLETE_DIR',
-                    'ENABLE_REMOVAL', 'ENABLE_CLEANUP')
+                    'ENABLE_REMOVAL', 'ENABLE_CLEANUP', 'PUSHOVER_ENABLE')
         for setting in settings:
             self.assertIn(PROMPT_HELP[setting], rendered)
         for secret in ('fixture-password', 'fixture-sonarr-key', 'fixture-radarr-key'):
             self.assertNotIn(secret, rendered)
-        self.assertEqual(self.ask.call_count, 12)
+        self.assertEqual(self.ask.call_count, 13)
         self.assertEqual(self.app.secret.call_count, 3)
+
+    def test_pushover_upgrade_adds_private_pair_and_preserves_existing_settings(self):
+        before = self.saved_env()
+        before = ''.join(line for line in before.splitlines(keepends=True) if not line.startswith('PUSHOVER_'))
+        (self.root / '.env').write_text(before)
+        self.ask.side_effect = ['y']
+        self.app.secret = Mock(side_effect=['a'*30, 'b'*30])
+        self.app.configure(None)
+        after = (self.root / '.env').read_text()
+        self.assertEqual(read_values(after)['PUSHOVER_APP_TOKEN'], 'a'*30)
+        self.assertEqual(read_values(after)['PUSHOVER_USER_KEY'], 'b'*30)
+        for line in before.splitlines():
+            self.assertIn(line, after.splitlines())
+        self.app.configure(None)
+        self.assertEqual((self.root / '.env').read_text(), after)
+        self.assertEqual(self.ask.call_count, 1)
+        self.assertEqual(self.app.secret.call_count, 2)
 
     def test_new_credential_quote_round_trip_and_atomic_conflict(self):
         value = 'dollar$HOME${VALUE}"back\\slash\nline'
@@ -313,7 +330,7 @@ class BootstrapTests(fixtures.InstallerFixture):
         self.installer.run = self.command
 
     def prepare(self):
-        self.ask.side_effect = ['docker.test', '', fixtures.fingerprint(fixtures.sample_key(7)), 'admin']
+        self.ask.side_effect = ['docker.test', '', fixtures.fingerprint(fixtures.sample_key(7)), 'admin', '']
 
     def test_single_omv_pass_bootstraps_and_future_upgrade_needs_no_admin(self):
         self.prepare()
@@ -348,6 +365,25 @@ class BootstrapTests(fixtures.InstallerFixture):
         self.assertEqual(sum('-tt' in args for args in calls), 1)
         for name,value in self.normal.items():
             self.assertEqual(self.snapshot(self.paths.key.parent)[name], value)
+
+    def test_omv_notification_setup_is_hidden_private_and_preserved(self):
+        array = self.root / 'array.conf'
+        array.write_text('# fixture array')
+        array.chmod(0o600)
+        self.ask.side_effect = ['docker.test', '', fixtures.fingerprint(fixtures.sample_key(7)), 'y', str(array)]
+        execute = Mock(return_value=json.dumps({'ok': True, 'active': False, 'session': '0'*32}))
+        is_file = Path.is_file
+        with patch('scripts.host_setup.os.access', return_value=True), patch('scripts.host_setup.Path.is_file', autospec=True, side_effect=lambda path: True if path.name in ('snapraid-guarded-sync', 'snapraid-guarded-scrub') else is_file(path)), patch('scripts.host_setup.configure_omv_schedule'), patch('scripts.host_setup.getpass.getpass', side_effect=['a'*30, 'b'*30]) as hidden:
+            install_omv(self.installer, execute)
+            saved = self.paths.config.read_text()
+            config = json.loads(saved)
+            self.assertEqual(config['pushover'], {'app_token': 'a'*30, 'user_key': 'b'*30})
+            self.assertEqual(config['snapraid_config'], str(array))
+            self.assertEqual(self.paths.config.stat().st_mode & 0o777, 0o600)
+            install_omv(self.installer, execute)
+        self.assertEqual(hidden.call_count, 2)
+        self.assertEqual(self.paths.config.read_text(), saved)
+        self.assertNotIn('a'*30, str(self.output.call_args_list))
 
     def test_active_remote_maintenance_never_prompts_for_admin_or_schedules(self):
         self.prepare()

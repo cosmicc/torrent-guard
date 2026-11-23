@@ -3,6 +3,7 @@ import argparse
 import ast
 from contextlib import contextmanager
 import fcntl
+import getpass
 import grp
 import json
 import os
@@ -15,8 +16,8 @@ import subprocess
 import sys
 import tempfile
 
-from maintenance import ssh_command
-from scripts.app_install import AppInstall
+from maintenance import atomic_json, ssh_command, pushover_keys
+from scripts.app_install import AppInstall, prompt_pushover
 from scripts.maintenance_install import FORCED, HELPER, SOURCE, USER, Installer, InstallError, public_key
 from scripts.maintenance_uninstall import Uninstaller
 
@@ -337,6 +338,21 @@ def install_omv(installer: UpgradeInstaller, execute=run) -> None:
         result = check()
     if result["active"]:
         raise InstallError("Remote maintenance is active; rerun after it finishes")
+    if "pushover" not in config:
+        settings = prompt_pushover(installer.ask, getpass.getpass, installer.output)
+        if settings:
+            selected = installer.question("SNAPRAID_CONFIG", "SnapRAID configuration file [default used by snapraid status]: ").strip()
+            if selected:
+                if not Path(selected).is_absolute():
+                    raise InstallError("SnapRAID configuration must be an absolute path")
+                installer.info(Path(selected))
+                config["snapraid_config"] = selected
+        config["pushover"] = settings
+        atomic_json(path, config, 0o600)
+    try:
+        pushover_keys(config["pushover"])
+    except (ValueError, AttributeError) as exc:
+        raise InstallError("Invalid Pushover configuration; check the private OMV configuration") from exc
     configure_omv_schedule(installer, execute)
     installer.output("OMV installation/upgrade complete. No manual key copying or return installer pass is needed.")
 
