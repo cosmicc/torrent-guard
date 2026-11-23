@@ -3,6 +3,30 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 2.7 - 11.23.2026
+
+### Added
+
+- Failure alerts include session/date, job phases, original job exit code when
+  available, read-only Sonarr/Radarr running-state checks, recovery instructions
+  and a bounded SnapRAID status summary.
+- Persist job execution counts and structured failure evidence in OMV's existing
+  journal; an explicitly authorized retry can produce a fresh failure alert.
+
+### Changed
+
+- Report unknown app state when SSH, agent compatibility or container identity
+  prevents verification; never assume an unacknowledged restore left apps stopped.
+- Keep notification recovery guidance and the end of SnapRAID's status summary
+  within Pushover's message limit. Raw script output remains on OMV.
+
+### Fixed
+
+- Preserve original failed-job exit codes across later interrupted-job checks
+  and restarts instead of replacing useful failure context with generic errors.
+- Deduplicate repeated failed-job alerts across cron ticks while retaining
+  notification-only failure isolation and the existing maintenance hold rules.
+
 ## 2.6 - 11.22.2026
 
 ### Added

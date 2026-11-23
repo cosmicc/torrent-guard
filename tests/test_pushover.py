@@ -63,7 +63,7 @@ class NotificationSequenceTests(remote.RemoteMaintenanceTests):
         for _ in range(2):
             with self.assertRaises(maintenance.MaintenanceError):
                 self.controller.tick(self.at(8, 2, 1))
-        # First failure and subsequent interrupted-job warning are distinct.
+        # Later interrupted-job ticks preserve/deduplicate the original failure.
         count = len(self.alerts)
         with self.assertRaises(maintenance.MaintenanceError):
             self.controller.tick(self.at(8, 2, 1))
@@ -71,11 +71,99 @@ class NotificationSequenceTests(remote.RemoteMaintenanceTests):
         self.assertTrue(all('maintenance complete' not in alert[0] for alert in self.alerts))
         self.assertFalse(any(row['State']['Running'] for row in self.rows.values()))
 
+    def test_failure_alert_has_code_session_live_apps_recovery_and_status(self):
+        self.returncode = 23
+        with patch('maintenance.snapraid_status', return_value='SnapRAID status:\n' + 'x'*900 + '\nSUMMARY: array needs attention.'):
+            with self.assertRaises(maintenance.MaintenanceError):
+                self.controller.tick(self.at(8, 2, 1))
+        failures = [alert for alert in self.alerts if 'needs attention' in alert[0]]
+        self.assertEqual(len(failures), 1)
+        message = failures[0][1]
+        self.assertIn('2026-11-08', message)
+        self.assertIn(self.controller.state['session'], message)
+        self.assertIn('sync=failed', message)
+        self.assertIn('exited with status 23', message)
+        self.assertIn('Sonarr: stopped; Radarr: stopped', message)
+        self.assertIn('upgrade blocked', message)
+        self.assertIn('retry --confirm-jobs-stopped', message)
+        self.assertIn('no SnapRAID/guarded jobs are running', message)
+        self.assertIn('SUMMARY: array needs attention.', message)
+        self.assertLessEqual(len(message), 1024)
+        saved = self.controller.state['job_failure'].copy()
+        self.controller = maintenance.RemoteCoordinator(self.omv, {**self.connection, 'pushover': {
+            'app_token': 'a'*30, 'user_key': 'b'*30}})
+        with self.assertRaises(maintenance.MaintenanceError):
+            self.controller.tick(self.at(8, 3))
+        self.assertEqual(self.controller.state['job_failure'], saved)
+        self.assertEqual(len([alert for alert in self.alerts if 'needs attention' in alert[0]]), 1)
+
+    def test_status_request_is_read_only_and_checks_container_identity(self):
+        self.controller.tick(self.at(8, 2))
+        before = (self.agent / 'state.json').read_bytes()
+        calls = len(self.calls)
+        result = maintenance.agent_request('status ' + self.controller.state['session'], self.agent, self.marker)
+        self.assertFalse(result['containers']['sonarr']['running'])
+        self.assertEqual((self.agent / 'state.json').read_bytes(), before)
+        self.assertTrue(all(call[:2] == ('container', 'inspect') for call in self.calls[calls:]))
+        self.rows['sonarr']['Id'] = 'replacement'
+        with self.assertRaises(maintenance.MaintenanceError):
+            maintenance.agent_request('status ' + self.controller.state['session'], self.agent, self.marker)
+
+    def test_unavailable_remote_status_does_not_change_original_failure(self):
+        original = self.controller.remote
+        def remote_status(action):
+            if action == 'status':
+                raise maintenance.MaintenanceError('private connection details')
+            return original(action)
+        self.returncode = 2
+        with patch.object(self.controller, 'remote', side_effect=remote_status):
+            with self.assertRaisesRegex(maintenance.MaintenanceError, 'status 2'):
+                self.controller.tick(self.at(8, 2, 1))
+        message = self.alerts[-1][1]
+        self.assertIn('current state unknown', message)
+        self.assertNotIn('private connection details', message)
+        self.assertTrue(self.controller.state['active'])
+
+    def test_launch_failure_preserves_fixed_reason_without_exporting_exception(self):
+        process = self.process
+        def launch(command, **kwargs):
+            if command == [self.paths['sync']]:
+                raise OSError('private environment information')
+            return process(command, **kwargs)
+        with patch('maintenance.subprocess.run', side_effect=launch):
+            with self.assertRaisesRegex(maintenance.MaintenanceError, 'Could not execute'):
+                self.controller.tick(self.at(8, 2, 1))
+        self.assertEqual(self.controller.state['job_failure']['kind'], 'launch')
+        self.assertIn('script could not be launched', self.alerts[-1][1])
+        self.assertNotIn('private environment information', self.alerts[-1][1])
+        self.assertFalse(any(row['State']['Running'] for row in self.rows.values()))
+
+    def test_failure_after_authorized_retry_alerts_again_without_repeating_each_tick(self):
+        self.returncode = 3
+        with self.assertRaises(maintenance.MaintenanceError):
+            self.controller.tick(self.at(8, 2, 1))
+        self.controller.state['jobs']['sync'] = 'pending'  # Model the existing operator retry command.
+        self.controller.save()
+        with self.assertRaises(maintenance.MaintenanceError):
+            self.controller.tick(self.at(8, 3))
+        self.assertEqual(self.controller.state['job_attempts']['sync'], 2)
+        self.assertEqual(len([alert for alert in self.alerts if 'needs attention' in alert[0]]), 2)
+
+    def test_legacy_failed_journal_reports_unavailable_code_without_guessing(self):
+        self.controller.tick(self.at(8, 2))
+        self.controller.state['jobs']['sync'] = 'failed'
+        self.controller.save()
+        with self.assertRaises(maintenance.MaintenanceError):
+            self.controller.tick(self.at(8, 3))
+        self.assertIn('original exit code unavailable', self.alerts[-1][1])
+        self.assertIn('Sonarr: stopped', self.alerts[-1][1])
+
     def test_lost_finish_ack_does_not_announce_completion_until_confirmed(self):
         self.lose_finish = True
         with self.assertRaises(maintenance.MaintenanceError):
             self.controller.tick(self.at(8, 2, 1))
         self.assertFalse(any('maintenance complete' in alert[0] for alert in self.alerts))
+        self.assertIn('Sonarr: running; Radarr: running', self.alerts[-1][1])
         self.controller.tick(self.at(8, 2, 2))
         self.assertEqual(sum('maintenance complete' in alert[0] for alert in self.alerts), 1)
         self.assertEqual(len(self.jobs), 1)

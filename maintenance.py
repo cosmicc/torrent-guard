@@ -245,6 +245,11 @@ class Coordinator:
                 or details.st_mode & 0o022 or not os.access(path, os.X_OK)):
             raise MaintenanceError("Job must be an executable root-owned, non-writable regular file: " + str(path))
         self.job_start(job)
+        # A new execution supersedes its old failure without erasing completed
+        # job phases. Only fixed labels/codes are stored, never script output.
+        self.state.pop("job_failure", None)
+        attempts = self.state.setdefault("job_attempts", {})
+        attempts[job] = attempts.get(job, 0) + 1
         self.state["jobs"][job] = "running"
         self.state["detail"] = "Running SnapRAID " + job
         self.save()
@@ -255,8 +260,13 @@ class Coordinator:
             result = subprocess.run([str(path)], check=False)
         except OSError as exc:
             self.state["jobs"][job] = "failed"
+            self.state["job_failure"] = {"job": job, "kind": "launch", "at": time.time()}
+            self.save()
             raise MaintenanceError("Could not execute SnapRAID " + job) from exc
         self.state["jobs"][job] = "complete" if result.returncode == 0 else "failed"
+        if result.returncode:
+            self.state["job_failure"] = {"job": job, "kind": "exit", "exit_code": result.returncode,
+                                         "at": time.time()}
         self.save()
         if result.returncode:
             raise MaintenanceError(f"SnapRAID {job} exited with status {result.returncode}; review job logs before retrying")
@@ -386,7 +396,17 @@ class RemoteCoordinator(Coordinator):
         stamp = datetime.now(ZONE).strftime("%m.%d.%Y %H:%M %Z%z")
         message = stamp + "\n" + message
         if status:
-            message += "\n\n" + snapraid_status(self.snapraid_config)
+            summary = snapraid_status(self.snapraid_config)
+            budget = max(0, 1024 - len(message) - 2)
+            if len(summary) > budget:
+                # Retain the status header/exit code and final summary rather
+                # than truncating the useful ending behind recovery guidance.
+                header, separator, tail = summary.partition("\n")
+                if separator and budget > len(header) + 5:
+                    summary = header + "\n...\n" + tail[-(budget - len(header) - 5):]
+                else:
+                    summary = summary[:budget]
+            message += "\n\n" + summary
         send_pushover(token, user, title, message)
 
     def job_start(self, job: str) -> None:
@@ -406,6 +426,60 @@ class RemoteCoordinator(Coordinator):
                     work + " completed successfully. Sonarr and Radarr were restored "
                     "to their original running states (previously running apps restarted).", status=True)
 
+    def notify_failure(self, error: Exception) -> None:
+        """Report bounded, verified facts and preserve the original job failure.
+
+        The read-only status request supplies current app state when supported.
+        Old agents, SSH errors and changed identities yield unknown state, never
+        a claim that apps are stopped or permission to restart them.
+        """
+        if not self.notification_keys[0]:
+            return
+        jobs = self.state["jobs"]
+        phases = ", ".join(job + "=" + phase for job, phase in jobs.items())
+        failure = self.state.get("job_failure", {})
+        reason = "Coordinator could not finish; check OMV maintenance/job logs."
+        if isinstance(failure, dict) and failure.get("job") in JOBS and jobs.get(failure["job"]) == "failed":
+            job = failure["job"]
+            code = failure.get("exit_code")
+            if failure.get("kind") == "exit" and type(code) is int:
+                reason = f"SnapRAID {job} script exited with status {code}."
+            elif failure.get("kind") == "launch":
+                reason = f"SnapRAID {job} script could not be launched."
+        elif any(phase in ("failed", "running") for phase in jobs.values()):
+            reason = "SnapRAID job failed/interrupted; original exit code unavailable."
+        # Stable across restart and subsequent generic interrupted-job errors.
+        # Other incidents use a private hash, never their raw exception text.
+        identity = phases + reason + str(self.state.get("job_attempts", {}))
+        if reason.startswith("Coordinator"):
+            identity += hashlib.sha256(str(error).encode()).hexdigest()
+        event = "failure:" + hashlib.sha256(identity.encode()).hexdigest()
+        if event in self.state.get("notification_events", []):
+            return
+        apps = "Sonarr/Radarr: current state unknown (status unavailable)."
+        try:
+            data = self.remote("status")
+            states = data.get("containers", {})
+            labels = []
+            for name in CONTAINERS:
+                row = states.get(name, {})
+                if (isinstance(row, dict) and type(row.get("running")) is bool
+                        and row.get("paused") is False and row.get("restarting") is False):
+                    label = "running" if row["running"] else "stopped"
+                else:
+                    label = "unknown"
+                labels.append(name.title() + ": " + label)
+            apps = "; ".join(labels) + "."
+        except (MaintenanceError, OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass  # Notification-only check; the original maintenance error wins.
+        message = (f"Session {self.state['date']} / {self.state['session']}\n"
+                   + phases + "\n" + reason + "\n" + apps + "\n"
+                   "Maintenance hold active; automatic restart withheld; upgrade blocked.\n"
+                   "On OMV: inspect job logs and fix the cause. Once no SnapRAID/guarded jobs "
+                   "are running, authorize retry:\n"
+                   "sudo /usr/local/sbin/torrent-guard-maintenance retry --confirm-jobs-stopped")
+        self.notify(event, "SnapRAID maintenance needs attention", message, status=True)
+
     def save(self) -> None:
         """OMV stores job phases locally; only the remote agent publishes status."""
         atomic_json(self.path, self.state, 0o600)
@@ -421,7 +495,7 @@ class RemoteCoordinator(Coordinator):
             data = json.loads(result.stdout)
             if (not isinstance(data, dict) or data.get("session") != session
                     or type(data.get("active")) is not bool or data.get("ok") is not True
-                    or data["active"] != (action != "finish")):
+                    or (action != "status" and data["active"] != (action != "finish"))):
                 raise ValueError("invalid agent acknowledgement")
             return data
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
@@ -464,13 +538,7 @@ class RemoteCoordinator(Coordinator):
                 self.remote("hold")
         except (MaintenanceError, OSError, ValueError, KeyError, TypeError) as exc:
             if self.state and self.state.get("active"):
-                # Hash only for deduplication; never copy exception/API contents
-                # into a third-party message. A changed incident alerts again.
-                incident = hashlib.sha256(str(exc).encode()).hexdigest()
-                phases = ", ".join(job + "=" + phase for job, phase in self.state["jobs"].items())
-                self.notify("failure:" + incident, "SnapRAID maintenance needs attention",
-                            "Maintenance could not finish; automatic restoration is withheld "
-                            "until confirmed safe. Check OMV maintenance status and job logs. " + phases)
+                self.notify_failure(exc)
             raise
 
 
@@ -526,7 +594,16 @@ def agent_request(request: str, directory: Path = AGENT_DIRECTORY, status_file: 
                       "failed": "OMV maintenance held after failure; review OMV job logs"}[action]
             agent.state["detail"] = detail
             agent.save()
-        return {"ok": True, "session": session, "active": agent.state["active"]}
+        result = {"ok": True, "session": session, "active": agent.state["active"]}
+        if action == "status":
+            states = {}
+            for name in CONTAINERS:
+                row = agent.inspect(name)
+                if row["Id"] != agent.state["containers"][name]["id"]:
+                    raise MaintenanceError(name + " identity changed; current maintenance state unverified")
+                states[name] = {key.lower(): row["State"][key] for key in ("Running", "Paused", "Restarting")}
+            result["containers"] = states
+        return result
 
 
 def main() -> int:
