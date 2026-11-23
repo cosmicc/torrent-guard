@@ -32,6 +32,11 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
   day overruns and upgrades. Never restore between Monday jobs or on failure.
   Update host-installed helpers on both hosts outside active maintenance; the
   every-minute OMV cron job does not need a separate weekly schedule.
+  Pushover is optional and sent only by OMV; read the notification section in
+  the maintenance guide before changing hooks, credentials or event deduplication.
+  Persist attempts before bounded HTTPS delivery; never let notification/status
+  failures change job authorization, holds or restoration. Alert success only
+  after session-matched finish acknowledgement. Keep keys out of journals/logs.
 - install.py, scripts/host_setup.py, scripts/app_install.py,
   scripts/enroll_maintenance_key.py, tests/test_host_setup.py — recommended
   media-first then OMV installation/upgrade. Read INSTALL.md and

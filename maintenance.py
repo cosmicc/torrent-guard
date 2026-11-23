@@ -8,7 +8,10 @@ only calls read_maintenance(). Each host preserves its own durable journal.
 import argparse
 from datetime import datetime
 import fcntl
+import hashlib
+import http.client
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -16,7 +19,9 @@ import shlex
 import stat
 import subprocess
 import sys
+import tempfile
 import time
+import urllib.parse
 import uuid
 from zoneinfo import ZoneInfo
 
@@ -30,6 +35,61 @@ DEFAULT_STATUS = Path("/config/torrent-guard/maintenance.json")
 REMOTE_CONFIG = Path("/etc/torrent-guard-maintenance.json")
 AGENT_DIRECTORY = Path("/var/lib/torrent-guard-maintenance-agent")
 AGENT_CONFIG = Path("/etc/torrent-guard-maintenance-agent.json")
+
+
+LOG = logging.getLogger(__name__)
+
+
+def pushover_keys(settings: dict) -> tuple[str, str]:
+    """Validate an optional credential pair without including secrets in errors."""
+    token, user = settings.get("app_token", ""), settings.get("user_key", "")
+    if not token and not user:
+        return "", ""
+    if any(not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9]{30}", value)
+           for value in (token, user)):
+        raise ValueError("Pushover requires both a 30-character application token and user key")
+    return token, user
+
+
+def send_pushover(token: str, user: str, title: str, message: str) -> bool:
+    """Send one bounded HTTPS request; never redirect credentials or log replies."""
+    connection = http.client.HTTPSConnection("api.pushover.net", timeout=10)
+    try:
+        body = urllib.parse.urlencode({"token": token, "user": user,
+                                       "title": title[:250], "message": message[:1024]})
+        connection.request("POST", "/1/messages.json", body,
+                           {"Content-Type": "application/x-www-form-urlencoded"})
+        response = connection.getresponse()
+        raw = response.read(4097)
+        if response.status != 200 or len(raw) > 4096 or json.loads(raw).get("status") != 1:
+            raise ValueError("Pushover did not acknowledge the message")
+        return True
+    except (OSError, http.client.HTTPException, ValueError, AttributeError):
+        # API responses and exception text may contain credentials. Keep the
+        # warning actionable without echoing either or changing maintenance.
+        LOG.warning("Pushover notification failed; check credentials, quota and OMV HTTPS connectivity")
+        return False
+    finally:
+        connection.close()
+
+
+def snapraid_status(config_path: str = "") -> str:
+    """Collect read-only array status with a deadline and bounded output read."""
+    try:
+        with tempfile.TemporaryFile() as output:
+            command = ["/usr/bin/snapraid"] + (["-c", config_path] if config_path else []) + ["status"]
+            result = subprocess.run(command, stdout=output,
+                                    stderr=subprocess.STDOUT, timeout=20, check=False)
+            output.seek(0, os.SEEK_END)
+            length = output.tell()
+            output.seek(max(0, length - 8192))
+            text = output.read(8192).decode("utf-8", errors="replace")
+        # Keep the tail containing SnapRAID's summary, avoiding terminal controls.
+        text = "".join(char for char in text if char in "\n\t" or char.isprintable()).strip()
+        label = "SnapRAID status" + (f" (exit {result.returncode})" if result.returncode else "")
+        return label + ":\n" + (text[-700:] or "No output returned.")
+    except (OSError, subprocess.SubprocessError):
+        return "SnapRAID status unavailable; check /usr/bin/snapraid and its default configuration on OMV."
 
 
 def read_maintenance(state_db: str | Path) -> dict:
@@ -184,6 +244,7 @@ class Coordinator:
         if (not stat.S_ISREG(details.st_mode) or details.st_uid != 0
                 or details.st_mode & 0o022 or not os.access(path, os.X_OK)):
             raise MaintenanceError("Job must be an executable root-owned, non-writable regular file: " + str(path))
+        self.job_start(job)
         self.state["jobs"][job] = "running"
         self.state["detail"] = "Running SnapRAID " + job
         self.save()
@@ -199,6 +260,9 @@ class Coordinator:
         self.save()
         if result.returncode:
             raise MaintenanceError(f"SnapRAID {job} exited with status {result.returncode}; review job logs before retrying")
+
+    def job_start(self, job: str) -> None:
+        """Hook for OMV notifications after job validation and hold confirmation."""
 
     def restore(self) -> None:
         """Restore policies and start only previously running, unchanged containers."""
@@ -256,6 +320,8 @@ def root_config(path: Path) -> dict:
     data = json.loads(path.read_text())
     if not isinstance(data, dict):
         raise MaintenanceError("Configuration must be a JSON object")
+    if data.get("pushover") and info.st_mode & 0o077:
+        raise MaintenanceError("Pushover configuration must be private (mode 0600)")
     return data
 
 
@@ -275,16 +341,70 @@ class RemoteCoordinator(Coordinator):
         if self.state and self.state.get("role") != "omv":
             raise MaintenanceError("This is not an OMV journal; do not move Docker-host recovery state here")
         self.connection = connection
+        settings = connection.get("pushover", {})
+        try:
+            if not isinstance(settings, dict):
+                raise ValueError("Pushover configuration must be an object")
+            self.notification_keys = pushover_keys(settings)
+        except ValueError:
+            LOG.warning("Invalid Pushover credentials; notifications disabled; maintenance continues")
+            self.notification_keys = ("", "")
         host, user = connection.get("host", ""), connection.get("user", "guard-maintenance")
         port = connection.get("port", 22)
         if (not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]*", host)
                 or not isinstance(user, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]*", user)
                 or type(port) is not int or not 1 <= port <= 65535):
             raise MaintenanceError("Configure a valid Docker host, SSH user and port")
+        self.snapraid_config = connection.get("snapraid_config", "")
+        if not isinstance(self.snapraid_config, str) or (self.snapraid_config and not Path(self.snapraid_config).is_absolute()):
+            LOG.warning("Invalid SnapRAID status configuration; using default configuration")
+            self.snapraid_config = ""
         for name in ("identity_file", "known_hosts_file"):
             value = connection.get(name)
             if not isinstance(value, str) or not Path(value).is_absolute():
                 raise MaintenanceError("Configure an absolute SSH " + name)
+
+    def notify(self, event: str, title: str, message: str, *, status: bool = False) -> None:
+        """Attempt each event once per durable session without blocking recovery.
+
+        Record intent first: a crash or uncertain HTTP response must not produce
+        repeated alerts on every cron tick. Delivery is best effort, not a job
+        prerequisite. Notification bookkeeping failures are isolated too.
+        """
+        token, user = self.notification_keys
+        if not token or not self.state:
+            return
+        events = self.state.setdefault("notification_events", [])
+        if event in events:
+            return
+        events.append(event)
+        try:
+            self.save()
+        except (OSError, ValueError):
+            LOG.warning("Could not record Pushover event; notification skipped; maintenance continues")
+            return
+        stamp = datetime.now(ZONE).strftime("%m.%d.%Y %H:%M %Z%z")
+        message = stamp + "\n" + message
+        if status:
+            message += "\n\n" + snapraid_status(self.snapraid_config)
+        send_pushover(token, user, title, message)
+
+    def job_start(self, job: str) -> None:
+        """Announce sync, or the successful-sync transition into Monday scrub."""
+        if job == "sync":
+            self.notify("sync_start", "SnapRAID sync starting",
+                        "Sonarr and Radarr are stopped. SnapRAID sync is starting.")
+        else:
+            self.notify("scrub_start", "SnapRAID sync complete; scrub starting",
+                        "Sync completed successfully. Weekly scrub is starting. "
+                        "Sonarr and Radarr remain stopped.", status=True)
+
+    def notify_complete(self) -> None:
+        """Report completion only after the remote restoration acknowledgement."""
+        work = "Sync and weekly scrub" if "scrub" in self.state["jobs"] else "Sync"
+        self.notify("complete", "SnapRAID maintenance complete",
+                    work + " completed successfully. Sonarr and Radarr were restored "
+                    "to their original running states (previously running apps restarted).", status=True)
 
     def save(self) -> None:
         """OMV stores job phases locally; only the remote agent publishes status."""
@@ -330,15 +450,28 @@ class RemoteCoordinator(Coordinator):
         self.remote("finish")
         self.state.update(active=False, detail="Maintenance complete; Docker host confirmed restoration")
         self.save()
+        self.notify_complete()
 
     def tick(self, now: datetime | None = None) -> None:
         """Retry a lost finish acknowledgement without re-stopping restored apps."""
-        if self.state and self.state["active"] and all(phase == "complete" for phase in self.state["jobs"].values()):
-            self.restore()
-            return
-        super().tick(now)
-        if self.state and self.state["active"]:
-            self.remote("hold")
+        try:
+            if self.state and all(phase == "complete" for phase in self.state["jobs"].values()):
+                if self.state["active"]:
+                    self.restore()
+                    return
+            super().tick(now)
+            if self.state and self.state["active"]:
+                self.remote("hold")
+        except (MaintenanceError, OSError, ValueError, KeyError, TypeError) as exc:
+            if self.state and self.state.get("active"):
+                # Hash only for deduplication; never copy exception/API contents
+                # into a third-party message. A changed incident alerts again.
+                incident = hashlib.sha256(str(exc).encode()).hexdigest()
+                phases = ", ".join(job + "=" + phase for job, phase in self.state["jobs"].items())
+                self.notify("failure:" + incident, "SnapRAID maintenance needs attention",
+                            "Maintenance could not finish; automatic restoration is withheld "
+                            "until confirmed safe. Check OMV maintenance status and job logs. " + phases)
+            raise
 
 
 def ssh_command(config: dict, request: str) -> list[str]:

@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v2.5** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v2.6** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -30,6 +30,8 @@ grace interval has elapsed (15 minutes by default).
   every other day they resume after sync.
   OMV can be a separate NFS server: restricted SSH coordinates the Docker host.
   qBittorrent continues downloading; Docker control stays on that host.
+  Optional Pushover alerts cover sync/scrub starts, completion and failures,
+  including SnapRAID status summaries. See [notification setup](docs/maintenance.md#pushover-notifications).
   [One installer on each host](INSTALL.md) handles setup, upgrades, restricted
   key enrollment and OMV scheduling without changing normal SSH access.
 - The **save** tag exempts a live torrent from every Guard removal rule,
