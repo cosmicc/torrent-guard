@@ -3,6 +3,23 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 2.10 - 11.23.2026
+
+### Added
+
+- Regression coverage proving failed catch-up scrubs collect fresh status while
+  retaining the original failure and maintenance hold.
+
+### Changed
+
+- Discard earlier status snapshots on failure paths before building an alert.
+
+### Fixed
+
+- Prevent failure alerts from reusing a healthy report collected before a scrub
+  or restoration failure. Successful progress/completion alerts still reuse
+  their current post-job report.
+
 ## 2.9 - 11.23.2026
 
 ### Added

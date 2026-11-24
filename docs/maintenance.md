@@ -74,6 +74,7 @@ the saved mode, skips extra catch-up authorization for that session and warns
 once per incident. The normal Monday scrub remains planned and is still subject
 to its own guarded preflight. Recovery clears the status incident. Coverage is
 checked even when Pushover is disabled; notifications reuse the fresh report.
+Failure paths discard the earlier cache so failure alerts collect fresh status.
 
 At most one scrub runs in a daily session, following successful sync with fresh
 remote stop/NFS-flush acknowledgement. The coordinator calls the existing
