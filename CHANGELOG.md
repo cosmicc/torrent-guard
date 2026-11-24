@@ -3,6 +3,32 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 2.9 - 11.23.2026
+
+### Added
+
+- Fully automatic scrub catch-up: after successful daily sync, enter daily
+  scrubbing above 20% unscrubbed and return to weekly Monday scrubs at 5% or less.
+- Optional OMV start/stop threshold settings, durable catch-up state, progress
+  reporting and alerts for unavailable coverage or three scrubs without a
+  percentage decrease. No manual daily/weekly mode is required.
+
+### Changed
+
+- Use complete, successful, healthy SnapRAID status reports for scheduling;
+  partial, timed-out, oversized, unhealthy or ambiguous reports cannot authorize
+  an extra scrub or certify catch-up completion. Weekly plans remain intact.
+- Preserve the existing guarded scrub command and its operator-configured plan
+  and age restrictions; keep Sonarr/Radarr stopped through every planned job.
+- Reuse freshly captured status for notifications instead of repeatedly loading
+  large content files. Coverage decisions run even when Pushover is disabled.
+
+### Fixed
+
+- Persist decisions and post-scrub observation intent with job phases so crashes,
+  restarts and lost finish replies cannot repeat completed jobs or lose mode.
+- Keep active sessions from older releases on their original saved job plans.
+
 ## 2.8 - 11.23.2026
 
 ### Added

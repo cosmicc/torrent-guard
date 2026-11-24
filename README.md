@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v2.8** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v2.9** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -25,9 +25,10 @@ grace interval has elapsed (15 minutes by default).
   A status page runs in the same container behind your authenticated Nginx proxy.
 - Color-coded live logs and a Docker healthcheck show ongoing polling activity.
 - Optional [OMV/SnapRAID maintenance](docs/maintenance.md) stops Sonarr/Radarr
-  for daily 02:01 Eastern sync and, on Mondays, an immediate scrub afterward.
-  Apps remain stopped through both Monday jobs and resume after success;
-  every other day they resume after sync.
+  for daily 02:01 Eastern sync and weekly Monday scrub. Above 20% unscrubbed,
+  automatic catch-up adds daily scrubs until the backlog reaches 5% or less.
+  Apps stay stopped through planned jobs and resume after success. No manual
+  schedule switching is needed; existing scrub limits remain in effect.
   OMV can be a separate NFS server: restricted SSH coordinates the Docker host.
   qBittorrent continues downloading; Docker control stays on that host.
   Optional Pushover alerts cover sync/scrub starts, completion and failures,

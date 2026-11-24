@@ -6,6 +6,7 @@ Guard. OMV runs jobs only after SSH confirms the Docker-host hold. The daemon
 only calls read_maintenance(). Each host preserves its own durable journal.
 """
 import argparse
+from dataclasses import dataclass
 from datetime import datetime
 import errno
 import fcntl
@@ -74,34 +75,70 @@ def send_pushover(token: str, user: str, title: str, message: str) -> bool:
         connection.close()
 
 
-def snapraid_status(config_path: str = "", timeout_seconds: int = 120) -> str:
-    """Collect read-only array status with a deadline and bounded output read."""
+@dataclass(frozen=True)
+class SnapraidStatus:
+    """Bounded status evidence; displayable partial output never authorizes work."""
+
+    text: str = ""
+    label: str = "SnapRAID status"
+    complete: bool = False
+
+    def summary(self) -> str:
+        """Return the bounded operator summary used by notifications."""
+        return self.label + ":\n" + (self.text[-700:] or "No output returned.")
+
+    def unscrubbed_percent(self) -> int | None:
+        """Accept one unambiguous coverage result from a complete healthy report."""
+        if not self.complete:
+            return None
+        lines = self.text.splitlines()
+        if ("No sync is in progress." not in lines or "No error detected." not in lines
+                or any(re.search(r"DANGER!|NOT fully synced|sync in progress at", line) for line in lines)):
+            return None
+        values = []
+        for line in lines:
+            match = re.fullmatch(r"(?:The )?(\d{1,3})% of the array is not scrubbed\.", line)
+            if match:
+                values.append(int(match[1]))
+            elif line in ("The full array was scrubbed at least one time.",
+                          "The entire array has been scrubbed at least once."):
+                values.append(0)
+        return values[0] if len(values) == 1 and 0 <= values[0] <= 100 else None
+
+
+def read_snapraid_status(config_path: str = "", timeout_seconds: int = 120) -> SnapraidStatus:
+    """Collect bounded evidence, distinguishing process success from partial output."""
     try:
         with tempfile.TemporaryFile() as output:
             command = ["/usr/bin/snapraid"] + (["-c", config_path] if config_path else []) + ["status"]
+            complete = False
             try:
                 result = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT,
                                         timeout=timeout_seconds, check=False)
+                complete = result.returncode == 0
                 label = "SnapRAID status" + (f" (exit {result.returncode})" if result.returncode else "")
             except subprocess.TimeoutExpired:
-                # run() kills and waits for this read-only child on timeout.
-                # Keep its partial report: loading large content files can be
-                # slow even when the binary and array configuration are valid.
                 label = f"SnapRAID status timed out after {timeout_seconds} seconds (partial report)"
             except OSError as error:
                 reason = {errno.ENOENT: "executable or required loader missing",
-                          errno.EACCES: "execution permission denied"}.get(
-                    error.errno, f"OS error {error.errno}")
-                return "SnapRAID status could not start: " + reason + "; check /usr/bin/snapraid on OMV."
+                          errno.EACCES: "execution permission denied"}.get(error.errno, f"OS error {error.errno}")
+                return SnapraidStatus(label="SnapRAID status could not start: " + reason + "; check /usr/bin/snapraid on OMV.")
             output.seek(0, os.SEEK_END)
             length = output.tell()
-            output.seek(max(0, length - 8192))
-            text = output.read(8192).decode("utf-8", errors="replace")
-        # Keep the tail containing SnapRAID's summary, avoiding terminal controls.
-        text = "".join(char for char in text if char in "\n\t" or char.isprintable()).strip()
-        return label + ":\n" + (text[-700:] or "No output returned.")
+            output.seek(max(0, length - 65536))
+            raw = output.read(65536)
+        # Never parse a truncated/invalid/control-bearing report as policy input.
+        decoded = raw.decode("utf-8", errors="replace")
+        text = "".join(char for char in decoded if char in "\n\t" or char.isprintable()).strip()
+        complete = complete and length <= 65536 and text == decoded.strip() and "\ufffd" not in text
+        return SnapraidStatus(text=text, label=label, complete=complete)
     except OSError as error:
-        return f"SnapRAID status output unavailable (OS error {error.errno}); check OMV temporary storage."
+        return SnapraidStatus(label=f"SnapRAID status output unavailable (OS error {error.errno}); check OMV temporary storage.")
+
+
+def snapraid_status(config_path: str = "", timeout_seconds: int = 120) -> str:
+    """Return a display summary; automated policy uses the structured evidence."""
+    return read_snapraid_status(config_path, timeout_seconds).summary()
 
 
 def read_maintenance(state_db: str | Path) -> dict:
@@ -157,7 +194,7 @@ class MaintenanceError(RuntimeError):
 
 
 class Coordinator:
-    """Run daily sync and an immediate Monday scrub without overlapping imports."""
+    """Run saved maintenance jobs while preventing overlapping imports."""
 
     def __init__(self, directory: Path, status_file: Path):
         self.directory = directory
@@ -279,12 +316,23 @@ class Coordinator:
         if result.returncode:
             self.state["job_failure"] = {"job": job, "kind": "exit", "exit_code": result.returncode,
                                          "at": time.time()}
+        if result.returncode == 0:
+            self.job_completed(job)
         self.save()
         if result.returncode:
             raise MaintenanceError(f"SnapRAID {job} exited with status {result.returncode}; review job logs before retrying")
 
     def job_start(self, job: str) -> None:
         """Hook for OMV notifications after job validation and hold confirmation."""
+
+    def job_completed(self, job: str) -> None:
+        """Hook to journal post-job observation intent before committing success."""
+
+    def plan_scrub(self) -> None:
+        """Hook to extend a new OMV session only after its sync succeeds."""
+
+    def observe_scrub(self) -> None:
+        """Hook to process saved successful-scrub observation intent."""
 
     def restore(self) -> None:
         """Restore policies and start only previously running, unchanged containers."""
@@ -322,11 +370,14 @@ class Coordinator:
         old_date = self.state["date"] != now.date().isoformat()
         if jobs["sync"] == "pending" and (old_date or (now.hour, now.minute) >= (2, 1)):
             self.run_job("sync")
+        if jobs["sync"] == "complete":
+            self.plan_scrub()
         # The persisted plan belongs to the session's start date. A Monday
         # scrub follows successful sync in this same tick, even after an overrun
         # into another day. Existing journal plans remain intact across upgrades.
         if jobs.get("scrub") == "pending" and jobs["sync"] == "complete":
             self.run_job("scrub")
+        self.observe_scrub()
         if all(value == "complete" for value in jobs.values()):
             self.restore()
         else:
@@ -356,13 +407,14 @@ def private_directory(path: Path) -> None:
 
 
 class RemoteCoordinator(Coordinator):
-    """Schedule OMV jobs while controlling only a restricted remote agent."""
+    """Schedule OMV sync and automatic scrub catch-up through a restricted agent."""
 
     def __init__(self, directory: Path, connection: dict):
         super().__init__(directory, DEFAULT_STATUS)
         if self.state and self.state.get("role") != "omv":
             raise MaintenanceError("This is not an OMV journal; do not move Docker-host recovery state here")
         self.connection = connection
+        self.status_snapshot: SnapraidStatus | None = None
         settings = connection.get("pushover", {})
         try:
             if not isinstance(settings, dict):
@@ -385,6 +437,11 @@ class RemoteCoordinator(Coordinator):
         if type(self.snapraid_status_timeout) is not int or not 10 <= self.snapraid_status_timeout <= 600:
             LOG.warning("Invalid SnapRAID status timeout; using 120 seconds (allowed: 10-600)")
             self.snapraid_status_timeout = 120
+        start = connection.get("scrub_catchup_start_percent", 20)
+        stop = connection.get("scrub_catchup_stop_percent", 5)
+        if type(start) is not int or type(stop) is not int or not 0 <= stop < start <= 100:
+            raise MaintenanceError("Scrub thresholds must be integers with 0 <= stop < start <= 100")
+        self.scrub_thresholds = {"start": start, "stop": stop}
         for name in ("identity_file", "known_hosts_file"):
             value = connection.get(name)
             if not isinstance(value, str) or not Path(value).is_absolute():
@@ -412,7 +469,8 @@ class RemoteCoordinator(Coordinator):
         stamp = datetime.now(ZONE).strftime("%m.%d.%Y %H:%M %Z%z")
         message = stamp + "\n" + message
         if status:
-            summary = snapraid_status(self.snapraid_config, self.snapraid_status_timeout)
+            summary = (self.status_snapshot.summary() if self.status_snapshot is not None else
+                       snapraid_status(self.snapraid_config, self.snapraid_status_timeout))
             budget = max(0, 1024 - len(message) - 2)
             if len(summary) > budget:
                 # Retain the status header/exit code and final summary rather
@@ -426,21 +484,115 @@ class RemoteCoordinator(Coordinator):
         send_pushover(token, user, title, message)
 
     def job_start(self, job: str) -> None:
-        """Announce sync, or the successful-sync transition into Monday scrub."""
+        """Announce sync, or its successful transition into the planned scrub."""
         if job == "sync":
             self.notify("sync_start", "SnapRAID sync starting",
                         "Sonarr and Radarr are stopped. SnapRAID sync is starting.")
         else:
+            kind = "Daily catch-up" if self.state.get("scrub_reason") == "catchup" else "Weekly"
             self.notify("scrub_start", "SnapRAID sync complete; scrub starting",
-                        "Sync completed successfully. Weekly scrub is starting. "
-                        "Sonarr and Radarr remain stopped.", status=True)
+                        f"Sync completed successfully. {kind} scrub is starting. "
+                        "Sonarr and Radarr remain stopped.\n" + self.state.get("scrub_policy_detail", ""), status=True)
 
     def notify_complete(self) -> None:
         """Report completion only after the remote restoration acknowledgement."""
-        work = "Sync and weekly scrub" if "scrub" in self.state["jobs"] else "Sync"
+        work = "Sync"
+        if "scrub" in self.state["jobs"]:
+            work += " and " + ("catch-up" if self.state.get("scrub_reason") == "catchup" else "weekly") + " scrub"
         self.notify("complete", "SnapRAID maintenance complete",
                     work + " completed successfully. Sonarr and Radarr were restored "
-                    "to their original running states (previously running apps restarted).", status=True)
+                    "to their original running states (previously running apps restarted).\n"
+                    + self.state.get("scrub_policy_detail", ""), status=True)
+        self.notify_policy_notices()
+
+    def notify_policy_notices(self) -> None:
+        """Publish policy issues after restoration without changing job outcomes."""
+        if self.state.get("scrub_status_notice"):
+            self.notify("scrub_status", "SnapRAID scrub coverage unavailable",
+                        "Automatic catch-up could not verify coverage. Saved mode is unchanged; "
+                        "no extra scrub was authorized by the failed reading. Weekly scheduling remains. "
+                        "Check OMV SnapRAID status and its configured deadline.")
+        if self.state.get("scrub_stalled_notice"):
+            self.notify("scrub_stalled", "SnapRAID catch-up needs attention",
+                        "Three successful scrubs made no percentage decrease. Daily catch-up remains "
+                        "active. Check the guarded scrub's 8% plan and 10-day age cutoff, new data, "
+                        "and OMV logs. Safety checks remain in effect.")
+
+    def coverage(self) -> int | None:
+        """Read fresh full status off the array; retain its display summary in memory."""
+        self.status_snapshot = read_snapraid_status(self.snapraid_config, self.snapraid_status_timeout)
+        percent = self.status_snapshot.unscrubbed_percent()
+        policy = self.state["scrub_policy"]
+        problem = percent is None
+        new_problem = problem and not policy.get("status_problem", False)
+        self.state["scrub_status_notice"] = problem and (new_problem or self.state.get("scrub_status_notice", False))
+        if new_problem:
+            LOG.warning("Scrub coverage unavailable; automatic catch-up state preserved; weekly plan retained")
+        policy["status_problem"] = problem
+        return percent
+
+    def update_scrub_mode(self, percent: int) -> str:
+        """Apply hysteresis to reliable coverage without changing any live job phases."""
+        policy = self.state["scrub_policy"]
+        limits = self.state["scrub_thresholds"]
+        old = policy["active"]
+        if percent > limits["start"]:
+            policy["active"] = True
+        elif percent <= limits["stop"]:
+            policy["active"] = False
+        policy["last_percent"] = percent
+        if not old and policy["active"]:
+            return f"Daily catch-up started: {percent}% unscrubbed (trigger >{limits['start']}%)."
+        if old and not policy["active"]:
+            policy.update(stalled_runs=0, stalled_alerted=False)
+            return f"Catch-up complete: {percent}% unscrubbed; returning to weekly Monday scrubs."
+        return f"{percent}% unscrubbed; " + ("daily catch-up continues." if policy["active"] else "weekly Monday scrubs.")
+
+    def plan_scrub(self) -> None:
+        """Freeze a new session's extra scrub once, following a successful sync."""
+        if not self.state.get("scrub_policy_pending"):
+            return  # Preserve plans from older releases and completed decisions.
+        percent = self.coverage()
+        if percent is not None:
+            self.state["scrub_before_percent"] = percent
+            self.state["scrub_policy_detail"] = self.update_scrub_mode(percent)
+            if self.state["scrub_policy"]["active"]:
+                self.state["jobs"].setdefault("scrub", "pending")
+                self.state["scrub_reason"] = "catchup"
+        else:
+            self.state["scrub_policy_detail"] = "Coverage unavailable; saved catch-up mode unchanged."
+        self.state["scrub_policy_pending"] = False
+        self.save()  # Policy decision and extended plan commit together before launch.
+
+    def job_completed(self, job: str) -> None:
+        """Commit observation intent with success so a restart never reruns the scrub."""
+        if job == "scrub" and "scrub_policy" in self.state:
+            self.state["scrub_result_pending"] = True
+
+    def observe_scrub(self) -> None:
+        """Record one post-scrub result, progress and persistent stalled incidents."""
+        if not self.state.get("scrub_result_pending"):
+            return
+        percent = self.coverage()
+        policy = self.state["scrub_policy"]
+        if percent is not None:
+            before = self.state.get("scrub_before_percent")
+            detail = self.update_scrub_mode(percent)
+            if before is not None and percent < before:
+                policy.update(stalled_runs=0, stalled_alerted=False)
+            elif before is not None and policy["active"]:
+                policy["stalled_runs"] = policy.get("stalled_runs", 0) + 1
+                if policy["stalled_runs"] >= 3 and not policy.get("stalled_alerted", False):
+                    self.state["scrub_stalled_notice"] = True
+                    policy["stalled_alerted"] = True
+                    LOG.warning("Daily scrub catch-up made no percentage decrease for three successful runs")
+            prefix = f"Scrub coverage: {before}% -> {percent}% unscrubbed. " if before is not None else ""
+            self.state["scrub_policy_detail"] = prefix + detail
+        else:
+            policy["stalled_runs"] = 0
+            self.state["scrub_policy_detail"] = "Post-scrub coverage unavailable; saved catch-up mode unchanged."
+        self.state["scrub_result_pending"] = False
+        self.save()
 
     def notify_failure(self, error: Exception) -> None:
         """Report bounded, verified facts and preserve the original job failure.
@@ -519,9 +671,18 @@ class RemoteCoordinator(Coordinator):
 
     def prepare(self, now: datetime) -> None:
         """Persist OMV session before asking the Docker host to stop containers."""
+        policy = (self.state or {}).get("scrub_policy", {"active": False})
+        if (not isinstance(policy, dict) or type(policy.get("active")) is not bool
+                or type(policy.get("stalled_runs", 0)) is not int or policy.get("stalled_runs", 0) < 0):
+            raise MaintenanceError("Invalid scrub policy journal; preserve it for operator recovery")
+        if policy.get("config_path", self.snapraid_config) != self.snapraid_config:
+            policy = {"active": False}
+        policy["config_path"] = self.snapraid_config
         self.state = {"schema": 1, "role": "omv", "date": now.date().isoformat(), "active": True,
                       "session": uuid.uuid4().hex, "containers": {}, "jobs": {"sync": "pending"},
-                      "detail": "Waiting for Docker-host stop confirmation"}
+                      "detail": "Waiting for Docker-host stop confirmation",
+                      "scrub_policy": policy, "scrub_policy_pending": True,
+                      "scrub_thresholds": dict(self.scrub_thresholds)}
         if now.weekday() == SCRUB_WEEKDAY:
             self.state["jobs"]["scrub"] = "pending"
         self.save()
@@ -544,9 +705,15 @@ class RemoteCoordinator(Coordinator):
 
     def tick(self, now: datetime | None = None) -> None:
         """Retry a lost finish acknowledgement without re-stopping restored apps."""
+        self.status_snapshot = None  # Cached evidence belongs only to this invocation.
         try:
             if self.state and all(phase == "complete" for phase in self.state["jobs"].values()):
                 if self.state["active"]:
+                    self.plan_scrub()
+                    self.observe_scrub()
+                    if not all(phase == "complete" for phase in self.state["jobs"].values()):
+                        super().tick(now)
+                        return
                     self.restore()
                     return
             super().tick(now)

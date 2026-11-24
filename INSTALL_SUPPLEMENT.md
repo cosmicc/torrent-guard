@@ -1,6 +1,6 @@
 # Installation supplement: manual setup and operations
 
-For daily sync and immediate Monday scrub on a separate OMV/NFS server with Sonarr/Radarr
+For daily sync and automatic weekly/catch-up scrub on a separate OMV/NFS server with Sonarr/Radarr
 stopped on the Docker server, see [OMV/SnapRAID maintenance](docs/maintenance.md).
 Restricted SSH coordinates the hosts; one OMV job replaces the two direct
 SnapRAID scheduled jobs. qBittorrent remains running.
@@ -958,8 +958,9 @@ reset journals or remove the original guarded scripts to work around this error.
 
 The coordinator stops Sonarr/Radarr at 02:00 Eastern and starts daily sync at
 02:01. On Monday, scrub starts immediately after successful sync in the same
-coordinator invocation; apps remain stopped until both jobs succeed. On Tuesday
-through Sunday, apps resume after sync succeeds. There is no 04:30 scrub delay.
+coordinator invocation. Automatic catch-up additionally schedules daily scrubs
+above 20% unscrubbed until coverage reaches 5% or less. Apps stay stopped through
+all planned jobs and resume after success. There is no 04:30 scrub delay.
 Eastern Time follows daylight saving time automatically. A Monday session that
 overruns into Tuesday keeps its saved scrub requirement; failed jobs keep the
 hold until recovery. Completed jobs are not repeated when retrying a session.
@@ -968,4 +969,5 @@ Upgrade the installed helpers on both hosts using the normal master installers
 outside active maintenance. Keep the existing every-minute OMV coordinator job
 and both journals; do not add a separate Monday scrub job. New sessions use the
 new schedule, while an existing journal's planned/completed jobs are preserved.
-See the [maintenance schedule](docs/maintenance.md#schedule).
+See the [maintenance schedule](docs/maintenance.md#schedule) and
+[automatic catch-up rules](docs/maintenance.md#automatic-scrub-catch-up).

@@ -23,9 +23,10 @@ The SSH host address is operator configuration, never a production default.
   after the daily sync succeeds, in the same coordinator invocation. Keep both
   apps stopped throughout sync and scrub, with fresh remote hold/NFS-flush
   confirmation before each script. There is no separate scrub start time.
+- Automatic catch-up can add one scrub after a successful sync on other days,
+  using the coverage rules below. Keep both apps stopped through every planned job.
 - Restore original policies and start only previously running apps once all jobs
-  succeed: Monday sessions finish after scrub; every other day, including Sunday,
-  finishes after sync. 06:00 is an expected end time, never a forced restart deadline.
+  succeed. 06:00 is an expected end time, never a forced restart deadline.
 
 The coordinator catches up missed ticks during 02:00–06:00, including the spring
 DST jump. An active session continues through overruns and across dates. It does
@@ -45,6 +46,62 @@ Other NFS/SMB clients, library writers, automatic image updaters and administrat
 Docker commands require separate coordination. This controls these two apps,
 not every NFS client. Guard state and download storage must remain outside the
 protected array. Keep updates/recreation outside active maintenance.
+
+## Automatic scrub catch-up
+
+Scrub scheduling is fully automatic, with Monday as the weekly baseline. After
+successful daily sync, a fresh complete healthy `snapraid status` report drives
+these defaults:
+
+- **Above 20% unscrubbed:** start daily catch-up, including a scrub in this session.
+- **At 5% or less:** end catch-up and return to weekly Monday scrubs.
+- **Between those thresholds:** retain the saved mode across restarts and days.
+
+There is no manual daily/weekly selector. OMV's existing private configuration
+optionally accepts top-level `scrub_catchup_start_percent` and
+`scrub_catchup_stop_percent`, defaulting to 20 and 5. Both must be integers with
+`0 <= stop < start <= 100`. Invalid settings refuse coordinator startup so the
+operator can correct them. Thresholds are frozen per session; edits take effect
+for the next session. `snapraid_config` must identify the same array used by
+the guarded scripts. Changing its configured path resets the saved mode before
+fresh coverage is evaluated.
+
+Only a successful, fully captured status report (at most 64 KiB) containing one
+unambiguous unscrubbed percentage, no sync in progress and no detected errors
+can drive the policy. The supported full-array-scrubbed message counts as zero.
+A partial/timed-out, oversized, nonzero, unhealthy or unrecognized report retains
+the saved mode, skips extra catch-up authorization for that session and warns
+once per incident. The normal Monday scrub remains planned and is still subject
+to its own guarded preflight. Recovery clears the status incident. Coverage is
+checked even when Pushover is disabled; notifications reuse the fresh report.
+
+At most one scrub runs in a daily session, following successful sync with fresh
+remote stop/NFS-flush acknowledgement. The coordinator calls the existing
+`/usr/local/sbin/snapraid-guarded-scrub` unchanged. It never edits the operator's
+shared guarded script or overrides its percentage/age/safety settings. With
+an 8% plan and a 10-day age cutoff, recently synced data may not be eligible;
+catch-up has no guaranteed completion date. Sonarr/Radarr remain stopped until
+all planned jobs succeed, including overruns. The percentage can also rise
+when new data is synced.
+
+After a successful scrub, fresh status records progress and can end catch-up.
+Three consecutive successful scrubs with reliable before/after readings but no
+percentage decrease warn once per incident; actual percentage improvement resets
+it. Catch-up stays active until the stop threshold is met. Missing post-scrub
+coverage breaks the no-progress streak without certifying completion. These
+warnings never bypass scripts, weaken checks or authorize automatic job retries.
+Pushover reports catch-up start, progress and return to weekly in normal
+sync/scrub alerts, plus separate unavailable-coverage/no-progress notices after
+app restoration. Without keys, operator warnings still appear on OMV.
+
+Catch-up mode and incident counters live in OMV's existing private journal.
+Decisions extend the saved job plan atomically, and successful scrub phases
+include pending-observation intent. Recovery can finish that observation without
+rerunning either job. A lost finish acknowledgement never reopens the hold.
+Already active sessions from older releases retain their original job plans;
+automation begins with the first new session after both helpers are upgraded.
+The existing every-minute coordinator cron entry stays unchanged; do not add
+a daily scrub job or re-enable the old direct sync/scrub jobs.
 
 ## Pushover notifications
 
@@ -66,10 +123,10 @@ your guarded scripts. Enter its absolute path (often under `/etc/snapraid/` on
 OMV), or Enter for SnapRAID's default. The optional top-level `snapraid_config`
 setting affects only `/usr/bin/snapraid [-c CONFIG] status`, never job commands.
 
-Daily sessions send two alerts: sync starting after confirmed app shutdown, then
-sync complete after the Docker host confirms restoration. Monday sessions send
-three: sync starting, sync complete/scrub starting while apps stay stopped, and
-sync/scrub complete after confirmed restoration. Completion/transition messages
+Sync-only sessions send two alerts: sync starting after confirmed app shutdown,
+then sync complete after the Docker host confirms restoration. Sessions with a
+weekly or catch-up scrub send three: sync starting, sync complete/scrub starting
+while apps stay stopped, and sync/scrub complete after confirmed restoration. Completion/transition messages
 include a bounded tail of SnapRAID status. Apps that were already stopped remain
 stopped; completion messages describe restoration of their original states.
 
@@ -194,7 +251,7 @@ normal master installers on both hosts outside active maintenance to update
 both installed helpers. The single every-minute OMV coordinator job stays in
 place; no separate scrub job or manual cron-time change is needed.
 
-New sessions follow the Monday schedule. Existing journal job lists remain
+New sessions follow weekly Monday scheduling plus automatic catch-up. Existing journal job lists remain
 intact so an upgrade/recovery preserves already planned and completed work.
 A recorded pending scrub follows its successful sync without the old time gap;
 completed sessions are not reopened to add or repeat work. Keep both journals.
