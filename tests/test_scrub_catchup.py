@@ -227,6 +227,22 @@ class CatchupTests(fixtures.RemoteMaintenanceTests):
         self.assertFalse(self.controller.state['scrub_policy']['active'])
         self.assertEqual(self.controller.state['jobs'], {'sync': 'complete'})
 
+    def test_failed_scrub_does_not_reuse_healthy_pre_job_report(self):
+        self.controller.notification_keys = ('a'*30, 'b'*30)
+        process = self.process
+        def fail_scrub(command, **kwargs):
+            if command == [self.paths['scrub']]:
+                self.returncode = 23
+            return process(command, **kwargs)
+        latest = maintenance.SnapraidStatus(text='Fresh post-failure status.', label='SnapRAID status (exit 1)')
+        with patch('maintenance.subprocess.run', side_effect=fail_scrub), patch('maintenance.read_snapraid_status', side_effect=[report(84), latest]) as read, patch('maintenance.send_pushover', return_value=True) as send:
+            with self.assertRaises(maintenance.MaintenanceError):
+                self.controller.tick(self.at(10, 2, 1))
+        self.assertEqual(read.call_count, 2)
+        self.assertIn('Fresh post-failure status.', send.call_args.args[3])
+        self.assertIn('script exited with status 23', send.call_args.args[3])
+        self.assertTrue(self.controller.state['active'])
+
     def test_notifications_report_start_progress_return_to_weekly_and_stall(self):
         self.controller.notification_keys = ('a'*30, 'b'*30)
         with patch('maintenance.send_pushover', return_value=True) as send:

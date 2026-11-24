@@ -54,7 +54,8 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
   once per unavailable-coverage incident and after three measured successful
   scrubs without a percentage decrease, resetting the latter on progress.
   Do not treat a warning as permission to alter script limits or job holds.
-  Scheduling works with Pushover disabled; reuse collected status in alerts.
+  Scheduling works with Pushover disabled; reuse collected status in alerts,
+  discarding earlier snapshots on failure so alerts collect fresh evidence.
   Status collection defaults to 120 seconds; optional
   OMV snapraid_status_timeout_seconds is an integer from 10 to 600. Preserve a
   bounded partial report on timeout and distinguish launch/output errors without

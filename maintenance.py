@@ -721,6 +721,9 @@ class RemoteCoordinator(Coordinator):
                 self.remote("hold")
         except (MaintenanceError, OSError, ValueError, KeyError, TypeError) as exc:
             if self.state and self.state.get("active"):
+                # A failure may invalidate the earlier healthy report. Never
+                # reuse pre-job or pre-restoration status in a failure alert.
+                self.status_snapshot = None
                 self.notify_failure(exc)
             raise
 
