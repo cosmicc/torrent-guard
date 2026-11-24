@@ -5,6 +5,7 @@ paths are included. There is no recursive removal, account-home removal flag,
 automatic job cancellation, container restart, or SSH configuration rewrite.
 """
 import argparse
+import ast
 from contextlib import ExitStack, contextmanager
 import fcntl
 import grp
@@ -19,10 +20,10 @@ from typing import Callable
 
 if __package__:
     from .install_prompts import ask_with_help
-    from .maintenance_install import HELPER, USER, InstallError, Installer, Paths
+    from .maintenance_install import ARRAY_HELPER, HELPER, USER, InstallError, Installer, Paths
 else:
     from install_prompts import ask_with_help
-    from maintenance_install import HELPER, USER, InstallError, Installer, Paths
+    from maintenance_install import ARRAY_HELPER, HELPER, USER, InstallError, Installer, Paths
 
 
 class Uninstaller:
@@ -119,7 +120,7 @@ class Uninstaller:
             except (FileNotFoundError, ProcessLookupError):
                 continue
             names = [Path(os.fsdecode(arg)).name for arg in args if arg]
-            if any(name in ("torrent-guard-maintenance", "snapraid", "snapraid-guarded-sync", "snapraid-guarded-scrub") for name in names):
+            if any(name in ("torrent-guard-maintenance", "snapraid", "snapraid-guarded-sync", "snapraid-guarded-scrub", "snapraid-guarded", "smartctl") for name in names):
                 found.append(process.name)
             elif "maintenance.py" in names and any(command in names for command in ("tick", "agent", "retry")):
                 found.append(process.name)
@@ -247,6 +248,17 @@ class Uninstaller:
             for path in {self.paths.key, Path(str(self.paths.key) + ".pub"), self.paths.hosts,
                          key, Path(str(key) + ".pub"), pins, config}:
                 self.add_file(path)
+        module = self.paths.path(ARRAY_HELPER)
+        if self.details(module) is not None:
+            content = self.contents(module)
+            try:
+                definitions = {node.name for node in ast.parse(content).body
+                               if isinstance(node, (ast.ClassDef, ast.FunctionDef))}
+            except (SyntaxError, ValueError) as error:
+                raise InstallError("Array helper module is unrecognized; preserved for review") from error
+            if not {"pre_sync_check", "check_smart_health"}.issubset(definitions):
+                raise InstallError("Array helper path contains an unrelated file; preserved for review")
+            self.add_file(module)
         self.add_file(self.paths.path(HELPER))
         self.directory(private, {"state.json", "lock", "setup.json"} if role == "omv" else {"state.json", "lock"})
         self.add_file(private / "state.json")

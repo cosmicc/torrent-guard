@@ -138,7 +138,7 @@ class CatchupTests(fixtures.RemoteMaintenanceTests):
 
     def test_old_active_session_plan_is_not_rewritten_on_upgrade(self):
         self.controller.tick(self.at(10, 2))
-        for key in ('scrub_policy', 'scrub_policy_pending', 'scrub_thresholds'):
+        for key in ('scrub_policy', 'scrub_policy_pending', 'scrub_thresholds', 'array_checks_v1', 'smart_check_pending', 'diff_max_changed_percent'):
             self.controller.state.pop(key)
         self.controller.save()
         self.reload()
@@ -250,4 +250,4 @@ class CatchupTests(fixtures.RemoteMaintenanceTests):
         messages = [call.args[3] for call in send.call_args_list]
         self.assertTrue(any('Daily catch-up started: 84%' in message for message in messages))
         self.assertTrue(any('84% -> 5%' in message and 'returning to weekly' in message for message in messages))
-        self.assertEqual(len(messages), 3)
+        self.assertEqual(len(messages), 4)

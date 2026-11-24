@@ -27,6 +27,8 @@ import urllib.parse
 import uuid
 from zoneinfo import ZoneInfo
 
+from torrent_guard_array import check_smart_health, diff_summary, pre_sync_check, smart_lines
+
 
 ZONE = ZoneInfo("America/New_York")
 CONTAINERS = ("sonarr", "radarr")
@@ -53,12 +55,12 @@ def pushover_keys(settings: dict) -> tuple[str, str]:
     return token, user
 
 
-def send_pushover(token: str, user: str, title: str, message: str) -> bool:
+def send_pushover(token: str, user: str, title: str, message: str, priority: int = 0) -> bool:
     """Send one bounded HTTPS request; never redirect credentials or log replies."""
     connection = http.client.HTTPSConnection("api.pushover.net", timeout=10)
     try:
         body = urllib.parse.urlencode({"token": token, "user": user,
-                                       "title": title[:250], "message": message[:1024]})
+                                       "title": title[:250], "message": message[:1024], "priority": priority})
         connection.request("POST", "/1/messages.json", body,
                            {"Content-Type": "application/x-www-form-urlencoded"})
         response = connection.getresponse()
@@ -193,6 +195,10 @@ class MaintenanceError(RuntimeError):
     """An unsafe or failed operation that must keep maintenance active."""
 
 
+class ArrayHold(MaintenanceError):
+    """An array precheck/health incident requiring explicit operator recovery."""
+
+
 class Coordinator:
     """Run saved maintenance jobs while preventing overlapping imports."""
 
@@ -306,7 +312,9 @@ class Coordinator:
         # retains responsibility for its own deletion thresholds and sync rules.
         os.sync()
         try:
-            result = subprocess.run([str(path)], check=False)
+            environment = self.job_environment(job)
+            options = {"env": environment} if environment is not None else {}
+            result = subprocess.run([str(path)], check=False, **options)
         except OSError as exc:
             self.state["jobs"][job] = "failed"
             self.state["job_failure"] = {"job": job, "kind": "launch", "at": time.time()}
@@ -321,6 +329,10 @@ class Coordinator:
         self.save()
         if result.returncode:
             raise MaintenanceError(f"SnapRAID {job} exited with status {result.returncode}; review job logs before retrying")
+
+    def job_environment(self, job: str) -> dict | None:
+        """Supply explicit job settings; the Docker agent and legacy flow inherit defaults."""
+        return None
 
     def job_start(self, job: str) -> None:
         """Hook for OMV notifications after job validation and hold confirmation."""
@@ -442,12 +454,21 @@ class RemoteCoordinator(Coordinator):
         if type(start) is not int or type(stop) is not int or not 0 <= stop < start <= 100:
             raise MaintenanceError("Scrub thresholds must be integers with 0 <= stop < start <= 100")
         self.scrub_thresholds = {"start": start, "stop": stop}
+        self.array_directory = directory.parent / (directory.name + "-array")
+        self.diff_percent = connection.get("diff_max_changed_percent", 5)
+        self.diff_timeout = connection.get("pre_sync_timeout_seconds", 900)
+        self.smart_timeout = connection.get("smart_timeout_seconds", 30)
+        for value, lower, upper, label in ((self.diff_percent, 1, 100, "diff percentage"),
+                                           (self.diff_timeout, 30, 7200, "pre-sync timeout"),
+                                           (self.smart_timeout, 5, 120, "SMART timeout")):
+            if type(value) is not int or not lower <= value <= upper:
+                raise MaintenanceError(f"Configure an integer {label} between {lower} and {upper}")
         for name in ("identity_file", "known_hosts_file"):
             value = connection.get(name)
             if not isinstance(value, str) or not Path(value).is_absolute():
                 raise MaintenanceError("Configure an absolute SSH " + name)
 
-    def notify(self, event: str, title: str, message: str, *, status: bool = False) -> None:
+    def notify(self, event: str, title: str, message: str, *, status: bool = False, priority: int = 0) -> None:
         """Attempt each event once per durable session without blocking recovery.
 
         Record intent first: a crash or uncertain HTTP response must not produce
@@ -470,7 +491,7 @@ class RemoteCoordinator(Coordinator):
         message = stamp + "\n" + message
         if status:
             summary = (self.status_snapshot.summary() if self.status_snapshot is not None else
-                       snapraid_status(self.snapraid_config, self.snapraid_status_timeout))
+                       snapraid_status(self.status_config(), self.snapraid_status_timeout))
             budget = max(0, 1024 - len(message) - 2)
             if len(summary) > budget:
                 # Retain the status header/exit code and final summary rather
@@ -481,13 +502,17 @@ class RemoteCoordinator(Coordinator):
                 else:
                     summary = summary[:budget]
             message += "\n\n" + summary
-        send_pushover(token, user, title, message)
+        if priority:
+            send_pushover(token, user, title, message, priority=priority)
+        else:
+            send_pushover(token, user, title, message)
 
     def job_start(self, job: str) -> None:
         """Announce sync, or its successful transition into the planned scrub."""
         if job == "sync":
             self.notify("sync_start", "SnapRAID sync starting",
-                        "Sonarr and Radarr are stopped. SnapRAID sync is starting.")
+                        "Sonarr and Radarr are stopped. SnapRAID sync is starting.\n"
+                        + diff_summary((self.state.get("pre_sync") or {}).get("counts")))
         else:
             kind = "Daily catch-up" if self.state.get("scrub_reason") == "catchup" else "Weekly"
             self.notify("scrub_start", "SnapRAID sync complete; scrub starting",
@@ -520,7 +545,7 @@ class RemoteCoordinator(Coordinator):
 
     def coverage(self) -> int | None:
         """Read fresh full status off the array; retain its display summary in memory."""
-        self.status_snapshot = read_snapraid_status(self.snapraid_config, self.snapraid_status_timeout)
+        self.status_snapshot = read_snapraid_status(self.status_config(), self.snapraid_status_timeout)
         percent = self.status_snapshot.unscrubbed_percent()
         policy = self.state["scrub_policy"]
         problem = percent is None
@@ -601,6 +626,13 @@ class RemoteCoordinator(Coordinator):
         Old agents, SSH errors and changed identities yield unknown state, never
         a claim that apps are stopped or permission to restart them.
         """
+        precheck = self.state.get("pre_sync")
+        if isinstance(precheck, dict) and precheck.get("passed") is False and self.state["jobs"].get("sync") == "failed":
+            self.notify_pre_sync_blocked()
+            return
+        if self.state.get("smart_review_required"):
+            self.notify_smart_report()
+            return
         if not self.notification_keys[0]:
             return
         jobs = self.state["jobs"]
@@ -648,6 +680,97 @@ class RemoteCoordinator(Coordinator):
                    "sudo /usr/local/sbin/torrent-guard-maintenance retry --confirm-jobs-stopped")
         self.notify(event, "SnapRAID maintenance needs attention", message, status=True)
 
+    def notify_pre_sync_blocked(self) -> None:
+        """Replace sync-start alerts with actionable, bounded precheck counts/reason."""
+        result = self.state["pre_sync"]
+        self.notify("pre_sync_blocked:" + str(self.state.get("pre_sync_attempts", 0)),
+                    "CRITICAL: SnapRAID sync/scrub BLOCKED",
+                    result["reason"] + "\n" + diff_summary(result.get("counts"))
+                    + "\nSonarr/Radarr remain stopped. Review OMV guarded logs and fix the cause. "
+                    "No sync was started. Once no jobs remain running, use the explicit maintenance retry command.",
+                    priority=1)
+
+    def notify_smart_report(self) -> None:
+        """Send all array disk metrics, splitting lines within Pushover's limit."""
+        report = self.state.get("smart_report")
+        if not isinstance(report, dict):
+            return
+        if report["critical"]:
+            title = "CRITICAL DISK HEALTH: maintenance HELD"
+        elif not report["complete"]:
+            title = "SMART CHECK INCOMPLETE: maintenance HELD"
+        else:
+            title = "SnapRAID disk SMART report"
+        priority = 1 if self.state.get("smart_review_required") else 0
+        stamp = datetime.fromtimestamp(report["at"], ZONE).strftime("%m.%d.%Y %H:%M %Z%z")
+        phases = ", ".join(job + "=" + phase for job, phase in self.state["jobs"].items())
+        lines = ["SMART sampled " + stamp, "Jobs: " + phases]
+        failure = self.state.get("job_failure", {})
+        if failure.get("kind") == "exit" and self.state["jobs"].get(failure.get("job")) == "failed":
+            lines.append(f"SnapRAID {failure['job']} script exited with status {failure['exit_code']}.")
+        lines += smart_lines(report)
+        if priority:
+            lines += ["Sonarr/Radarr remain stopped. Inspect the disk/SMART issue, then authorize maintenance retry after confirming no jobs are running."]
+        chunks, current = [], ""
+        for line in lines:
+            line = line[:850]
+            if current and len(current) + len(line) + 1 > 900:
+                chunks.append(current)
+                current = ""
+            current += ("\n" if current else "") + line
+        if current:
+            chunks.append(current)
+        attempt = self.state.get("smart_attempts", 0)
+        for number, message in enumerate(chunks, 1):
+            suffix = f" ({number}/{len(chunks)})" if len(chunks) > 1 else ""
+            self.notify(f"smart:{attempt}:{number}", title + suffix, message, priority=priority)
+
+    def ensure_smart_health(self) -> None:
+        """Latch unhealthy/incomplete observations until explicit review; never rerun jobs."""
+        if not self.state.get("array_checks_v1"):
+            return
+        if self.state.get("smart_review_required"):
+            raise ArrayHold("Disk SMART health requires operator review; apps remain stopped")
+        if self.state.get("smart_check_pending"):
+            self.state["smart_attempts"] = self.state.get("smart_attempts", 0) + 1
+            try:
+                private_directory(self.array_directory)
+                report = check_smart_health(self.status_config(), self.array_directory, self.state["session"], self.smart_timeout)
+            except (MaintenanceError, OSError, ValueError, TypeError):
+                report = {"samples": [], "errors": ["SMART diagnostics/private history unavailable; inspect OMV state."],
+                          "critical": False, "complete": False, "at": time.time()}
+            self.state["smart_report"] = report
+            self.state["smart_check_pending"] = False
+            self.state["smart_review_required"] = report["critical"] or not report["complete"]
+            self.save()
+            if self.state["smart_review_required"]:
+                LOG.error("Array SMART check requires review; Sonarr/Radarr restoration withheld")
+                self.notify_smart_report()
+                raise ArrayHold("Critical or incomplete SMART health check; apps remain stopped")
+
+    def job_environment(self, job: str) -> dict | None:
+        """Keep the same percentage guard in the final guarded sync recheck."""
+        if job == "sync" and self.state.get("array_checks_v1"):
+            return {**os.environ, "TORRENT_GUARD_DIFF_MAX_PERCENT": str(self.state["diff_max_changed_percent"])}
+        return None
+
+    def status_config(self) -> str:
+        """Use the guarded gate's actual array for coverage, status and SMART mapping."""
+        return (self.state or {}).get("array_config_path", self.snapraid_config)
+
+    def authorize_retry(self) -> None:
+        """Reset only failed phases or health review after the CLI's explicit confirmation."""
+        if not self.state or not self.state["active"]:
+            raise MaintenanceError("No active maintenance to retry")
+        for job, phase in self.state["jobs"].items():
+            if phase in ("running", "failed"):
+                self.state["jobs"][job] = "pending"
+        if self.state.get("smart_review_required"):
+            self.state["smart_review_required"] = False
+            self.state["smart_check_pending"] = True
+        self.state["detail"] = "Operator authorized retry; awaiting next schedule tick"
+        self.save()
+
     def save(self) -> None:
         """OMV stores job phases locally; only the remote agent publishes status."""
         atomic_json(self.path, self.state, 0o600)
@@ -675,14 +798,16 @@ class RemoteCoordinator(Coordinator):
         if (not isinstance(policy, dict) or type(policy.get("active")) is not bool
                 or type(policy.get("stalled_runs", 0)) is not int or policy.get("stalled_runs", 0) < 0):
             raise MaintenanceError("Invalid scrub policy journal; preserve it for operator recovery")
-        if policy.get("config_path", self.snapraid_config) != self.snapraid_config:
+        if policy.get("requested_config", policy.get("config_path", self.snapraid_config)) != self.snapraid_config:
             policy = {"active": False}
-        policy["config_path"] = self.snapraid_config
+        policy["requested_config"] = self.snapraid_config
         self.state = {"schema": 1, "role": "omv", "date": now.date().isoformat(), "active": True,
                       "session": uuid.uuid4().hex, "containers": {}, "jobs": {"sync": "pending"},
                       "detail": "Waiting for Docker-host stop confirmation",
                       "scrub_policy": policy, "scrub_policy_pending": True,
-                      "scrub_thresholds": dict(self.scrub_thresholds)}
+                      "scrub_thresholds": dict(self.scrub_thresholds),
+                      "array_checks_v1": True, "smart_check_pending": True,
+                      "diff_max_changed_percent": self.diff_percent}
         if now.weekday() == SCRUB_WEEKDAY:
             self.state["jobs"]["scrub"] = "pending"
         self.save()
@@ -694,14 +819,56 @@ class RemoteCoordinator(Coordinator):
     def run_job(self, job: str) -> None:
         """Reconfirm the remote hold immediately before executing an OMV job."""
         self.remote(job)
-        super().run_job(job)
+        if job == "sync" and self.state.get("array_checks_v1"):
+            self.state["pre_sync"] = None
+            self.state["pre_sync_attempts"] = self.state.get("pre_sync_attempts", 0) + 1
+            self.save()
+            result = pre_sync_check(self.state["diff_max_changed_percent"], self.diff_timeout, self.snapraid_config)
+            self.state["pre_sync"] = result
+            if not result["passed"]:
+                self.state["jobs"]["sync"] = "failed"
+                self.state["job_failure"] = {"job": "sync", "kind": "preflight", "at": time.time()}
+                self.save()
+                LOG.error("Pre-sync array safety check blocked maintenance: %s", result["reason"])
+                self.notify_pre_sync_blocked()
+                raise ArrayHold("Pre-sync safety checks blocked sync/scrub; inspect OMV guarded logs")
+            confirmed_config = result.get("config_path", self.snapraid_config)
+            self.state["array_config_path"] = confirmed_config
+            policy = self.state.get("scrub_policy")
+            if isinstance(policy, dict):
+                if policy.get("config_path", confirmed_config) != confirmed_config:
+                    policy = {"active": False, "requested_config": self.snapraid_config}
+                    self.state["scrub_policy"] = policy
+                policy["config_path"] = confirmed_config
+            self.save()
+        if self.state.get("array_checks_v1"):
+            self.state["smart_check_pending"] = True
+        try:
+            super().run_job(job)
+        except MaintenanceError:
+            # A script that exited unsuccessfully has ended. Collect read-only
+            # health evidence too, while preserving its original error and hold.
+            # Never do this for an unlaunched/interrupted or precheck-blocked job.
+            failure = self.state.get("job_failure", {})
+            if (self.state.get("array_checks_v1") and failure.get("kind") == "exit"
+                    and failure.get("job") == job and self.state["jobs"].get(job) == "failed"):
+                try:
+                    self.ensure_smart_health()
+                    self.notify_smart_report()
+                except ArrayHold:
+                    pass  # Critical/incomplete health was already recorded and reported.
+                except OSError:
+                    LOG.warning("SMART report could not be recorded; original failed job remains held")
+            raise
 
     def restore(self) -> None:
         """Finish idempotently after every scheduled OMV job succeeds."""
+        self.ensure_smart_health()
         self.remote("finish")
         self.state.update(active=False, detail="Maintenance complete; Docker host confirmed restoration")
         self.save()
         self.notify_complete()
+        self.notify_smart_report()
 
     def tick(self, now: datetime | None = None) -> None:
         """Retry a lost finish acknowledgement without re-stopping restored apps."""
@@ -847,13 +1014,7 @@ def main() -> int:
             if args.command == "retry":
                 if not args.confirm_jobs_stopped:
                     parser.error("retry requires --confirm-jobs-stopped after checking actual host processes")
-                if not coordinator.state or not coordinator.state["active"]:
-                    raise MaintenanceError("No active maintenance to retry")
-                for job, phase in coordinator.state["jobs"].items():
-                    if phase in ("running", "failed"):
-                        coordinator.state["jobs"][job] = "pending"
-                coordinator.state["detail"] = "Operator authorized retry; awaiting next schedule tick"
-                coordinator.save()
+                coordinator.authorize_retry()
             else:
                 coordinator.tick()
         except (MaintenanceError, OSError, ValueError, KeyError, TypeError) as exc:

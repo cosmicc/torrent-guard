@@ -3,6 +3,36 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 2.11 - 11.23.2026
+
+### Added
+
+- Read-only pre-sync array/diff gate retaining all existing guarded limits and
+  mount/UUID checks, plus a 5% removed/updated-files guard at the final sync boundary.
+- Passing diff counts in sync-start alerts; blocked-check alerts replace sync-start
+  and retain the reason/counts for explicit operator recovery.
+- Post-maintenance SMART reports for physical data/parity disks, private 180-day
+  identity-keyed history, counter trends and high-priority critical health alerts.
+- Persistent critical/incomplete health review holds; completed sync/scrub jobs
+  are preserved when explicitly retrying only SMART diagnostics.
+
+### Changed
+
+- Master OMV setup backs up and syntax-checks a recognized additive shared-script
+  adapter while preserving private layout/settings and stronger existing limits.
+- Install/upgrade the standalone helper and its array module as a bundle; retain
+  SMART history and script backups during maintenance-only uninstall.
+- Use the guarded array's confirmed configuration for status, coverage and SMART
+  discovery; reject conflicting explicit array configuration before sync.
+- Keep raw exception/script output and full drive serials out of notifications;
+  use bounded metrics and safe reasons. Pushover remains optional for enforcement.
+
+### Fixed
+
+- Stop announcing sync start before preflight/diff authorization succeeds.
+- Distinguish unsupported/unreadable health from failed drives, historical/cable
+  warnings from current failures, and unknown SMART fields from numeric zeros.
+
 ## 2.10 - 11.23.2026
 
 ### Added

@@ -17,7 +17,8 @@ The SSH host address is operator configuration, never a production default.
 - Local Eastern time (`America/New_York`), following EST/EDT automatically.
 - At 02:00 daily, save original container identities, running states and restart
   policies, disable automatic restarts, stop both apps and verify they stopped.
-- At or after 02:01, run `/usr/local/sbin/snapraid-guarded-sync` on **OMV**, with
+- At or after 02:01, authorize the read-only array/diff gate and then run
+  `/usr/local/sbin/snapraid-guarded-sync` on **OMV**, with
   no arguments, only after the Docker host confirms the hold and flushes NFS writes.
 - On Mondays, run `/usr/local/sbin/snapraid-guarded-scrub` on **OMV** immediately
   after the daily sync succeeds, in the same coordinator invocation. Keep both
@@ -25,8 +26,10 @@ The SSH host address is operator configuration, never a production default.
   confirmation before each script. There is no separate scrub start time.
 - Automatic catch-up can add one scrub after a successful sync on other days,
   using the coverage rules below. Keep both apps stopped through every planned job.
+- Collect array SMART health before restoration; critical/incomplete results
+  latch an operator-review hold. See [array protection and SMART](array-safety.md).
 - Restore original policies and start only previously running apps once all jobs
-  succeed. 06:00 is an expected end time, never a forced restart deadline.
+  and required health checks succeed. 06:00 is an expected end time, never a forced restart deadline.
 
 The coordinator catches up missed ticks during 02:00–06:00, including the spring
 DST jump. An active session continues through overruns and across dates. It does
@@ -78,8 +81,10 @@ Failure paths discard the earlier cache so failure alerts collect fresh status.
 
 At most one scrub runs in a daily session, following successful sync with fresh
 remote stop/NFS-flush acknowledgement. The coordinator calls the existing
-`/usr/local/sbin/snapraid-guarded-scrub` unchanged. It never edits the operator's
-shared guarded script or overrides its percentage/age/safety settings. With
+`/usr/local/sbin/snapraid-guarded-scrub` entry point unchanged. Runtime never
+edits scripts or overrides their scrub percentage/age/safety settings. Master
+setup adds a recognized pre-sync adapter to the shared guarded script while
+preserving its existing policy; see [array protection and SMART](array-safety.md). With
 an 8% plan and a 10-day age cutoff, recently synced data may not be eligible;
 catch-up has no guaranteed completion date. Sonarr/Radarr remain stopped until
 all planned jobs succeed, including overruns. The percentage can also rise
@@ -142,7 +147,8 @@ The root failure is stored separately from the changing generic journal detail;
 raw script output and exceptions are never sent to Pushover. Old journals cannot
 recover an exit code they never recorded. Repeated ticks deduplicate the same
 job failure; a failed explicitly authorized retry alerts again. Other changed
-failure reasons can also alert again. Messages use normal Pushover priority/device settings
+failure reasons can also alert again. Routine messages use normal Pushover priority/device settings; blocked
+pre-sync and critical/incomplete SMART alerts use high priority (1)
 and Eastern timestamps. Status output is sent to Pushover, so it may include
 array names/details. Its collection is read-only and defaults to a 120-second
 limit so larger content files have time to load. Optional top-level
@@ -215,7 +221,7 @@ settings are unchanged. Repeating setup reuses a verified disabled coordinator.
 The new-object behavior follows the [OMV database API](https://github.com/openmediavault/openmediavault/blob/7.x/deb/openmediavault/usr/lib/python3/dist-packages/openmediavault/config/database.py).
 
 Both hosts refuse upgrades during observed maintenance or busy journal locks.
-The helper is installed outside Guard; rebuilding the container alone does not
+The helper bundle is installed outside Guard; rebuilding the container alone does not
 upgrade it. Run both host commands. Required packages, custom Compose layouts,
 permissions and recovery details are in the
 [installation supplement](../INSTALL_SUPPLEMENT.md#unified-installer-reference).
@@ -293,7 +299,8 @@ sudo /usr/local/sbin/torrent-guard-maintenance retry --confirm-jobs-stopped
 ```
 
 The next tick retries only failed/interrupted phases; completed jobs remain
-complete. SSH failures before job launch recover automatically once connectivity
+complete. A SMART review hold rechecks diagnostics after explicit retry without
+rerunning completed sync/scrub work. SSH failures before job launch recover automatically once connectivity
 returns. Once status shows `active: false` on OMV and the media agent journal
 also shows `active: false`, rerun `sudo python3 install.py media` on media, then
 `sudo python3 install.py omv` on OMV to upgrade/configure notifications. New
@@ -329,7 +336,7 @@ Then remove that host's setup (one confirmation, or use `--yes`):
 sudo python3 scripts/uninstall_maintenance_docker.py
 ```
 
-This removes the helper, agent configuration, inactive maintenance marker,
+This removes the recognized helper bundle, agent configuration, inactive maintenance marker,
 private agent journal/lock directory, dedicated authorized keys, sudo rule,
 `guard-maintenance` account/private group, recognized service-home skeleton
 files and service mail spool. If a partial manual install used a custom Guard
@@ -344,12 +351,14 @@ sudo python3 scripts/uninstall_maintenance_omv.py --dry-run
 sudo python3 scripts/uninstall_maintenance_omv.py
 ```
 
-OMV removal includes the helper, connection configuration, dedicated private and
+OMV removal includes the recognized helper bundle, connection configuration, dedicated private and
 public keys, dedicated host pins, and inactive coordinator journal/lock/setup-receipt directory.
 Normal administrator identities, known_hosts, authorized_keys, SSH configuration
 and services are preserved on both hosts. Original guarded SnapRAID scripts and
 existing direct sync/scrub jobs are preserved. Shared parent directories are
-kept. Neither uninstaller changes OMV job configuration automatically.
+kept. Neither uninstaller changes OMV job configuration automatically. SMART history
+and guarded-script backups in `/var/lib/torrent-guard-maintenance-array` and the
+enhanced shared script are preserved; see the [array recovery guide](array-safety.md).
 
 Unexpected files in dedicated directories, shared service groups, or a connection
 configuration pointing at normal administrator keys stop removal for review.

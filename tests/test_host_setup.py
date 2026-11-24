@@ -1,17 +1,20 @@
 """Two-host setup and upgrade regressions; privileged operations are simulated."""
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+from array_fixtures import guarded_script
 from scripts.app_install import AppInstall, dotenv_value, read_values, save_env
 from scripts.install_prompts import PROMPT_HELP
 from scripts.enroll_maintenance_key import enroll
 from scripts.maintenance_install import FORCED
 from scripts.host_setup import MODEL, SCHEDULE, UpgradeInstaller, configure_omv_schedule, install_omv, update_checkout
-from scripts.maintenance_install import HELPER, SOURCE, InstallError
+from scripts.maintenance_install import ARRAY_HELPER, HELPER, SOURCE, InstallError
 import test_maintenance_install as fixtures
 
 
@@ -326,8 +329,14 @@ class BootstrapTests(fixtures.InstallerFixture):
     def setUp(self):
         super().setUp()
         self.installer = UpgradeInstaller(self.paths, self.ask, self.output)
+        shared = self.paths.path('/usr/local/sbin/snapraid-guarded')
+        shared.parent.mkdir(parents=True, exist_ok=True)
+        shared.write_text(guarded_script())
+        shared.chmod(0o700)
         self.installer.required = Mock()
-        self.installer.run = self.command
+        def run(command, **kwargs):
+            return self.real_run(command, **kwargs) if command[0] == 'bash' else self.command(command, **kwargs)
+        self.installer.run = run
 
     def prepare(self):
         self.ask.side_effect = ['docker.test', '', fixtures.fingerprint(fixtures.sample_key(7)), 'admin', '']
@@ -407,9 +416,31 @@ class BootstrapTests(fixtures.InstallerFixture):
         self.installer.helper()
         self.assertEqual(helper.stat().st_mtime_ns, before)
 
+    def test_installed_helper_imports_its_sidecar_outside_the_checkout(self):
+        self.installer.helper()
+        entry = self.paths.path(HELPER)
+        sidecar = self.paths.path(ARRAY_HELPER)
+        self.assertTrue(sidecar.is_file())
+        result = subprocess.run([sys.executable, str(entry), '--help'], cwd=self.root,
+                                env={**os.environ, 'PYTHONPATH': ''}, text=True,
+                                capture_output=True, timeout=10, check=True)
+        self.assertIn('tick', result.stdout)
+
+    def test_unknown_sidecar_prevents_any_entry_point_upgrade(self):
+        self.installer.helper()
+        helper = self.paths.path(HELPER)
+        helper.write_bytes(b'# older helper\n' + SOURCE.read_bytes())
+        sidecar = self.paths.path(ARRAY_HELPER)
+        sidecar.write_text('# unrelated file\n')
+        before = helper.read_bytes()
+        with self.assertRaises(InstallError):
+            self.installer.helper()
+        self.assertEqual(helper.read_bytes(), before)
+        self.assertEqual(sidecar.read_text(), '# unrelated file\n')
+
     def test_unrecognized_helper_is_preserved(self):
         target = self.paths.path(HELPER)
-        target.parent.mkdir(parents=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text('# unrelated program\n')
         with self.assertRaisesRegex(InstallError, 'unrelated'):
             self.installer.helper()

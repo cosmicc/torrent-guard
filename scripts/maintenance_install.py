@@ -34,6 +34,8 @@ HELPER = "/usr/local/sbin/torrent-guard-maintenance"
 FORCED = 'restrict,command="/usr/bin/sudo -n ' + HELPER + ' agent \\"$SSH_ORIGINAL_COMMAND\\"" '
 SUDO_RULE = USER + " ALL=(root) NOPASSWD: " + HELPER + " agent *\n"
 SOURCE = Path(__file__).resolve().parents[1] / "maintenance.py"
+ARRAY_HELPER = "/usr/local/sbin/torrent_guard_array.py"
+ARRAY_SOURCE = SOURCE.with_name("torrent_guard_array.py")
 
 
 class InstallError(RuntimeError):
@@ -179,6 +181,9 @@ class Installer:
 
     def helper(self) -> None:
         """Never replace an older helper or modify either host's recovery journal."""
+        if self.existing(self.paths.path(HELPER)):
+            self.file(self.paths.path(HELPER), SOURCE.read_bytes(), 0o755)
+        self.file(self.paths.path(ARRAY_HELPER), ARRAY_SOURCE.read_bytes(), 0o644)
         self.file(self.paths.path(HELPER), SOURCE.read_bytes(), 0o755)
 
     def key_pair(self) -> str:

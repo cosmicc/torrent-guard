@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v2.10** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v2.11** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -33,7 +33,9 @@ grace interval has elapsed (15 minutes by default).
   qBittorrent continues downloading; Docker control stays on that host.
   Optional Pushover alerts cover sync/scrub starts, completion and failures,
   including SnapRAID status summaries. Failure alerts show job errors, app state
-  and recovery instructions. Status collection allows extra time for large arrays. See [notification setup](docs/maintenance.md#pushover-notifications).
+  and recovery instructions. Pre-sync array/diff checks block suspicious changes;
+  end-of-job SMART reports track disk health and hold apps on critical/incomplete
+  readings. See [array protection and SMART](docs/array-safety.md). See [notification setup](docs/maintenance.md#pushover-notifications).
   [One installer on each host](INSTALL.md) handles setup, upgrades, restricted
   key enrollment and OMV scheduling without changing normal SSH access.
 - The **save** tag exempts a live torrent from every Guard removal rule,
@@ -153,7 +155,8 @@ Docker does not automatically restart unhealthy containers.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile guard.py deletion.py records.py orphans.py maintenance.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
+python3 -m py_compile guard.py deletion.py records.py orphans.py maintenance.py torrent_guard_array.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
+python3 -m py_compile scripts/guarded_adapter.py
 python3 -m py_compile scripts/maintenance_install.py scripts/install_maintenance_omv.py scripts/install_maintenance_docker.py
 python3 -m py_compile install.py scripts/host_setup.py scripts/app_install.py scripts/enroll_maintenance_key.py scripts/install_prompts.py
 python3 scripts/release_notes.py

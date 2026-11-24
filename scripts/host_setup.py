@@ -18,7 +18,8 @@ import tempfile
 
 from maintenance import atomic_json, ssh_command, pushover_keys
 from scripts.app_install import AppInstall, prompt_pushover
-from scripts.maintenance_install import FORCED, HELPER, SOURCE, USER, Installer, InstallError, public_key
+from scripts.guarded_adapter import install_guarded_adapter
+from scripts.maintenance_install import ARRAY_HELPER, ARRAY_SOURCE, FORCED, HELPER, SOURCE, USER, Installer, InstallError, public_key
 from scripts.maintenance_uninstall import Uninstaller
 
 
@@ -61,31 +62,42 @@ class UpgradeInstaller(Installer):
     """Upgrade app-owned code while retaining the low-level installers' strict mode."""
 
     def helper(self) -> None:
-        path = self.paths.path(HELPER)
-        if not self.existing(path):
-            return super().helper()
-        self.info(path)
-        content = SOURCE.read_bytes()
-        if path.read_bytes() == content:
-            return
-        try:
-            definitions = {node.name for node in ast.parse(path.read_bytes()).body
-                           if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
-        except (ValueError, SyntaxError) as exc:
-            raise InstallError("Installed helper is unrecognized; preserve it for review") from exc
-        if not {"Coordinator", "read_maintenance"}.issubset(definitions):
-            raise InstallError("Refusing to replace an unrelated file at the helper path")
-        descriptor, temporary = tempfile.mkstemp(prefix=".tg-upgrade-", dir=path.parent)
-        try:
-            os.fchmod(descriptor, 0o755)
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(content)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, path)
-            self.output("Upgraded the installed maintenance helper")
-        finally:
-            Path(temporary).unlink(missing_ok=True)
+        """Validate the complete bundle before upgrading the sidecar, then entry point."""
+        bundle = ((ARRAY_HELPER, ARRAY_SOURCE, 0o644, {"pre_sync_check", "check_smart_health"}),
+                  (HELPER, SOURCE, 0o755, {"Coordinator", "read_maintenance"}))
+        for target, source, mode, required in bundle:
+            path = self.paths.path(target)
+            self.directory(path.parent)
+            if not self.existing(path):
+                continue
+            self.info(path)
+            if path.read_bytes() == source.read_bytes():
+                continue
+            try:
+                definitions = {node.name for node in ast.parse(path.read_bytes()).body
+                               if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
+            except (ValueError, SyntaxError) as error:
+                raise InstallError("Installed helper is unrecognized; preserve it for review") from error
+            if not required.issubset(definitions):
+                raise InstallError("Refusing to replace an unrelated file at the helper path")
+        for target, source, mode, _required in bundle:
+            path, content = self.paths.path(target), source.read_bytes()
+            if not self.existing(path):
+                self.file(path, content, mode)
+                continue
+            if path.read_bytes() == content:
+                continue
+            descriptor, temporary = tempfile.mkstemp(prefix=".tg-upgrade-", dir=path.parent)
+            try:
+                os.fchmod(descriptor, mode)
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, path)
+                self.output("Upgraded installed maintenance helper code")
+            finally:
+                Path(temporary).unlink(missing_ok=True)
 
     def docker(self, supplied_key: str | None, state_dir: str | None, *, prepare_key: bool = False) -> None:
         """Migrate only the known service home from documented manual installs."""
@@ -278,11 +290,10 @@ def configure_omv_schedule(installer: Installer, execute=run) -> None:
 
 def install_omv(installer: UpgradeInstaller, execute=run) -> None:
     """Generate/keep its key, enroll once using admin SSH, then activate scheduling."""
-    installer.required(("ssh", "ssh-keygen", "ssh-keyscan", "omv-confdbadm", "omv-salt"))
+    installer.required(("ssh", "ssh-keygen", "ssh-keyscan", "omv-confdbadm", "omv-salt", "bash", "smartctl"))
     for script in ("/usr/local/sbin/snapraid-guarded-sync", "/usr/local/sbin/snapraid-guarded-scrub"):
         if not Path(script).is_file() or not os.access(script, os.X_OK):
             raise InstallError("The existing guarded SnapRAID script is required: " + script)
-    installer.helper()
     installer.directory(installer.paths.path("/var/lib/torrent-guard-maintenance"), private=True)
     key = installer.key_pair()
     path = installer.paths.config
@@ -353,6 +364,8 @@ def install_omv(installer: UpgradeInstaller, execute=run) -> None:
         pushover_keys(config["pushover"])
     except (ValueError, AttributeError) as exc:
         raise InstallError("Invalid Pushover configuration; check the private OMV configuration") from exc
+    install_guarded_adapter(installer)
+    installer.helper()
     configure_omv_schedule(installer, execute)
     installer.output("OMV installation/upgrade complete. No manual key copying or return installer pass is needed.")
 
