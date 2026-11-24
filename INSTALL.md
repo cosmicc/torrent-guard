@@ -6,7 +6,7 @@ same installer commands; existing settings, keys and journals are preserved.
 
 Before starting: both hosts need Git, Python 3.10+ and root/sudo access.
 The media host needs Docker Compose, an existing SSH server, and the existing
-`sonarr` and `radarr` containers. OMV needs your working NFS mounts and executable
+`sonarr` and `radarr` containers. OMV also needs Bash and smartmontools (`smartctl`), working NFS mounts and executable
 `/usr/local/sbin/snapraid-guarded-sync` and `snapraid-guarded-scrub` scripts.
 [Extra prerequisites and nonstandard setups](INSTALL_SUPPLEMENT.md#unified-installer-reference).
 
@@ -46,7 +46,10 @@ jobs, and enables one coordinated OMV job. Sonarr/Radarr stop at 2am Eastern
 Monday scrub. Automatic catch-up adds daily scrubs above 20% unscrubbed and
 returns to weekly at 5% or less. Apps stay stopped through planned jobs and
 resume after success. Existing guarded scrub limits remain in effect.
-qBittorrent keeps running.
+qBittorrent keeps running. Pre-sync checks retain your script's limits and add a
+5% removal/update guard. End-of-job SMART checks hold restoration on critical or
+incomplete health; the installer retains an exact private script backup.
+See [array protection and SMART](docs/array-safety.md).
 **No further scheduling or installer pass is needed.**
 
 ## Future upgrades

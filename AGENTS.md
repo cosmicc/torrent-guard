@@ -33,7 +33,8 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
   fresh complete healthy status after sync to add an extra scrub, freeze that
   decision before execution, and persist post-scrub observation intent with
   job success. Unknown coverage retains mode and the weekly plan, never grants
-  an extra scrub or certifies completion. Keep existing guarded scripts intact.
+  an extra scrub or certifies completion. Preserve existing guarded script values/checks; only the recognized additive
+  adapter described in docs/array-safety.md may extend their gate.
   Preserve recorded plans, thresholds and pending observations across restarts,
   day overruns and upgrades; old active sessions keep their original plans.
   Never restore between planned jobs or on failure.
@@ -60,13 +61,27 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
   OMV snapraid_status_timeout_seconds is an integer from 10 to 600. Preserve a
   bounded partial report on timeout and distinguish launch/output errors without
   sending private exception text. Never bypass an active hold to install an upgrade.
+- torrent_guard_array.py, scripts/guarded_adapter.py, tests/test_array_checks.py,
+  tests/test_guarded_adapter.py, tests/test_maintenance_array.py — read
+  [array safety and SMART](docs/array-safety.md) before changing pre-sync gates,
+  metric classification/history, health holds, shared-script adapters or recovery.
+  Retain all existing limits; add the 5% removed/updated guard to the final sync
+  boundary too. Blocked gates replace sync-start alerts with safe counts/reasons.
+  Critical/incomplete required SMART checks latch review holds; only explicit
+  retry rechecks health, without repeating completed jobs. Discover physical
+  data/parity devices from the guarded array and verify identities. Never start
+  tests, guess missing counters, overwrite unknown history or weaken UUID checks.
+  Host helper code is a bundle with torrent_guard_array.py; install its sidecar
+  before the entry point. Preserve private SMART history/shared-script backups
+  during uninstall. High priority applies to safety/critical diagnostics, never
+  makes notification delivery into job authorization. No Guard device access.
 - install.py, scripts/host_setup.py, scripts/app_install.py,
   scripts/enroll_maintenance_key.py, tests/test_host_setup.py — recommended
   media-first then OMV installation/upgrade. Read INSTALL.md and
   [installer workflow](docs/maintenance.md#installer-behavior-and-prerequisites).
   Fast-forward as checkout owner without discarding edits; retain `.env`,
   existing bind-mounted `/state`, runtime IDs, status port and standard Compose
-  overrides. Upgrade recognized root-owned helper code, never reset journals.
+  overrides. Upgrade recognized root-owned helper bundle code, never reset journals.
   Only the dedicated service home's documented legacy ownership/bare-key/lock
   migrations may be repaired. Do not change normal SSH settings or restart SSH.
   OMV may use interactive administrator SSH/sudo once to enroll its dedicated
@@ -401,6 +416,7 @@ Treat docker compose config output as possibly containing secrets; sanitize befo
 - Run: python3 -m unittest discover -s tests -v
 - Run: python3 -m py_compile guard.py deletion.py records.py orphans.py maintenance.py status_report.py status_web.py scripts/release_notes.py scripts/watch_logs.py
 - Run: python3 -m py_compile scripts/maintenance_install.py scripts/install_maintenance_omv.py scripts/install_maintenance_docker.py
+- Run: python3 -m py_compile torrent_guard_array.py scripts/guarded_adapter.py
 - Run: python3 -m py_compile scripts/maintenance_uninstall.py scripts/uninstall_maintenance_omv.py scripts/uninstall_maintenance_docker.py
 - Run: python3 -m py_compile install.py scripts/host_setup.py scripts/app_install.py scripts/enroll_maintenance_key.py scripts/install_prompts.py
 - Run: python3 scripts/release_notes.py (validates version consistency and changelog structure without publishing).

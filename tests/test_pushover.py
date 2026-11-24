@@ -32,7 +32,7 @@ class NotificationSequenceTests(remote.RemoteMaintenanceTests):
         self.controller.tick(self.at(8, 2))
         self.assertFalse(self.alerts)
         self.controller.tick(self.at(8, 2, 1))
-        self.assertEqual(len(self.alerts), 2)
+        self.assertEqual(len(self.alerts), 3)
         self.assertIn('sync starting', self.alerts[0][0])
         self.assertEqual(self.alerts[0][2], [False, False])
         self.assertEqual(self.alerts[1][2], [True, True])
@@ -40,11 +40,11 @@ class NotificationSequenceTests(remote.RemoteMaintenanceTests):
         self.controller = maintenance.RemoteCoordinator(self.omv, {**self.connection, 'pushover': {
             'app_token': 'a' * 30, 'user_key': 'b' * 30}})
         self.controller.tick(self.at(8, 3))
-        self.assertEqual(len(self.alerts), 2)
+        self.assertEqual(len(self.alerts), 3)
 
     def test_monday_transition_keeps_apps_stopped_and_final_has_status(self):
         self.controller.tick(self.at(9, 2, 1))
-        self.assertEqual(len(self.alerts), 3)
+        self.assertEqual(len(self.alerts), 4)
         self.assertIn('scrub starting', self.alerts[1][0])
         self.assertEqual(self.alerts[1][2], [False, False])
         self.assertEqual(self.alerts[2][2], [True, True])
@@ -54,7 +54,7 @@ class NotificationSequenceTests(remote.RemoteMaintenanceTests):
     def test_delivery_failure_does_not_hold_successful_jobs_or_restoration(self):
         with patch('maintenance.send_pushover', return_value=False) as send:
             self.controller.tick(self.at(9, 2, 1))
-        self.assertEqual(send.call_count, 3)
+        self.assertEqual(send.call_count, 4)
         self.assertFalse(self.controller.state['active'])
         self.assertTrue(all(row['State']['Running'] for row in self.rows.values()))
 

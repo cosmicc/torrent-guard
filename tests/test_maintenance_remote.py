@@ -3,10 +3,13 @@ from datetime import datetime
 import json
 from pathlib import Path
 import subprocess
+import time
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+from array_fixtures import ata_data
+from torrent_guard_array import DIFF_KEYS, smart_sample
 from maintenance import SnapraidStatus, Coordinator, MaintenanceError, RemoteCoordinator, ZONE, agent_request, main
 
 
@@ -59,6 +62,15 @@ class RemoteMaintenanceTests(unittest.TestCase):
         context = patch("maintenance.read_snapraid_status", side_effect=lambda *args: self.coverage_report)
         context.start()
         self.addCleanup(context.stop)
+        self.precheck = {'passed': True, 'counts': {key: 10000 if key == 'equal' else 0 for key in DIFF_KEYS},
+                         'reason': 'All guarded checks passed.'}
+        self.health = {'samples': [smart_sample(ata_data(), ['fixture'], 0)], 'errors': [],
+                       'critical': False, 'complete': True, 'at': time.time()}
+        for target, replacement in (("maintenance.pre_sync_check", lambda *args: self.precheck),
+                                    ("maintenance.check_smart_health", lambda *args: self.health)):
+            context = patch(target, replacement)
+            context.start()
+            self.addCleanup(context.stop)
         self.controller = RemoteCoordinator(self.omv, self.connection)
 
     def docker(self, *args):
