@@ -16,7 +16,7 @@ PROMPT_HELP = {
         "configuration. This affects read-only status summaries only; guarded jobs remain unchanged."
     ),
     "PUSHOVER_ENABLE": (
-        "Optional: send daily sync, Monday scrub and maintenance failure notifications through "
+        "Optional: send sync, weekly/catch-up scrub and maintenance failure notifications through "
         "Pushover. Enter y to configure keys, or Enter to disable. On media, keys are Docker .env "
         "variables; on OMV, enter the same keys in its private coordinator configuration. "
         "OMV sends notifications and needs outbound HTTPS; delivery failures never stop maintenance."

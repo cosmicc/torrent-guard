@@ -42,9 +42,10 @@ media-host session and paste only its `SHA256:...` value into the OMV prompt.
 
 The installer verifies restricted access, disables the two direct guarded-script
 jobs, and enables one coordinated OMV job. Sonarr/Radarr stop at 2am Eastern
-(with daylight saving time). Daily sync starts at 2:01am; on Mondays, scrub
-starts immediately after sync succeeds. The apps stay stopped through both
-Monday jobs and resume afterward; every other day they resume after sync.
+(with daylight saving time). Daily sync starts at 2:01am, followed by weekly
+Monday scrub. Automatic catch-up adds daily scrubs above 20% unscrubbed and
+returns to weekly at 5% or less. Apps stay stopped through planned jobs and
+resume after success. Existing guarded scrub limits remain in effect.
 qBittorrent keeps running.
 **No further scheduling or installer pass is needed.**
 

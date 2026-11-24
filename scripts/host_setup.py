@@ -273,7 +273,7 @@ def configure_omv_schedule(installer: Installer, execute=run) -> None:
     by_id = {job["uuid"]: job for job in read_jobs("verifying the deployed schedule")}
     if any(by_id.get(desired["uuid"], {}).get(key) != value for key, value in desired.items()) or any(by_id.get(job["uuid"], {}).get("enable") is not False for job in direct):
         raise InstallError("OMV schedule verification failed; rerun after inspecting OMV jobs")
-    installer.output("OMV schedule is configured: daily 02:01 sync; Monday scrub immediately after successful sync; coordinated from 02:00 Eastern.")
+    installer.output("OMV schedule is configured: daily 02:01 sync; Monday scrub plus automatic daily catch-up (>20% to <=5% by default); coordinated from 02:00 Eastern.")
 
 
 def install_omv(installer: UpgradeInstaller, execute=run) -> None:

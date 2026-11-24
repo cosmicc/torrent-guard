@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from maintenance import Coordinator, MaintenanceError, RemoteCoordinator, ZONE, agent_request, main
+from maintenance import SnapraidStatus, Coordinator, MaintenanceError, RemoteCoordinator, ZONE, agent_request, main
 
 
 class RemoteMaintenanceTests(unittest.TestCase):
@@ -51,6 +51,12 @@ class RemoteMaintenanceTests(unittest.TestCase):
         context.start()
         self.addCleanup(context.stop)
         context = patch("maintenance.subprocess.run", side_effect=self.process)
+        context.start()
+        self.addCleanup(context.stop)
+        self.coverage_report = SnapraidStatus(
+            text="SnapRAID status report:\nNo sync is in progress.\nThe full array was scrubbed at least one time.\nNo error detected.",
+            complete=True)
+        context = patch("maintenance.read_snapraid_status", side_effect=lambda *args: self.coverage_report)
         context.start()
         self.addCleanup(context.stop)
         self.controller = RemoteCoordinator(self.omv, self.connection)

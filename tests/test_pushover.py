@@ -36,7 +36,7 @@ class NotificationSequenceTests(remote.RemoteMaintenanceTests):
         self.assertIn('sync starting', self.alerts[0][0])
         self.assertEqual(self.alerts[0][2], [False, False])
         self.assertEqual(self.alerts[1][2], [True, True])
-        self.assertIn('No errors.', self.alerts[1][1])
+        self.assertIn('No error detected.', self.alerts[1][1])
         self.controller = maintenance.RemoteCoordinator(self.omv, {**self.connection, 'pushover': {
             'app_token': 'a' * 30, 'user_key': 'b' * 30}})
         self.controller.tick(self.at(8, 3))
@@ -49,7 +49,7 @@ class NotificationSequenceTests(remote.RemoteMaintenanceTests):
         self.assertEqual(self.alerts[1][2], [False, False])
         self.assertEqual(self.alerts[2][2], [True, True])
         self.assertIn('weekly scrub', self.alerts[2][1])
-        self.assertIn('No errors.', self.alerts[2][1])
+        self.assertIn('No error detected.', self.alerts[2][1])
 
     def test_delivery_failure_does_not_hold_successful_jobs_or_restoration(self):
         with patch('maintenance.send_pushover', return_value=False) as send:
@@ -186,7 +186,7 @@ class NotificationSequenceTests(remote.RemoteMaintenanceTests):
                     'snapraid_status_timeout_seconds': value})
             self.assertEqual(controller.snapraid_status_timeout, 120)
         self.controller.snapraid_status_timeout = 300
-        with patch('maintenance.snapraid_status', return_value='SnapRAID status: healthy') as status:
+        with patch('maintenance.read_snapraid_status', return_value=self.coverage_report) as status:
             self.controller.tick(self.at(8, 2, 1))
         status.assert_called_once_with('', 300)
 

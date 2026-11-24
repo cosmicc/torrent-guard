@@ -26,10 +26,17 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
   Never grant Guard Docker socket access or SSH credentials. Root controls run
   independently of Guard dry run. OMV must receive session-matched SSH stop/NFS
   flush acknowledgements before jobs; only its agent writes Guard's local marker.
-  Daily sync starts at 02:01 Eastern after the 02:00 hold. New Monday sessions
-  include scrub immediately after successful sync in the same invocation;
-  other days restore after sync. Preserve recorded job plans across restarts,
-  day overruns and upgrades. Never restore between Monday jobs or on failure.
+  Daily sync starts at 02:01 Eastern after the 02:00 hold. Monday remains the
+  weekly scrub baseline. New OMV sessions additionally scrub daily above 20%
+  unscrubbed until coverage reaches 5% or less; read the automatic catch-up
+  section in the maintenance guide. There is no manual schedule mode. Require
+  fresh complete healthy status after sync to add an extra scrub, freeze that
+  decision before execution, and persist post-scrub observation intent with
+  job success. Unknown coverage retains mode and the weekly plan, never grants
+  an extra scrub or certifies completion. Keep existing guarded scripts intact.
+  Preserve recorded plans, thresholds and pending observations across restarts,
+  day overruns and upgrades; old active sessions keep their original plans.
+  Never restore between planned jobs or on failure.
   Update host-installed helpers on both hosts outside active maintenance; the
   every-minute OMV cron job does not need a separate weekly schedule.
   Pushover is optional and sent only by OMV; read the notification section in
@@ -42,7 +49,13 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
   output. Read-only session-matched agent status may include identity-checked
   app states; old/unreachable agents mean unknown. No status call controls jobs.
   Deduplicate failed-job alerts per attempt; keep recovery guidance ahead of
-  bounded status summaries. Status collection defaults to 120 seconds; optional
+  bounded status summaries. Catch-up thresholds are configurable start/stop
+  integers (default 20/5); preserve hysteresis in OMV's existing journal. Warn
+  once per unavailable-coverage incident and after three measured successful
+  scrubs without a percentage decrease, resetting the latter on progress.
+  Do not treat a warning as permission to alter script limits or job holds.
+  Scheduling works with Pushover disabled; reuse collected status in alerts.
+  Status collection defaults to 120 seconds; optional
   OMV snapraid_status_timeout_seconds is an integer from 10 to 600. Preserve a
   bounded partial report on timeout and distinguish launch/output errors without
   sending private exception text. Never bypass an active hold to install an upgrade.
