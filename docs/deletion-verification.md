@@ -277,6 +277,10 @@ rename. Only `EINVAL`, `EOPNOTSUPP` or unavailable-operation `ENOSYS` permit an
 ordinary atomic rename into the already-journaled private quarantine directory.
 Before fallback, the directory must be owned by the runtime user, have no group
 or other access, and be empty (including no dangling symlink at `payload`).
+v2.12 reopens that same directory for a fresh listing, verifies its identity,
+and independently checks the exact `payload` name without following symlinks.
+This prevents a stale empty listing on an overlay filesystem from authorizing
+replacement of existing quarantine data. Other access/I/O failures still defer.
 Guard checks directory identity/attachment and verifies the captured file before
 unlinking. A changed captured file is retained for manual recovery. This is not
 a direct-unlink or copy/delete fallback against the original download name.

@@ -486,7 +486,10 @@ changing fallback behavior. Try renameat2(RENAME_NOREPLACE) first. Only EINVAL,
 EOPNOTSUPP and ENOSYS permit standard atomic rename into the journaled quarantine,
 after verifying it is empty, owner-only and owned by the runtime user. Preserve
 root/directory identity and attachment checks, import/rejection authorization,
-post-capture file identity checks and interrupted-unlink recovery. Never use a
+post-capture file identity checks and interrupted-unlink recovery. Reopen the identity-matched quarantine for a fresh listing before fallback;
+independently reject an existing `payload`, including a dangling symlink, even
+when listing is empty. Old overlay directory descriptors may have stale views.
+Never use a
 direct unlink of the original download name, or fallback on access, I/O, ESTALE,
 EXDEV or EEXIST errors. The operational threat boundary excludes concurrent
 quarantine changes by other processes with Guard's UID or root; document this

@@ -27,6 +27,9 @@ notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
 ### Fixed
 
+- Prevent fallback quarantine renames from trusting stale empty directory
+  listings on overlay filesystems; reopen the same directory and independently
+  reject an existing payload or dangling symlink before rename.
 - Isolate disk observations behind a 20-second deadline and independent lock;
   unknown/failed observations retain outages, and stuck workers cannot accumulate.
 - Keep notification delivery, status collection and restoration delays out of

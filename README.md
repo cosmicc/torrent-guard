@@ -76,7 +76,8 @@ This daemon uses a single changelog; no separate user changelog is maintained.
 **v0.6:** independent deletion verification retains unresolved
 operations. Optional [completed-download leftover cleanup](docs/deletion-verification.md)
 uses a narrowly scoped writable bind and saved file identities. Verified leftovers
-are permanently deleted after the final identity check.
+are permanently deleted after the final identity check. Fallback quarantine
+renames preserve existing payloads even when directory listings are stale.
 
 The installer remembers your cleanup overrides for upgrades. For manual
 deployment, see the

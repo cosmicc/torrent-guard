@@ -759,3 +759,30 @@ class QuarantineRenameTests(unittest.TestCase):
                 self.rename(self.source_fd, 'original', self.target_fd)
             rename.assert_not_called()
         self.assertTrue(self.source.exists())
+
+    def test_stale_empty_listing_cannot_authorize_replacing_a_payload(self):
+        payload = self.quarantine / 'payload'
+        for symlink in (False, True):
+            with self.subTest(symlink=symlink):
+                if symlink:
+                    payload.symlink_to(self.root / 'missing-target')
+                else:
+                    payload.write_bytes(b'preserve existing data')
+                with patch('deletion.rename_exclusive', side_effect=OSError(errno.EINVAL, 'unsupported')), \
+                        patch('deletion.os.listdir', return_value=[]), patch('deletion.os.rename') as rename:
+                    with self.assertRaises(FileExistsError):
+                        self.rename(self.source_fd, 'original', self.target_fd)
+                    rename.assert_not_called()
+                self.assertTrue(self.source.exists())
+                payload.unlink()
+
+    def test_other_quarantine_files_also_prevent_fallback_rename(self):
+        other = self.quarantine / 'unrelated'
+        other.write_bytes(b'preserve other data')
+        with patch('deletion.rename_exclusive', side_effect=OSError(errno.EINVAL, 'unsupported')), \
+                patch('deletion.os.rename') as rename:
+            with self.assertRaises(FileExistsError):
+                self.rename(self.source_fd, 'original', self.target_fd)
+            rename.assert_not_called()
+        self.assertTrue(self.source.exists())
+        self.assertEqual(other.read_bytes(), b'preserve other data')
