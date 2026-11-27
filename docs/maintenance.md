@@ -50,6 +50,23 @@ Docker commands require separate coordination. This controls these two apps,
 not every NFS client. Guard state and download storage must remain outside the
 protected array. Keep updates/recreation outside active maintenance.
 
+## Pausing scheduled routines
+
+For array maintenance such as mergerfs rebalancing, disable **Torrent Guard
+coordinated SnapRAID maintenance** in OMV Scheduled Jobs and apply the change.
+This prevents future coordinator launches; it does not stop an already running
+job. Before touching the array, confirm the coordinator is inactive with
+`sudo /usr/local/sbin/torrent-guard-maintenance status` and verify no sync/scrub
+or guarded job is running. Let active maintenance finish; preserve both journals.
+Leave the old direct guarded-script jobs disabled. Re-enable only the coordinator
+when ready; during 02:00–06:00 Eastern it may catch up immediately. The master
+OMV installer enables this job, so do not run setup merely to pause it.
+
+The independent [array drive watcher](array-monitoring.md) stays active every
+60 seconds while this job is disabled and throughout long maintenance jobs.
+Its dedicated `/etc/cron.d/torrent-guard-array-watch` is separate from OMV's
+generated coordinator schedule. It alerts without controlling jobs or apps.
+
 ## Automatic scrub catch-up
 
 Scrub scheduling is fully automatic, with Monday as the weekly baseline. After
@@ -133,7 +150,21 @@ Sync-only sessions send two alerts: sync starting after confirmed app shutdown,
 then sync complete after the Docker host confirms restoration. Sessions with a
 weekly or catch-up scrub send three: sync starting, sync complete/scrub starting
 while apps stay stopped, and sync/scrub complete after confirmed restoration. Completion/transition messages
-include a bounded tail of SnapRAID status. Apps that were already stopped remain
+include a bounded SnapRAID status summary without the scrub-age chart, starting
+at “The oldest block was scrubbed…” when available. Partial/error reports retain
+available diagnostics. Notification bodies omit the redundant date/time header;
+Pushover already displays delivery time. Sync completion (including the scrub-start
+transition) shows `Sync Time: 23min 45sec`; scrub completion also shows, for example,
+`Scrub Time: 2hrs 23min`. Each duration uses the largest unit and its next smaller
+unit (days/hours, hours/minutes or minutes/seconds), discarding smaller units;
+jobs under a minute show seconds alone. Timers cover only the synchronous guarded
+script execution, excluding preflight, notification delivery, status collection
+and restoration. Successful whole-second timings are saved with job completion
+in the existing journal and survive coordinator restarts. An explicit retry
+replaces only that job's timing; older completed jobs without timing omit it.
+No journal migration or reset is needed.
+
+Apps that were already stopped remain
 stopped; completion messages describe restoration of their original states.
 
 Failures also alert, preserving the maintenance hold for review. Alerts show
@@ -149,7 +180,8 @@ recover an exit code they never recorded. Repeated ticks deduplicate the same
 job failure; a failed explicitly authorized retry alerts again. Other changed
 failure reasons can also alert again. Routine messages use normal Pushover priority/device settings; blocked
 pre-sync and critical/incomplete SMART alerts use high priority (1)
-and Eastern timestamps. Status output is sent to Pushover, so it may include
+without an added timestamp header. Failure session/date identifiers remain
+for recovery. Status output is sent to Pushover, so it may include
 array names/details. Its collection is read-only and defaults to a 120-second
 limit so larger content files have time to load. Optional top-level
 `snapraid_status_timeout_seconds` in OMV's private configuration accepts an
@@ -350,6 +382,10 @@ Next preview/remove on **OMV**:
 sudo python3 scripts/uninstall_maintenance_omv.py --dry-run
 sudo python3 scripts/uninstall_maintenance_omv.py
 ```
+
+OMV removal also removes the recognized independent array watcher cron file and
+its separate private incident journal/lock; a modified schedule or busy watcher
+blocks removal. SMART history and array data remain preserved.
 
 OMV removal includes the recognized helper bundle, connection configuration, dedicated private and
 public keys, dedicated host pins, and inactive coordinator journal/lock/setup-receipt directory.

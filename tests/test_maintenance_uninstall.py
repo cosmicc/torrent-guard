@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 from scripts.maintenance_install import HELPER, USER, InstallError
 from scripts.maintenance_uninstall import Uninstaller
+from torrent_guard_array import WATCH_CRON, WATCH_DIRECTORY, WATCH_SCHEDULE
 import test_maintenance_install as installer_tests
 from test_maintenance_install import sample_key
 
@@ -64,6 +65,43 @@ class UninstallTests(installer_tests.InstallerFixture):
         self.assertFalse(private.exists())
         for name, contents in self.normal.items():
             self.assertEqual(self.snapshot(self.paths.key.parent)[name], contents)
+
+    def test_monitor_schedule_and_private_state_removed_but_smart_history_preserved(self):
+        self.install_omv()
+        self.inactive_journal('omv')
+        cron = self.paths.path(WATCH_CRON)
+        cron.parent.mkdir(parents=True, exist_ok=True)
+        cron.write_text(WATCH_SCHEDULE)
+        watch = self.paths.path(str(WATCH_DIRECTORY))
+        watch.mkdir(mode=0o700)
+        (watch / 'lock').touch(mode=0o600)
+        (watch / 'state.json').write_text('{"schema":1,"inventory":[],"incidents":{}}')
+        history = self.paths.path('/var/lib/torrent-guard-maintenance-array')
+        history.mkdir()
+        (history / 'smart.sqlite3').write_bytes(b'preserve history')
+        self.apply('omv')
+        self.assertFalse(cron.exists())
+        self.assertFalse(watch.exists())
+        self.assertEqual((history / 'smart.sqlite3').read_bytes(), b'preserve history')
+
+    def test_custom_monitor_schedule_or_busy_watch_lock_refuses_uninstall(self):
+        self.install_omv()
+        self.inactive_journal('omv')
+        cron = self.paths.path(WATCH_CRON)
+        cron.parent.mkdir(parents=True, exist_ok=True)
+        cron.write_text('unrelated cron command')
+        with self.assertRaisesRegex(InstallError, 'differs'):
+            self.uninstaller.plan('omv')
+        cron.write_text(WATCH_SCHEDULE)
+        watch = self.paths.path(str(WATCH_DIRECTORY))
+        watch.mkdir(mode=0o700)
+        with (watch / 'lock').open('w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            marker, journals = self.uninstaller.plan('omv')
+            with self.assertRaisesRegex(InstallError, 'busy'):
+                with self.uninstaller.locks(journals):
+                    self.fail('Busy monitor lock must block removal')
+        self.assertTrue(cron.exists())
 
     def test_omv_uninstall_then_fresh_install_has_a_new_key(self):
         self.install_omv()

@@ -15,6 +15,7 @@ from scripts.enroll_maintenance_key import enroll
 from scripts.maintenance_install import FORCED
 from scripts.host_setup import MODEL, SCHEDULE, UpgradeInstaller, configure_omv_schedule, install_omv, update_checkout
 from scripts.maintenance_install import ARRAY_HELPER, HELPER, SOURCE, InstallError
+from torrent_guard_array import WATCH_CRON, WATCH_DIRECTORY, WATCH_SCHEDULE
 import test_maintenance_install as fixtures
 
 
@@ -371,6 +372,10 @@ class BootstrapTests(fixtures.InstallerFixture):
         self.assertEqual(self.snapshot(self.root), before)
         self.ask.assert_not_called()
         self.assertEqual(schedule.call_count, 2)
+        self.assertEqual(self.paths.path(WATCH_CRON).read_text(), WATCH_SCHEDULE)
+        self.assertEqual(self.paths.path(WATCH_CRON).stat().st_mode & 0o777, 0o644)
+        self.assertEqual(self.paths.path(str(WATCH_DIRECTORY)).stat().st_mode & 0o777, 0o700)
+        self.assertEqual((self.paths.path(str(WATCH_DIRECTORY)) / 'lock').stat().st_mode & 0o777, 0o600)
         self.assertEqual(sum('-tt' in args for args in calls), 1)
         for name,value in self.normal.items():
             self.assertEqual(self.snapshot(self.paths.key.parent)[name], value)

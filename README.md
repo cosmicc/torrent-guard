@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml/badge.svg)](https://github.com/cosmicc/torrent-guard/actions/workflows/test.yml)
 
-**v2.11** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
+**v2.12** · Python 3.12 · Docker Compose · qBittorrent + Sonarr/Radarr
 
 Torrent Guard monitors movie and TV downloads through qBittorrent and the
 Sonarr/Radarr APIs. It screens selected filenames for dangerous extensions,
@@ -32,8 +32,12 @@ grace interval has elapsed (15 minutes by default).
   OMV can be a separate NFS server: restricted SSH coordinates the Docker host.
   qBittorrent continues downloading; Docker control stays on that host.
   Optional Pushover alerts cover sync/scrub starts, completion and failures,
-  including SnapRAID status summaries. Failure alerts show job errors, app state
-  and recovery instructions. Pre-sync array/diff checks block suspicious changes;
+  including SnapRAID status summaries without charts and elapsed job times.
+  Failure alerts show job errors, app state and recovery instructions.
+  Independent OMV checks every 60 seconds alert on inaccessible array drives and
+  recovery, including while scheduled sync/scrub is paused.
+  See [continuous drive monitoring](docs/array-monitoring.md).
+  Pre-sync array/diff checks block suspicious changes;
   end-of-job SMART reports track disk health and hold apps on critical/incomplete
   readings. See [array protection and SMART](docs/array-safety.md). See [notification setup](docs/maintenance.md#pushover-notifications).
   [One installer on each host](INSTALL.md) handles setup, upgrades, restricted
@@ -72,7 +76,8 @@ This daemon uses a single changelog; no separate user changelog is maintained.
 **v0.6:** independent deletion verification retains unresolved
 operations. Optional [completed-download leftover cleanup](docs/deletion-verification.md)
 uses a narrowly scoped writable bind and saved file identities. Verified leftovers
-are permanently deleted after the final identity check.
+are permanently deleted after the final identity check. Fallback quarantine
+renames preserve existing payloads even when directory listings are stale.
 
 The installer remembers your cleanup overrides for upgrades. For manual
 deployment, see the

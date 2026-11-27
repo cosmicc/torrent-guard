@@ -6,7 +6,7 @@ same installer commands; existing settings, keys and journals are preserved.
 
 Before starting: both hosts need Git, Python 3.10+ and root/sudo access.
 The media host needs Docker Compose, an existing SSH server, and the existing
-`sonarr` and `radarr` containers. OMV also needs Bash and smartmontools (`smartctl`), working NFS mounts and executable
+`sonarr` and `radarr` containers. OMV also needs Bash, util-linux (`findmnt`) and smartmontools (`smartctl`), working NFS mounts and executable
 `/usr/local/sbin/snapraid-guarded-sync` and `snapraid-guarded-scrub` scripts.
 [Extra prerequisites and nonstandard setups](INSTALL_SUPPLEMENT.md#unified-installer-reference).
 
@@ -49,7 +49,10 @@ resume after success. Existing guarded scrub limits remain in effect.
 qBittorrent keeps running. Pre-sync checks retain your script's limits and add a
 5% removal/update guard. End-of-job SMART checks hold restoration on critical or
 incomplete health; the installer retains an exact private script backup.
-See [array protection and SMART](docs/array-safety.md).
+The installer also enables independent drive accessibility monitoring every
+60 seconds using the existing Pushover keys; pausing the coordinated job leaves
+this monitoring active. See [drive monitoring](docs/array-monitoring.md) and
+[array protection and SMART](docs/array-safety.md).
 **No further scheduling or installer pass is needed.**
 
 ## Future upgrades

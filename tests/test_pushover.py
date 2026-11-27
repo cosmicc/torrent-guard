@@ -51,6 +51,94 @@ class NotificationSequenceTests(remote.RemoteMaintenanceTests):
         self.assertIn('weekly scrub', self.alerts[2][1])
         self.assertIn('No error detected.', self.alerts[2][1])
 
+    def test_completion_times_measure_only_jobs_and_preserve_message_text(self):
+        clock = [100.0]
+        process = self.process
+
+        def run(command, **kwargs):
+            result = process(command, **kwargs)
+            # SSH, status and alert delivery are deliberately outside job time.
+            clock[0] += {'sync': 1425.9, 'scrub': 8584.5}.get(
+                next((job for job, path in self.paths.items() if command == [path]), ''), 500)
+            return result
+
+        send = maintenance.send_pushover
+
+        def deliver(*args):
+            clock[0] += 200
+            return send(*args)
+
+        with patch('maintenance.time.monotonic', side_effect=lambda: clock[0]), \
+                patch('maintenance.subprocess.run', side_effect=run), \
+                patch('maintenance.send_pushover', side_effect=deliver):
+            self.controller.tick(self.at(9, 2, 1))
+        self.assertEqual(self.controller.state['job_elapsed_seconds'], {'sync': 1425, 'scrub': 8584})
+        self.assertEqual(self.alerts[0][1],
+                         'Sonarr and Radarr are stopped. SnapRAID sync is starting.\n'
+                         + maintenance.diff_summary(self.precheck['counts']))
+        self.assertTrue(self.alerts[1][1].startswith(
+            'Sync completed successfully. Weekly scrub is starting. Sonarr and Radarr remain stopped.\n'))
+        self.assertIn('\nSync Time: 23min 45sec\n\nSnapRAID status:', self.alerts[1][1])
+        self.assertIn('\nSync Time: 23min 45sec\nScrub Time: 2hrs 23min\n\nSnapRAID status:', self.alerts[2][1])
+        for _, message, _ in self.alerts:
+            self.assertNotRegex(message, r'^\d{2}\.\d{2}\.\d{4}')
+            self.assertLessEqual(len(message), 1024)
+
+    def test_completed_timing_survives_lost_finish_ack_and_restart(self):
+        self.lose_finish = True
+        with patch('maintenance.time.monotonic', side_effect=[100, 1525]):
+            with self.assertRaises(maintenance.MaintenanceError):
+                self.controller.tick(self.at(8, 2, 1))
+        self.controller = maintenance.RemoteCoordinator(self.omv, {**self.connection, 'pushover': {
+            'app_token': 'a'*30, 'user_key': 'b'*30}})
+        self.controller.tick(self.at(8, 5))
+        complete = [message for title, message, _ in self.alerts if title == 'SnapRAID maintenance complete']
+        self.assertEqual(len(complete), 1)
+        self.assertIn('Sync Time: 23min 45sec', complete[0])
+        self.assertNotIn('Scrub Time:', complete[0])
+        self.assertEqual(len(self.jobs), 1)
+
+    def test_retry_replaces_failed_attempt_timing_and_keeps_completed_sync(self):
+        process = self.process
+
+        def fail_scrub(command, **kwargs):
+            result = process(command, **kwargs)
+            return subprocess.CompletedProcess(command, 23) if command == [self.paths['scrub']] else result
+
+        with patch('maintenance.subprocess.run', side_effect=fail_scrub), \
+                patch('maintenance.time.monotonic', side_effect=[100, 1525, 2000, 2100]):
+            with self.assertRaises(maintenance.MaintenanceError):
+                self.controller.tick(self.at(9, 2, 1))
+        self.assertEqual(self.controller.state['job_elapsed_seconds'], {'sync': 1425})
+        self.controller.state['jobs']['scrub'] = 'pending'  # Existing explicit retry workflow.
+        self.controller.save()
+        with patch('maintenance.time.monotonic', side_effect=[10000, 18584]):
+            self.controller.tick(self.at(9, 5))
+        self.assertEqual(self.controller.state['job_elapsed_seconds'], {'sync': 1425, 'scrub': 8584})
+        self.assertEqual(self.jobs.count(self.paths['sync']), 1)
+        self.assertIn('Scrub Time: 2hrs 23min', self.alerts[-2][1])
+
+    def test_legacy_completion_has_no_invented_duration(self):
+        self.controller.tick(self.at(8, 2))
+        self.controller.state['jobs']['sync'] = 'complete'
+        self.controller.save()
+        self.controller.tick(self.at(8, 2, 1))
+        complete = next(message for title, message, _ in self.alerts if title == 'SnapRAID maintenance complete')
+        self.assertNotIn('Time:', complete)
+
+    def test_long_completion_keeps_oldest_block_line_and_final_status(self):
+        self.coverage_report = maintenance.SnapraidStatus(
+            text=('  |oooo\n  +------\nThe oldest block was scrubbed 20 days ago.\n'
+                  + 'Array details.\n' * 80
+                  + 'No sync is in progress.\n20% of the array is not scrubbed.\nNo error detected.'),
+            complete=True)
+        self.controller.tick(self.at(9, 2, 1))
+        message = next(message for title, message, _ in self.alerts if title == 'SnapRAID maintenance complete')
+        self.assertIn('SnapRAID status:\nThe oldest block was scrubbed 20 days ago.', message)
+        self.assertTrue(message.endswith('No error detected.'))
+        self.assertNotIn('|oooo', message)
+        self.assertLessEqual(len(message), 1024)
+
     def test_delivery_failure_does_not_hold_successful_jobs_or_restoration(self):
         with patch('maintenance.send_pushover', return_value=False) as send:
             self.controller.tick(self.at(9, 2, 1))
@@ -199,6 +287,32 @@ class NotificationSequenceTests(remote.RemoteMaintenanceTests):
 
 class DeliveryTests(unittest.TestCase):
     """No live keys, network calls or SnapRAID work in notification tests."""
+
+    def test_elapsed_time_uses_two_adjacent_units_without_rounding(self):
+        for seconds, expected in ((0, '0sec'), (59, '59sec'), (60, '1min 0sec'),
+                                  (1425, '23min 45sec'), (3600, '1hr 0min'),
+                                  (8584, '2hrs 23min'), (86400, '1day 0hrs'),
+                                  (183845, '2days 3hrs')):
+            with self.subTest(seconds=seconds):
+                self.assertEqual(maintenance.elapsed_time(seconds), expected)
+
+    def test_status_summary_starts_at_oldest_block_and_preserves_policy_evidence(self):
+        prose = ('The oldest block was scrubbed 20 days ago, the median 5, the newest 0.\n'
+                 'No sync is in progress.\n20% of the array is not scrubbed.\nNo error detected.')
+        raw = 'Loading state...\n  | oo\n  |oooo\n  +--------\n  0 5 10\n' + prose
+        status = maintenance.SnapraidStatus(text=raw, complete=True)
+        self.assertEqual(status.summary(), 'SnapRAID status:\n' + prose)
+        self.assertEqual(status.text, raw)
+        self.assertEqual(status.unscrubbed_percent(), 20)
+        long = maintenance.SnapraidStatus(text=raw + '\n' + 'details\n' * 150 + 'No error detected.')
+        self.assertTrue(long.summary().startswith('SnapRAID status:\nThe oldest block was scrubbed'))
+        self.assertTrue(long.summary().endswith('No error detected.'))
+        self.assertLessEqual(len(long.summary()), 717)
+
+    def test_partial_status_chart_is_omitted_without_hiding_timeout(self):
+        status = maintenance.SnapraidStatus(text='Loading state...\n  | oo\n  |oooo\n  +--------\n  0 5 10',
+                                          label='SnapRAID status timed out after 120 seconds (partial report)')
+        self.assertEqual(status.summary(), status.label + ':\nLoading state...')
 
     def test_https_body_and_acknowledgement_are_bounded(self):
         connection = Mock()

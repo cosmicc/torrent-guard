@@ -102,8 +102,25 @@ def rename_to_quarantine(source_fd: int, source: str, target_fd: int) -> bool:
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
             or stat.S_IMODE(info.st_mode) & 0o077):
         raise ValueError("NFS rename fallback requires an owner-only quarantine owned by the runtime user")
-    if os.listdir(target_fd):
-        raise FileExistsError(errno.EEXIST, "NFS rename fallback requires an empty private quarantine")
+    # Overlay filesystems can retain an empty directory view on a descriptor
+    # opened before copy-up. Reopen the same directory for a fresh enumeration,
+    # and independently check the exact destination so an occupied payload can
+    # never be replaced merely because a directory listing was stale.
+    fresh_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=target_fd)
+    try:
+        fresh = os.fstat(fresh_fd)
+        if (fresh.st_dev, fresh.st_ino) != (info.st_dev, info.st_ino):
+            raise ValueError("Quarantine directory identity changed before NFS rename fallback")
+        if os.listdir(fresh_fd):
+            raise FileExistsError(errno.EEXIST, "NFS rename fallback requires an empty private quarantine")
+        try:
+            os.stat("payload", dir_fd=target_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise FileExistsError(errno.EEXIST, "NFS rename fallback destination already exists")
+    finally:
+        os.close(fresh_fd)
     os.rename(source, "payload", src_dir_fd=source_fd, dst_dir_fd=target_fd)
     return True
 
