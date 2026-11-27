@@ -27,7 +27,8 @@ import urllib.parse
 import uuid
 from zoneinfo import ZoneInfo
 
-from torrent_guard_array import check_smart_health, diff_summary, pre_sync_check, smart_lines
+from torrent_guard_array import (WATCH_DIRECTORY, bounded_array_probe, check_smart_health,
+                                diff_summary, pre_sync_check, smart_lines)
 
 
 ZONE = ZoneInfo("America/New_York")
@@ -86,8 +87,25 @@ class SnapraidStatus:
     complete: bool = False
 
     def summary(self) -> str:
-        """Return the bounded operator summary used by notifications."""
-        return self.label + ":\n" + (self.text[-700:] or "No output returned.")
+        """Omit the scrub-age chart from display without changing policy evidence."""
+        lines = self.text.splitlines()
+        start = next((index for index, line in enumerate(lines)
+                      if line.startswith("The oldest block was scrubbed")), None)
+        if start is not None:
+            lines = lines[start:]
+        else:
+            # Partial reports can end inside the chart, before its prose summary.
+            # Retain diagnostic prose but omit plot rows and numeric axes.
+            lines = [line for line in lines if "|" not in line
+                     and not re.fullmatch(r"[\s\d.+*oO_\\/\-]+", line)]
+        text = "\n".join(lines).strip()
+        if len(text) > 700:
+            first, separator, tail = text.partition("\n")
+            if start is not None and separator and len(first) < 695:
+                text = first + "\n...\n" + tail[-(700 - len(first) - 5):]
+            else:
+                text = text[-700:]
+        return self.label + ":\n" + (text or "No output returned.")
 
     def unscrubbed_percent(self) -> int | None:
         """Accept one unambiguous coverage result from a complete healthy report."""
@@ -141,6 +159,20 @@ def read_snapraid_status(config_path: str = "", timeout_seconds: int = 120) -> S
 def snapraid_status(config_path: str = "", timeout_seconds: int = 120) -> str:
     """Return a display summary; automated policy uses the structured evidence."""
     return read_snapraid_status(config_path, timeout_seconds).summary()
+
+
+def elapsed_time(seconds: int) -> str:
+    """Display whole seconds using the largest unit and its next smaller unit."""
+    for unit_seconds, label, smaller_seconds, smaller_label in (
+            (86400, "days", 3600, "hrs"),
+            (3600, "hrs", 60, "min"),
+            (60, "min", 1, "sec")):
+        if seconds >= unit_seconds:
+            major, remainder = divmod(seconds, unit_seconds)
+            if major == 1 and label in ("days", "hrs"):
+                label = label[:-1]
+            return f"{major}{label} {remainder // smaller_seconds}{smaller_label}"
+    return f"{seconds}sec"
 
 
 def read_maintenance(state_db: str | Path) -> dict:
@@ -305,6 +337,10 @@ class Coordinator:
         self.state.pop("job_failure", None)
         attempts = self.state.setdefault("job_attempts", {})
         attempts[job] = attempts.get(job, 0) + 1
+        # A retry replaces only its own timing; interrupted/legacy executions
+        # must never inherit an earlier attempt's completed duration.
+        timings = self.state.setdefault("job_elapsed_seconds", {})
+        timings.pop(job, None)
         self.state["jobs"][job] = "running"
         self.state["detail"] = "Running SnapRAID " + job
         self.save()
@@ -314,7 +350,9 @@ class Coordinator:
         try:
             environment = self.job_environment(job)
             options = {"env": environment} if environment is not None else {}
+            started = time.monotonic()
             result = subprocess.run([str(path)], check=False, **options)
+            duration = max(0, int(time.monotonic() - started))
         except OSError as exc:
             self.state["jobs"][job] = "failed"
             self.state["job_failure"] = {"job": job, "kind": "launch", "at": time.time()}
@@ -325,6 +363,7 @@ class Coordinator:
             self.state["job_failure"] = {"job": job, "kind": "exit", "exit_code": result.returncode,
                                          "at": time.time()}
         if result.returncode == 0:
+            timings[job] = duration
             self.job_completed(job)
         self.save()
         if result.returncode:
@@ -418,6 +457,99 @@ def private_directory(path: Path) -> None:
         raise MaintenanceError("State directory must be root-owned, mode 0700, without symlinks")
 
 
+def watch_array(settings: dict, directory: Path = WATCH_DIRECTORY) -> None:
+    """Independently check array accessibility and journal each alert before sending.
+
+    This lock and journal are separate from maintenance, so long jobs, paused
+    schedules and failure holds never suppress drive observations. No result
+    can start/stop jobs or containers, clear holds, or authorize restoration.
+    """
+    private_directory(directory)
+    descriptor = os.open(directory / 'lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, 'r+') as lock:
+        info = os.fstat(lock.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise MaintenanceError('Array monitor lock must be private and root-owned')
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            LOG.warning('Array monitor probe is still running; another worker was not launched')
+            return
+        path = directory / 'state.json'
+        state = root_config(path) if os.path.lexists(path) else {'schema': 1, 'inventory': [], 'incidents': {}}
+        if path.exists() and path.stat().st_mode & 0o077:
+            raise MaintenanceError('Array monitor journal must be private')
+        if (state.get('schema') != 1 or not isinstance(state.get('inventory'), list)
+                or len(state['inventory']) > 32 or not isinstance(state.get('incidents'), dict)
+                or len(state['incidents']) > 33
+                or any(not isinstance(row, dict) or set(row) != {'key', 'label', 'path', 'uuid', 'target'}
+                       or any(not isinstance(value, str) or not 1 <= len(value) <= 4096
+                              for value in row.values()) for row in state['inventory'])
+                or any(not isinstance(key, str) or not isinstance(row, dict)
+                       or set(row) != {'label', 'reason', 'attempted'}
+                       or not isinstance(row['label'], str) or not isinstance(row['reason'], str)
+                       or type(row['attempted']) is not bool for key, row in state['incidents'].items())):
+            raise MaintenanceError('Array monitor journal is invalid; preserve it for review')
+        try:
+            keys = pushover_keys(settings.get('pushover', {}))
+        except (ValueError, AttributeError):
+            LOG.warning('Invalid Pushover credentials; array monitoring continues without alerts')
+            keys = ('', '')
+        expected = settings.get('snapraid_config', '')
+        if not isinstance(expected, str) or expected and not Path(expected).is_absolute():
+            raise MaintenanceError('Array monitor requires an absolute SnapRAID configuration path')
+        result = bounded_array_probe(state['inventory'], expected)
+        incidents = state['incidents']
+        deliveries = []
+        for issue in result['issues']:
+            key = issue['key']
+            if key not in incidents:
+                incidents[key] = {name: issue[name] for name in ('label', 'reason')}
+                incidents[key]['attempted'] = False
+                LOG.error('Array accessibility: %s: %s', issue['label'], issue['reason'])
+            if keys[0] and not incidents[key]['attempted']:
+                incidents[key]['attempted'] = True
+                title = ('CRITICAL: SnapRAID accessibility check unavailable' if key == 'monitor'
+                         else 'CRITICAL: SnapRAID array inaccessible')
+                deliveries.append((title,
+                                   issue['label'], 1))
+        recovered = set(result['healthy'])
+        if result['complete']:
+            recovered.add('monitor')
+        for key in sorted(recovered & incidents.keys()):
+            old = incidents.pop(key)
+            LOG.info('Array accessibility recovered: %s', old['label'])
+            if keys[0] and old['attempted']:
+                deliveries.append(('SnapRAID array accessibility recovered',
+                                   old['label'], 0))
+        if result['complete']:
+            for key in set(incidents) - recovered:
+                # A root-authorized config edit removed this role. Removal is
+                # not evidence of recovery; do not announce it as recovered.
+                LOG.info('Array monitor role removed from configuration: %s', incidents[key]['label'])
+                incidents.pop(key)
+        state.update(inventory=result['inventory'], checked_at=time.time())
+        # Never send an event that has not been durably claimed. As with routine
+        # maintenance alerts, uncertain/failed delivery is not automatically retried.
+        atomic_json(path, state, 0o600)
+        for title, priority in sorted({(title, priority) for title, _label, priority in deliveries},
+                                      key=lambda row: -row[1]):
+            group = [label for event, label, level in deliveries if (event, level) == (title, priority)]
+            # Batch large outages so up to 32 drives do not create 32 bounded
+            # HTTPS waits and delay the next minute's observation.
+            suffix = ('\nInspect OMV drive/mount status and /var/lib/torrent-guard-array-watch/state.json '
+                      'for recorded reasons. Monitoring only alerts; maintenance checks remain active.'
+                      if priority else '\nAccessibility checks now pass. This does not certify media integrity '
+                      'or clear maintenance review holds.')
+            message = 'Affected: '
+            for label in group:
+                if len(message) + len(label) + len(suffix) + 2 > 1024:
+                    send_pushover(*keys, title, message.rstrip(', ') + suffix, priority=priority)
+                    message = 'Affected: '
+                message += label + ', '
+            send_pushover(*keys, title, message.rstrip(', ') + suffix, priority=priority)
+
+
 class RemoteCoordinator(Coordinator):
     """Schedule OMV sync and automatic scrub catch-up through a restricted agent."""
 
@@ -487,8 +619,6 @@ class RemoteCoordinator(Coordinator):
         except (OSError, ValueError):
             LOG.warning("Could not record Pushover event; notification skipped; maintenance continues")
             return
-        stamp = datetime.now(ZONE).strftime("%m.%d.%Y %H:%M %Z%z")
-        message = stamp + "\n" + message
         if status:
             summary = (self.status_snapshot.summary() if self.status_snapshot is not None else
                        snapraid_status(self.status_config(), self.snapraid_status_timeout))
@@ -497,6 +627,11 @@ class RemoteCoordinator(Coordinator):
                 # Retain the status header/exit code and final summary rather
                 # than truncating the useful ending behind recovery guidance.
                 header, separator, tail = summary.partition("\n")
+                if tail.startswith("The oldest block was scrubbed"):
+                    oldest, newline, rest = tail.partition("\n")
+                    if newline and budget > len(header) + len(oldest) + 6:
+                        header += "\n" + oldest
+                        tail = rest
                 if separator and budget > len(header) + 5:
                     summary = header + "\n...\n" + tail[-(budget - len(header) - 5):]
                 else:
@@ -506,6 +641,13 @@ class RemoteCoordinator(Coordinator):
             send_pushover(token, user, title, message, priority=priority)
         else:
             send_pushover(token, user, title, message)
+
+    def completion_times(self, *jobs: str) -> str:
+        """Append saved successful-job timings; never guess legacy durations."""
+        timings = self.state.get("job_elapsed_seconds", {})
+        return "".join(f"\n{job.title()} Time: {elapsed_time(timings[job])}"
+                       for job in jobs if self.state["jobs"].get(job) == "complete"
+                       and type(timings.get(job)) is int and timings[job] >= 0)
 
     def job_start(self, job: str) -> None:
         """Announce sync, or its successful transition into the planned scrub."""
@@ -517,7 +659,8 @@ class RemoteCoordinator(Coordinator):
             kind = "Daily catch-up" if self.state.get("scrub_reason") == "catchup" else "Weekly"
             self.notify("scrub_start", "SnapRAID sync complete; scrub starting",
                         f"Sync completed successfully. {kind} scrub is starting. "
-                        "Sonarr and Radarr remain stopped.\n" + self.state.get("scrub_policy_detail", ""), status=True)
+                        "Sonarr and Radarr remain stopped.\n" + self.state.get("scrub_policy_detail", "")
+                        + self.completion_times("sync"), status=True)
 
     def notify_complete(self) -> None:
         """Report completion only after the remote restoration acknowledgement."""
@@ -527,7 +670,8 @@ class RemoteCoordinator(Coordinator):
         self.notify("complete", "SnapRAID maintenance complete",
                     work + " completed successfully. Sonarr and Radarr were restored "
                     "to their original running states (previously running apps restarted).\n"
-                    + self.state.get("scrub_policy_detail", ""), status=True)
+                    + self.state.get("scrub_policy_detail", "")
+                    + self.completion_times("sync", "scrub"), status=True)
         self.notify_policy_notices()
 
     def notify_policy_notices(self) -> None:
@@ -978,7 +1122,7 @@ def main() -> int:
             print("Maintenance agent error: " + str(exc), file=sys.stderr)
             return 1
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("tick", "status", "retry"))
+    parser.add_argument("command", choices=("tick", "status", "retry", "watch-array"))
     parser.add_argument("--state-dir", type=Path, default=Path("/var/lib/torrent-guard-maintenance"))
     parser.add_argument("--config", type=Path, default=REMOTE_CONFIG)
     parser.add_argument("--confirm-jobs-stopped", action="store_true",
@@ -986,6 +1130,13 @@ def main() -> int:
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error("This OMV coordinator must run as root")
+    if args.command == 'watch-array':
+        try:
+            watch_array(root_config(args.config))
+            return 0
+        except (MaintenanceError, OSError, ValueError, KeyError, TypeError):
+            LOG.error('Array monitor could not read its private configuration/state or save observations; inspect OMV')
+            return 1
     try:
         private_directory(args.state_dir)
     except (MaintenanceError, OSError) as exc:

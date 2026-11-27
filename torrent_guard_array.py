@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import signal
 import sqlite3
 import stat
@@ -22,6 +23,11 @@ GUARDED = Path('/usr/local/sbin/snapraid-guarded')
 SMARTCTL = '/usr/sbin/smartctl'
 DIFF_KEYS = ('equal', 'added', 'removed', 'updated', 'moved', 'copied', 'restored', 'relocated')
 APP_ID = 0x54474148
+WATCH_CRON = '/etc/cron.d/torrent-guard-array-watch'
+WATCH_DIRECTORY = Path('/var/lib/torrent-guard-array-watch')
+WATCH_SCHEDULE = ('# Torrent Guard independent array accessibility monitor\n'
+                  'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n'
+                  '* * * * * root /usr/local/sbin/torrent-guard-maintenance watch-array\n')
 
 
 class ArrayCheckError(RuntimeError):
@@ -72,6 +78,193 @@ def trusted_guarded(path: Path = GUARDED) -> None:
             or not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
             or info.st_mode & 0o022 or not os.access(path, os.X_OK)):
         raise ArrayCheckError('Guarded script ownership, permissions or type is unsafe.')
+
+
+def protected_array_paths(expected_config: str = '') -> list[dict]:
+    """Read the guarded array's explicit data/parity paths without sourcing shell."""
+    trusted_guarded(GUARDED)
+    with GUARDED.open('rb') as stream:
+        raw = stream.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        raise ArrayCheckError('Guarded configuration is oversized.')
+    assignments = re.findall(r'^CONF=(?:"(/[A-Za-z0-9_./:+-]+)"|(/[A-Za-z0-9_./:+-]+))$',
+                             raw.decode('utf-8'), re.MULTILINE)
+    if len(assignments) != 1:
+        raise ArrayCheckError('Guarded array configuration cannot be identified.')
+    config = Path(next(value for value in assignments[0] if value)).resolve(strict=True)
+    if expected_config and Path(expected_config).resolve(strict=True) != config:
+        raise ArrayCheckError('Configured array differs from the guarded array.')
+    info = config.stat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        raise ArrayCheckError('Array configuration ownership/type/permissions are unsafe.')
+    with config.open('rb') as stream:
+        raw = stream.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        raise ArrayCheckError('Array configuration is oversized.')
+    paths = []
+    for line in raw.decode('utf-8').splitlines():
+        fields = shlex.split(line, comments=True)
+        if not fields:
+            continue
+        if fields[0] in ('data', 'disk'):
+            if len(fields) != 3 or not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', fields[1]):
+                raise ArrayCheckError('Array data path is unsupported.')
+            label, entries, parity = 'data ' + fields[1], [fields[2]], False
+        elif re.fullmatch(r'(?:[2-6]-)?parity', fields[0]):
+            if len(fields) != 2:
+                raise ArrayCheckError('Array parity path is unsupported.')
+            label, entries, parity = fields[0], fields[1].split(','), True
+        else:
+            continue
+        for index, entry in enumerate(entries):
+            path = Path(entry)
+            if (not path.is_absolute() or '..' in path.parts or len(entry) > 4096
+                    or not entry.isprintable() or any(char in entry for char in '*?[]')):
+                raise ArrayCheckError('Array path is unsafe or unsupported.')
+            paths.append({'key': label + ':' + str(index), 'label': label,
+                          'path': str(path.parent if parity else path)})
+    if (not 2 <= len(paths) <= 32 or len({row['key'] for row in paths}) != len(paths)
+            or not any(row['key'].startswith('data ') for row in paths)
+            or not any(row['key'].startswith('parity:') for row in paths)):
+        raise ArrayCheckError('Array drive list is incomplete, duplicate or oversized.')
+    return paths
+
+
+def check_kernel_device(number: str, sysfs: Path = Path('/sys/dev/block')) -> None:
+    """Detect removed/offline block devices even when directory data is cached.
+
+    Follow partition parents and device-mapper/MD slaves using kernel-owned
+    sysfs only. No raw disk reads or spin-up commands are issued.
+    """
+    if not re.fullmatch(r'\d{1,4}:\d{1,7}', number):
+        raise ArrayCheckError('Block device number is invalid.')
+    pending = [sysfs / number]
+    seen = set()
+    while pending:
+        path = pending.pop().resolve(strict=True)
+        if (path / 'partition').exists():
+            path = path.parent
+        if path in seen:
+            continue
+        seen.add(path)
+        if len(seen) > 64:
+            raise ArrayCheckError('Block device topology is oversized or ambiguous.')
+        state = path / 'device/state'
+        if state.exists() and state.read_text().strip() not in ('running', 'live'):
+            raise ArrayCheckError('Underlying block device is offline or unavailable.')
+        slaves = path / 'slaves'
+        if slaves.is_dir():
+            pending.extend(slaves.iterdir())
+
+
+def probe_array_drives(previous: list[dict], expected_config: str = '') -> dict:
+    """Observe mounts and directory reads; enrollment also requires guarded UUID checks.
+
+    Called only in an isolated, deadline-limited child. No media files are opened
+    for writing, no SMART tests run, and results never authorize maintenance.
+    """
+    issues, healthy, inventory = [], [], []
+    try:
+        paths = protected_array_paths(expected_config)
+        saved = {row['key']: row for row in previous}
+        layout = [{key: row[key] for key in ('key', 'label', 'path')} for row in previous]
+        enrolling = paths != layout
+        if enrolling:
+            # Never enroll the root filesystem or a replacement disk as healthy
+            # merely because findmnt can resolve an existing directory.
+            result = subprocess.run([str(GUARDED), 'preflight'], check=False,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            if result.returncode:
+                raise ArrayCheckError('Guarded mount/UUID checks failed; drive inventory cannot be enrolled.')
+        for row in paths:
+            try:
+                result = subprocess.run(['/usr/bin/findmnt', '--json', '--target', row['path'],
+                                         '--output', 'TARGET,UUID,FSTYPE,OPTIONS,MAJ:MIN'], check=False,
+                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3)
+                if result.returncode or len(result.stdout) > 65536:
+                    raise ArrayCheckError('Filesystem mount is unavailable.')
+                mount, = json.loads(result.stdout)['filesystems']
+                target, identity = mount['target'], mount['uuid']
+                if (not isinstance(target, str) or not Path(target).is_absolute() or target == '/'
+                        or not isinstance(identity, str) or not 1 <= len(identity) <= 128
+                        or not identity.isprintable() or not mount.get('fstype')):
+                    raise ArrayCheckError('Expected array filesystem is missing or cannot be identified.')
+                if 'ro' in mount.get('options', '').split(','):
+                    raise ArrayCheckError('Array filesystem is read-only.')
+                check_kernel_device(mount['maj:min'])
+                old = saved.get(row['key'])
+                if (old and old['path'] == row['path']
+                        and (old['uuid'] != identity or old['target'] != target)):
+                    raise ArrayCheckError('Array filesystem identity or mount changed.')
+                descriptor = os.open(row['path'], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    major, minor = map(int, mount['maj:min'].split(':'))
+                    if os.fstat(descriptor).st_dev != os.makedev(major, minor):
+                        raise ArrayCheckError('Array mount changed during the directory check.')
+                    with os.scandir(descriptor) as entries:
+                        next(entries, None)  # Force an actual directory read, even for an empty drive.
+                finally:
+                    os.close(descriptor)
+                inventory.append({**row, 'uuid': identity, 'target': target})
+                healthy.append(row['key'])
+            except ArrayCheckError as error:
+                issues.append({**row, 'reason': str(error)})
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+                issues.append({**row, 'reason': 'Drive directory or mount information could not be read.'})
+        # An incomplete reading never shrinks or replaces the known drive list.
+        return {'inventory': inventory if not issues else previous, 'issues': issues,
+                'healthy': healthy, 'complete': not issues}
+    except (ArrayCheckError, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        reason = str(error) if isinstance(error, ArrayCheckError) else 'Array configuration could not be read.'
+        return {'inventory': previous, 'issues': [{'key': 'monitor', 'label': 'Array monitor', 'reason': reason}],
+                'healthy': [], 'complete': False}
+
+
+def bounded_array_probe(previous: list[dict], expected_config: str = '', timeout: float = 20) -> dict:
+    """Keep hung disk reads off the cron parent and prevent overlapping probes.
+
+    The child inherits the watcher's flock descriptor. If a kernel disk read
+    remains uninterruptible after SIGKILL, it retains that lock, preventing each
+    cron invocation from creating another stuck worker. Never wait indefinitely
+    for such a child; report unknown accessibility rather than healthy drives.
+    """
+    with tempfile.TemporaryFile() as output:
+        child = os.fork()
+        if child == 0:
+            try:
+                os.setsid()
+                result = probe_array_drives(previous, expected_config)
+                output.write(json.dumps(result).encode())
+                output.flush()
+                os._exit(0)
+            except Exception:
+                # Last-resort worker boundary: never export private exceptions.
+                os._exit(1)
+        deadline = time.monotonic() + timeout
+        while True:
+            ended, status = os.waitpid(child, os.WNOHANG)
+            if ended:
+                if status == 0:
+                    output.seek(0)
+                    try:
+                        result = json.loads(output.read(262145))
+                        if (isinstance(result, dict) and set(result) == {'inventory', 'issues', 'healthy', 'complete'}
+                                and type(result['complete']) is bool):
+                            return result
+                    except ValueError:
+                        pass
+                break
+            if time.monotonic() >= deadline:
+                try:
+                    os.killpg(child, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                os.waitpid(child, os.WNOHANG)
+                break
+            time.sleep(0.05)
+    return {'inventory': previous, 'issues': [{'key': 'monitor', 'label': 'Array monitor',
+            'reason': 'Drive accessibility probe failed or exceeded its 20-second deadline; inspect OMV.'}],
+            'healthy': [], 'complete': False}
 
 
 def diff_summary(counts: dict | None) -> str:

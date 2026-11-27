@@ -17,6 +17,7 @@ import sys
 import tempfile
 
 from maintenance import atomic_json, ssh_command, pushover_keys
+from torrent_guard_array import WATCH_CRON, WATCH_DIRECTORY, WATCH_SCHEDULE
 from scripts.app_install import AppInstall, prompt_pushover
 from scripts.guarded_adapter import install_guarded_adapter
 from scripts.maintenance_install import ARRAY_HELPER, ARRAY_SOURCE, FORCED, HELPER, SOURCE, USER, Installer, InstallError, public_key
@@ -290,7 +291,7 @@ def configure_omv_schedule(installer: Installer, execute=run) -> None:
 
 def install_omv(installer: UpgradeInstaller, execute=run) -> None:
     """Generate/keep its key, enroll once using admin SSH, then activate scheduling."""
-    installer.required(("ssh", "ssh-keygen", "ssh-keyscan", "omv-confdbadm", "omv-salt", "bash", "smartctl"))
+    installer.required(("ssh", "ssh-keygen", "ssh-keyscan", "omv-confdbadm", "omv-salt", "bash", "smartctl", "findmnt"))
     for script in ("/usr/local/sbin/snapraid-guarded-sync", "/usr/local/sbin/snapraid-guarded-scrub"):
         if not Path(script).is_file() or not os.access(script, os.X_OK):
             raise InstallError("The existing guarded SnapRAID script is required: " + script)
@@ -366,6 +367,15 @@ def install_omv(installer: UpgradeInstaller, execute=run) -> None:
         raise InstallError("Invalid Pushover configuration; check the private OMV configuration") from exc
     install_guarded_adapter(installer)
     installer.helper()
+    # This is our own cron file, never OMV's generated schedule. Its independent
+    # lock lets checks continue while tick is paused or executing a long job.
+    installer.directory(installer.paths.path(str(WATCH_DIRECTORY)), private=True)
+    watch_lock = installer.paths.path(str(WATCH_DIRECTORY)) / 'lock'
+    if not installer.existing(watch_lock):
+        installer.file(watch_lock, b'', 0o600, private=True)
+    else:
+        installer.info(watch_lock, private=True)
+    installer.file(installer.paths.path(WATCH_CRON), WATCH_SCHEDULE.encode(), 0o644)
     configure_omv_schedule(installer, execute)
     installer.output("OMV installation/upgrade complete. No manual key copying or return installer pass is needed.")
 

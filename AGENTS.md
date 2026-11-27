@@ -45,6 +45,13 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
   Persist attempts before bounded HTTPS delivery; never let notification/status
   failures change job authorization, holds or restoration. Alert success only
   after session-matched finish acknowledgement. Keep keys out of journals/logs.
+  Pushover bodies omit redundant timestamp headers and scrub-age charts; status
+  prose begins at "The oldest block was scrubbed" when available. Measure script
+  execution with monotonic time, excluding alerts/status/preflight/restoration.
+  Save successful whole-second durations in additive job_elapsed_seconds journal
+  fields with job success; retries clear only their own duration. Never invent
+  timing for legacy/interrupted jobs. Completion alerts use at most two adjacent
+  units (days/hours, hours/minutes, minutes/seconds), omitting smaller units.
   Preserve structured job failures and attempt counts across polls/restarts.
   Failure alerts use fixed reason labels/exit codes, not raw exception/script
   output. Read-only session-matched agent status may include identity-checked
@@ -61,6 +68,20 @@ A bounded HTTP status server runs inside the Guard container behind an authentic
   OMV snapraid_status_timeout_seconds is an integer from 10 to 600. Preserve a
   bounded partial report on timeout and distinguish launch/output errors without
   sending private exception text. Never bypass an active hold to install an upgrade.
+- The independent `watch-array` command, `tests/test_array_watch.py`, and OMV
+  `/etc/cron.d/torrent-guard-array-watch` check accessibility every 60 seconds.
+  Read [continuous array monitoring](docs/array-monitoring.md) before changing
+  inventory, probes, incident delivery, installer or uninstall behavior. Keep
+  its private journal/lock separate from maintenance so paused schedules and
+  running sync/scrub do not suppress observations. No watcher result controls
+  jobs, apps or maintenance holds. Preserve enrollment preflight, expected
+  mount UUID/target, kernel backing-device state and directory/device checks.
+  Fork probes have a 20-second deadline; a stuck child retains the inherited
+  flock to prevent worker accumulation. Never wait indefinitely for killed I/O.
+  Persist alert attempts before delivery; incomplete probes never claim recovery.
+  Master setup owns only its dedicated cron file, not OMV-generated cron files;
+  acquire the watch lock before bundle upgrades/removal. Legacy installers do
+  not add this schedule. No Guard privileges or extra credentials are needed.
 - torrent_guard_array.py, scripts/guarded_adapter.py, tests/test_array_checks.py,
   tests/test_guarded_adapter.py, tests/test_maintenance_array.py — read
   [array safety and SMART](docs/array-safety.md) before changing pre-sync gates,

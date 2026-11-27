@@ -7,6 +7,10 @@ OMV additionally needs Bash and `smartmontools` (`/usr/sbin/smartctl`); install 
 missing package through your normal OMV/Debian administration before rerunning
 setup. The installer does not install packages or run sync/scrub during setup.
 
+Continuous checks run separately every 60 seconds, including while sync/scrub
+is paused. See [array accessibility monitoring](array-monitoring.md) for outage
+and recovery alerts, independent scheduling, deadlines and private state.
+
 ## Before sync
 
 After the Docker host acknowledges that Sonarr/Radarr are stopped and NFS writes

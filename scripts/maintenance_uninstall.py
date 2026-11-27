@@ -25,6 +25,8 @@ else:
     from install_prompts import ask_with_help
     from maintenance_install import ARRAY_HELPER, HELPER, USER, InstallError, Installer, Paths
 
+from torrent_guard_array import WATCH_CRON, WATCH_DIRECTORY, WATCH_SCHEDULE
+
 
 class Uninstaller:
     """Plan explicit removals, preserving unrelated state and unexpected files."""
@@ -230,6 +232,15 @@ class Uninstaller:
                         raise InstallError("Dedicated sudo file contains unrelated rules; left unchanged")
             self.add_file(sudo_file)
         else:
+            watch_cron = self.paths.path(WATCH_CRON)
+            if self.details(watch_cron) is not None:
+                if self.contents(watch_cron) != WATCH_SCHEDULE.encode():
+                    raise InstallError('Array monitor cron file differs; preserve it for review')
+                self.add_file(watch_cron)
+            watch_private = self.paths.path(str(WATCH_DIRECTORY))
+            self.directory(watch_private, {'state.json', 'lock'})
+            self.add_file(watch_private / 'state.json')
+            self.add_file(watch_private / 'lock')
             config = self.paths.config
             data = self.json_data(config)
             key, pins = self.paths.key, self.paths.hosts
@@ -272,7 +283,8 @@ class Uninstaller:
     def locks(self, journals: list[Path]):
         """Hold existing journal locks throughout final checks and deletion."""
         with ExitStack() as stack:
-            for path in journals:
+            watch = self.paths.path(str(WATCH_DIRECTORY)) / 'state.json'
+            for path in journals + [watch]:
                 lock = path.parent / "lock"
                 if self.details(lock) is None:
                     continue
@@ -292,7 +304,8 @@ class Uninstaller:
         self.idle(marker, journals)
         # Revoke the dedicated entry point before removing its configuration.
         first = self.paths.path(HELPER)
-        ordered = sorted(self.files, key=lambda path: (path != first, str(path)))
+        watch_cron = self.paths.path(WATCH_CRON)
+        ordered = sorted(self.files, key=lambda path: (path != watch_cron, path != first, str(path)))
         for path in ordered:
             details = self.details(path)
             if details is None:

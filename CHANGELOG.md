@@ -3,6 +3,35 @@
 Release dates use MM.DD.YYYY. Historical entries were migrated from the release
 notes recorded in Git. Versions through 0.7 were prepared on 10.20.2026.
 
+## 2.12 - 11.26.2026
+
+### Added
+
+- Independent OMV array accessibility checks every 60 seconds, including data
+  and parity filesystems, missing/offline devices, mount identity, read-only
+  filesystems and readable directories. Monitoring continues while sync/scrub
+  scheduling is paused or jobs are running.
+- Durable high-priority outage/monitoring alerts and normal recovery alerts using
+  the existing Pushover keys, with one attempt per incident and bounded batches.
+- Master installer setup and maintenance-only removal for the independent
+  monitor schedule and private state; existing SMART history remains intact.
+- Sync and scrub completion alerts show each job's elapsed execution time using
+  the two largest adjacent time units; completed timings survive coordinator restarts.
+
+### Changed
+
+- Omit the SnapRAID scrub-age chart from Pushover status summaries; begin the
+  status text at “The oldest block was scrubbed…” when that line is available.
+- Remove the redundant date/time header from every Pushover notification,
+  preserving the remaining message text, including failure session identifiers.
+
+### Fixed
+
+- Isolate disk observations behind a 20-second deadline and independent lock;
+  unknown/failed observations retain outages, and stuck workers cannot accumulate.
+- Keep notification delivery, status collection and restoration delays out of
+  reported job times; retries replace their own timing without losing completed jobs.
+
 ## 2.11 - 11.23.2026
 
 ### Added
